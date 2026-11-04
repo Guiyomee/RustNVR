@@ -1,0 +1,32 @@
+# RustNVR configuration in Docker (copied to /config/config.toml at the first
+# start). All options: config.example.toml in the repository.
+#
+# Cameras, storage destinations, MQTT and AI can be set in the web interface:
+# they are saved next to this file (/config/*.ui.toml).
+
+[storage]
+recordings_dir = "/data/recordings"
+# Database, thumbnails, H.264 copies, exports.
+data_dir = "/data/rustnvr"
+
+[web]
+listen = "0.0.0.0:8080"
+static_dir = "/usr/share/rustnvr/web"
+# Required to listen on the network: the password comes from the environment
+# (RUSTNVR_WEB_PASSWORD in compose.yaml / .env).
+username = "admin"
+password_env = "RUSTNVR_WEB_PASSWORD"
+# HTTPS with a self-signed certificate made at the first start, for this
+# machine's address (https://<machine>:8080; http:// is redirected). Browsers
+# warn once: compare the fingerprint they show with the one in the log
+# (« HTTPS enabled »). Other names (VPN address, DNS name):
+# tls_names = ["10.8.0.1", "nvr.maison.lan"]
+# A real certificate instead: tls_cert = "/config/cert.pem" and
+# tls_key = "/config/key.pem", without tls_self_signed.
+tls_self_signed = true
+
+# Built-in object recognition: download yolox_nano.onnx into the config
+# volume, then choose it in Paramètres → Intelligence artificielle, or here:
+# [ai]
+# provider = { type = "onnx", model = "/config/yolox_nano.onnx" }
+# labels = ["person"]

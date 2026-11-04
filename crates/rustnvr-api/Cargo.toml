@@ -1,0 +1,49 @@
+[package]
+name = "rustnvr-api"
+description = "RustNVR HTTP API (REST /api/v1 + WebSocket) and static web interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum = { version = "0.8.9", features = ["ws"] }
+argon2 = "0.6.0"
+sha2 = "0.11.1"
+getrandom = "0.3"
+hyper = "1"
+hyper-util = { version = "0.1.21", features = ["server", "server-auto", "service", "tokio", "http1", "http2"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["pem", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+base64.workspace = true
+bytes.workspace = true
+jiff.workspace = true
+rustnvr-core.workspace = true
+rustnvr-discovery.workspace = true
+rustnvr-motion.workspace = true
+rustnvr-recorder.workspace = true
+rustnvr-remote.workspace = true
+rustnvr-storage.workspace = true
+rustnvr-stream.workspace = true
+rustnvr-webrtc.workspace = true
+serde.workspace = true
+serde_json = "1.0"
+tokio = { workspace = true, features = ["process"] }
+tokio-util.workspace = true
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7.1", features = ["fs", "set-header"] }
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.6", features = ["fs"] }
+
+[dev-dependencies]
+futures.workspace = true
+http-body-util = "0.1"
+rustnvr-testkit.workspace = true
+tokio-tungstenite = "0.29"
+tempfile.workspace = true
+
+[lints]
+workspace = true

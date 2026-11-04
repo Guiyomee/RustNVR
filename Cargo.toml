@@ -1,0 +1,71 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rustnvr-core",
+    "crates/rustnvr-api",
+    "crates/rustnvr-stream",
+    "crates/rustnvr-recorder",
+    "crates/rustnvr-app",
+    "crates/rustnvr-testkit",
+    "crates/rustnvr-storage",
+    "crates/rustnvr-motion",
+    "crates/rustnvr-mqtt",
+    "crates/rustnvr-remote",
+    "crates/rustnvr-webrtc",
+    "crates/rustnvr-ai",
+    "crates/rustnvr-discovery",
+]
+
+[workspace.package]
+# Calendar versions: year.month.number of the release in the month. Cargo
+# forbids leading zeros: 2026.11.1 here, published as v2026.11.01 (RustNVR's
+# update check reads both the same).
+version = "2026.11.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+rustnvr-api = { path = "crates/rustnvr-api" }
+rustnvr-core = { path = "crates/rustnvr-core" }
+rustnvr-stream = { path = "crates/rustnvr-stream" }
+rustnvr-recorder = { path = "crates/rustnvr-recorder" }
+rustnvr-testkit = { path = "crates/rustnvr-testkit" }
+rustnvr-storage = { path = "crates/rustnvr-storage" }
+rustnvr-motion = { path = "crates/rustnvr-motion" }
+rustnvr-mqtt = { path = "crates/rustnvr-mqtt" }
+rustnvr-remote = { path = "crates/rustnvr-remote" }
+rustnvr-webrtc = { path = "crates/rustnvr-webrtc" }
+rustnvr-ai = { path = "crates/rustnvr-ai" }
+rustnvr-discovery = { path = "crates/rustnvr-discovery" }
+
+anyhow = "1.0.104"
+base64 = "0.22"
+bytes = "1.12"
+clap = { version = "4.6", features = ["derive"] }
+futures = "0.3.34"
+jiff = "0.2"
+retina = "0.4.21"
+serde = { version = "1.0", features = ["derive"] }
+tempfile = "3"
+thiserror = "2.0"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }
+tokio-util = "0.7.20"
+toml = "1.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+url = "2.5"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

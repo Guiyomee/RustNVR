@@ -1,0 +1,20 @@
+# Example of the settings of your own machine, kept out of compose.yaml.
+# Copy it to compose.override.yaml (merged automatically by
+# `docker compose up -d`), keep the lines you need, adapt the paths.
+# Lists (volumes, devices…) are added to those of compose.yaml.
+services:
+  rustnvr:
+    volumes:
+      # A NAS folder mounted on the host, owned by uid 1000, declared then
+      # as a destination in Paramètres → Stockage with the path /nas.
+      - /mnt/nas/rustnvr:/nas
+    # An Intel or AMD graphics card, with the group owning it on the host
+    # (`stat -c '%g %G' /dev/dri/renderD128`).
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "992"
+    # An NVIDIA card instead (nvidia-container-toolkit on the host):
+    # gpus: all
+    # environment:
+    #   NVIDIA_DRIVER_CAPABILITIES: compute,video,utility

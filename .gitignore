@@ -1,0 +1,14 @@
+/target
+/recordings
+*.mp4.part
+/web/node_modules
+/web/dist
+
+# Local configuration: camera, MQTT and storage passwords. Never committed.
+/config.toml
+*.ui.toml
+*.ui.toml.tmp
+.env
+/docker-data
+# Settings of one machine (NAS folder, graphics card), merged with compose.yaml.
+compose.override.yaml

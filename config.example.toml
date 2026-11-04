@@ -1,0 +1,212 @@
+# RustNVR configuration example. Copy to config.toml and adapt.
+# Validate with: rustnvr check-config -c config.toml
+# Unknown keys are rejected so that typos are caught at startup.
+
+[storage]
+# Root of recordings: <recordings_dir>/<camera>/<YYYY-MM-DD>/<start>.mp4 (UTC).
+# This is the "local" storage destination. The database and event thumbnails
+# go to data_dir (default: <recordings_dir>/.rustnvr).
+recordings_dir = "/var/lib/rustnvr/recordings"
+# Retention of the local disk (optional; none = keep everything). Checked every
+# 10 minutes, oldest finished segments deleted first. Also editable in the web
+# interface (Settings > Storage, saved in storage.ui.toml, which then wins).
+retention_days = 30
+# max_size_gb = 500
+# Free space kept on the local disk (GB): the oldest recordings are deleted
+# when it drops below (checked every minute and after any write error).
+# min_free_gb = 20
+# Destinations above this usage are reported short of space (interface, MQTT).
+low_space_percent = 90
+# Destination of cameras whose recording is enabled without choosing one (also
+# settable in Settings > Storage, « Utiliser par défaut »).
+default_destination = "local"
+
+# Other destinations: directories on network shares (NAS over SMB/CIFS or NFS)
+# mounted in the system, written directly like a local disk. Mount them with
+# "soft" semantics so that a lost NAS returns errors instead of hanging.
+# Destinations can also be added from the web interface.
+# [[storage.destinations]]
+# id = "nas"
+# name = "NAS salon"
+# path = "/mnt/nas/rustnvr"
+# # Only write when path is on another filesystem than / (an unmounted share
+# # leaves an empty directory on the system disk). false for a second disk.
+# require_mount = true
+# retention_days = 90
+# max_size_gb = 2000
+# min_free_gb = 50
+
+# Remote destinations (S3 or SFTP): segments are written to `path` (the local
+# outbox), then uploaded one by one and deleted once sent.
+# [[storage.destinations]]
+# id = "cloud"
+# path = "/var/lib/rustnvr/outbox/cloud"
+# [storage.destinations.remote]
+# type = "s3"
+# endpoint = "https://s3.eu-central-003.backblazeb2.com"   # omit for Amazon S3
+# region = "eu-central-003"
+# bucket = "mes-cameras"
+# prefix = "rustnvr"
+# access_key_id = "…"
+# secret_access_key_env = "RUSTNVR_S3_SECRET"
+#
+# [[storage.destinations]]
+# id = "serveur"
+# path = "/var/lib/rustnvr/outbox/serveur"
+# [storage.destinations.remote]
+# type = "sftp"
+# host = "192.168.1.30"
+# port = 22
+# username = "rustnvr"
+# private_key = "/home/rustnvr/.ssh/id_ed25519"   # or password_env = "…"
+# remote_dir = "videos/rustnvr"
+# host_key = "SHA256:…"   # optional: else kept from the first connection
+
+[recording]
+# Target segment length; segments are cut on the first key frame after it.
+segment_seconds = 60
+# Target fragment length. A crash loses at most about twice this value
+# (fragments are aligned on key frames when the GOP allows it).
+fragment_millis = 1000
+# Frames buffered between ingestion and the recorder before frames are dropped.
+queue_frames = 256
+# A timestamp jump larger than this starts a new segment.
+max_timestamp_jump_seconds = 10
+# Delay before retrying after a write error (disk full...); doubles up to 16x.
+retry_after_error_seconds = 5
+# Recording "on motion" (record.mode = "motion"): video kept before each event
+# (from the previous key frame) and after it.
+pre_roll_seconds = 5
+post_roll_seconds = 5
+
+[reconnect]
+initial_millis = 1000
+max_seconds = 30
+# A session lasting this long resets the backoff.
+stable_after_seconds = 30
+
+[metrics]
+# Per-camera and process metrics in the logs; 0 disables.
+log_interval_seconds = 60
+
+[live]
+# Live view: the camera stream is forwarded unchanged when the browser can
+# decode it. Otherwise (typically H.265 in Firefox) the browser asks for an
+# H.264 conversion done by FFmpeg (must be installed): only while someone
+# watches, one per camera stream, recording untouched.
+transcode = true
+ffmpeg = "ffmpeg"
+max_bitrate_kbps = 2000
+# H.264 conversions (live, playback in a browser without H.265, exports) on
+# the graphics card through VAAPI (Intel Quick Sync, AMD): "auto" uses a card
+# usable by RustNVR (/dev/dri/renderD…) once a test conversion succeeded at
+# startup, the processor otherwise (no card, failed test); "off": always the
+# processor.
+hwaccel = "auto"
+
+[motion]
+# Motion detection is enabled camera by camera in the web interface (camera
+# page, "Détection" tab; settings stored in the database). These values are
+# shared. FFmpeg (live.ffmpeg) decodes the sub stream (or main stream) into
+# small grey pictures.
+fps = 5                       # pictures analysed per second
+width = 320                   # width of the analysed picture
+post_seconds = 10             # an event ends after this long without motion
+max_event_seconds = 600       # longer events are split
+events_retention_days = 30    # older events and their thumbnails are deleted
+
+[mqtt]
+# MQTT client with Home Assistant discovery (see docs/MQTT.md). Also editable
+# in the web interface (Settings > MQTT), saved in mqtt.ui.toml which then
+# replaces this section.
+enabled = false
+host = "192.168.1.10"
+port = 1883                   # 8883 with TLS
+# tls = true                  # broker certificate checked against the system authorities,
+# ca_file = "/etc/rustnvr/mqtt-ca.crt"   # or this CA file (self-signed broker)
+# username = "rustnvr"
+# password_env = "RUSTNVR_MQTT_PASSWORD"
+client_id = "rustnvr"
+topic_prefix = "rustnvr"
+discovery = true
+discovery_prefix = "homeassistant"
+
+[ai]
+# Optional object recognition on the picture of each motion event. Disabled
+# by default: RustNVR ships no model. Needs motion detection (FFmpeg). The
+# provider is either the HTTP API of DeepStack / CodeProject.AI Server
+# (POST <url>/v1/vision/detection), installed separately, or a model run by
+# RustNVR itself (onnx).
+# provider = { type = "deepstack_http", url = "http://127.0.0.1:32168" }
+# provider = { type = "deepstack_http", url = "http://127.0.0.1:5000", api_key_env = "RUSTNVR_AI_KEY" }
+# Built-in recognition (no other program): a YOLOX ONNX model you download,
+# e.g. yolox_nano.onnx (Apache-2.0) from the YOLOX releases on GitHub.
+# provider = { type = "onnx", model = "/var/lib/rustnvr/yolox_nano.onnx" }
+min_score = 0.5               # objects below this confidence are ignored
+labels = []                   # keep only these labels, e.g. ["person", "car"]; empty: all
+timeout_seconds = 10
+# Pictures analysed per event: the first 1 s after the start, then one every
+# interval_seconds while the motion lasts and nothing is recognized.
+max_pictures = 5
+interval_seconds = 3
+
+# New versions: the latest release published on a Git forge (Gitea, Forgejo
+# or GitHub) is compared with this version, shown in the interface (À propos,
+# banner). Nothing is downloaded nor installed. Also editable in the
+# interface (saved in updates.ui.toml, which then wins). Default: no check.
+# [updates]
+# repository = "https://gitea.example.org/owner/RustNVR"
+# token_env = "RUSTNVR_UPDATES_TOKEN"   # private repository only
+
+# Webhooks: HTTP POST (JSON, picture in base64) on motion, recognized objects
+# and end of events. Also editable in the interface (webhooks.ui.toml wins).
+# [[webhooks]]
+# name = "n8n"
+# url = "https://n8n.example.org/webhook/abc"
+# cameras = []                       # empty: all
+# objects = ["person"]               # empty: every event
+# events = ["motion", "objects"]     # and "end"
+# image = true
+
+[web]
+# Web interface and API (http://<listen>/). Loopback by default.
+enabled = true
+listen = "127.0.0.1:8080"
+# Built interface (cd web && npm ci && npm run build).
+static_dir = "web/dist"
+# HTTP Basic authentication. Strongly recommended; required to listen on a
+# network address unless allow_unauthenticated_remote = true.
+# HTTPS: your certificate (PEM files)...
+# tls_cert = "/etc/rustnvr/fullchain.pem"
+# tls_key = "/etc/rustnvr/privkey.pem"
+# ...or a self-signed one generated in <data_dir>/tls (browsers warn once; its
+# SHA-256 fingerprint is logged at startup to compare with the browser). It
+# covers localhost, the host name, this machine's network address and
+# tls_names; it is made again when a name is added. Plain http:// requests to
+# the port are redirected to https://.
+# tls_self_signed = true
+# tls_names = ["10.8.0.1", "nvr.maison.lan"]
+# Basic sends the password in clear text: put an HTTPS reverse proxy in front.
+username = "admin"
+password_env = "RUSTNVR_WEB_PASSWORD"
+
+[[cameras]]
+id = "entree"                 # [a-z0-9_-], used in paths (and future MQTT topics)
+name = "Porte d'entrée"
+main = { url = "rtsp://192.168.1.20:554/Streaming/Channels/101", username = "admin", password_env = "RUSTNVR_ENTREE_PASSWORD" }
+# Low resolution stream: used for the live view (lighter); never recorded.
+sub = { url = "rtsp://192.168.1.20:554/Streaming/Channels/102", username = "admin", password_env = "RUSTNVR_ENTREE_PASSWORD" }
+
+[[cameras]]
+id = "garage"
+enabled = false               # validated, not connected
+main = { url = "rtsp://192.168.1.21/stream1", username = "viewer", password = "change-me", transport = "tcp", connect_timeout_seconds = 10, stall_timeout_seconds = 10 }
+# Where to record: storage destination ids ("local" by default). A camera
+# recording only to a NAS falls back to the local disk while it is unavailable.
+# mode = "continuous" (default) or "motion": only around motion events (enable
+# motion detection for the camera in the web interface).
+record = { enabled = true, mode = "continuous", destinations = ["local"] }
+# Per-camera retention (optional), on top of each destination's own:
+# record = { enabled = true, destinations = ["local"], retention_days = 7, max_size_gb = 200 }
+# The sound (AAC cameras) is recorded with the video by default; to leave it out:
+# record = { enabled = true, audio = false }

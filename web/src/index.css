@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+/* RustNVR palette (see FRONTEND.md). Status colors are reserved for states. */
+@theme {
+  --color-bg: #111827;
+  --color-bg-2: #0b1220;
+  --color-card: #1f2937;
+  --color-line: #293548;
+  --color-accent: #3b82f6;
+  --color-ok: #22c55e;
+  --color-warn: #f59e0b;
+  --color-err: #ef4444;
+  --color-fg: #f9fafb;
+  --color-muted: #9ca3af;
+  /* Timeline "motion" series: a darker step of the warning hue, validated
+     against the card surface for color-vision deficiencies (see FRONTEND.md). */
+  --color-motion: #d97706;
+  /* Brand copper of the logo, for text: a lighter step than the mark's
+     #C8642B so that small text keeps 4.5:1 on the dark surfaces. */
+  --color-brand: #e08a4e;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --radius-card: 0.625rem;
+}
+
+/* Light theme (Paramètres → Général → Thème): the same names, other values.
+   Text colors are at least 4.5:1 on the cards (WCAG AA). */
+:root {
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-bg: #f3f4f6;
+  --color-bg-2: #ffffff;
+  --color-card: #ffffff;
+  --color-line: #d1d5db;
+  --color-accent: #2563eb;
+  --color-ok: #15803d;
+  --color-warn: #b45309;
+  --color-err: #dc2626;
+  --color-fg: #111827;
+  --color-muted: #4b5563;
+  --color-motion: #b45309;
+  --color-brand: #a9521f;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    font-family: var(--font-sans);
+    font-size: 14px;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-line);
+    border-radius: 999px;
+    border: 2px solid var(--color-bg);
+  }
+}
+
+@layer components {
+  .card {
+    background: var(--color-card);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-card);
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

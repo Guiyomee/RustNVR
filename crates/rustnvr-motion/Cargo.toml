@@ -1,0 +1,19 @@
+[package]
+name = "rustnvr-motion"
+description = "RustNVR motion detection: grey picture differencing on a decoded sub stream, zones, events, snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+rustnvr-core.workspace = true
+rustnvr-recorder.workspace = true
+rustnvr-stream.workspace = true
+tokio = { workspace = true, features = ["process"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

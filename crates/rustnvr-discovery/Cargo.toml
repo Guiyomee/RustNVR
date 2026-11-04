@@ -1,0 +1,26 @@
+[package]
+name = "rustnvr-discovery"
+description = "Finding cameras on the local network: ONVIF WS-Discovery, RTSP port scan, ONVIF stream addresses"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+futures.workspace = true
+getrandom = "0.3"
+jiff.workspace = true
+quick-xml = "0.41"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+rustnvr-core.workspace = true
+sha1 = "0.11"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "time", "io-util", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
+
+[lints]
+workspace = true

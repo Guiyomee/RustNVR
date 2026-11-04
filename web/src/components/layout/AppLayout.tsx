@@ -1,0 +1,99 @@
+import { CircleArrowUp, FlaskConical, RefreshCw, ShieldAlert, X } from 'lucide-react'
+import { useState, type ReactNode } from 'react'
+import { useData, useLive } from '../../data/DataContext'
+import { useStoredFlag } from '../../hooks/useUi'
+import { Link } from '../../lib/router'
+import { Sidebar } from './Sidebar'
+import { Topbar } from './Topbar'
+import { t } from '../../lib/i18n'
+
+function DemoBanner() {
+  const { setMode } = useData()
+  return (
+    <div role="status" className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 bg-warn px-4 py-1.5 text-center text-xs font-semibold text-bg-2">
+      <FlaskConical className="size-4" aria-hidden />
+      {t("MODE DÉMO — caméras, images et événements fictifs. Aucune donnée réelle n'est affichée.", "DEMO MODE — fictional cameras, pictures and events. No real data is shown.")}
+      <button type="button" className="underline underline-offset-2" onClick={() => setMode('live')}>
+        {t('Quitter le mode démo', 'Leave demo mode')}
+      </button>
+    </div>
+  )
+}
+
+function NoAuthBanner() {
+  const auth = useLive((s) => s.system?.auth_enabled)
+  if (auth !== false) return null
+  return (
+    <div role="alert" className="flex items-center justify-center gap-2 border-b border-warn/40 bg-warn/10 px-4 py-1.5 text-center text-xs text-warn">
+      <ShieldAlert className="size-4 shrink-0" aria-hidden />
+      {t("Interface accessible sans authentification. Configurez web.username et web.password_env avant de l'exposer au réseau.", "Interface reachable without authentication. Set web.username and web.password_env before exposing it to the network.")}
+    </div>
+  )
+}
+
+/** An update was installed while the server runs: the interface may already be the new one. */
+function RestartBanner() {
+  const needed = useLive((s) => s.system?.restart_needed)
+  if (!needed) return null
+  return (
+    <div role="alert" className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-b border-accent/40 bg-accent/10 px-4 py-1.5 text-center text-xs text-accent">
+      <RefreshCw className="size-4 shrink-0" aria-hidden />
+      {t("Une nouvelle version de RustNVR est installée : redémarrez le serveur pour l'utiliser (Ctrl+C puis", "A new version of RustNVR is installed: restart the server to use it (Ctrl+C then")}
+      <code className="font-mono">rustnvr run -c config.toml</code>{t(', ou ', ', or ')}<code className="font-mono">systemctl restart rustnvr</code>{t("). D'ici là, certaines fonctions de l'interface peuvent échouer.", "). Until then, some functions of the interface may fail.")}
+    </div>
+  )
+}
+
+const DISMISSED_UPDATE_KEY = 'rustnvr.update.dismissed'
+
+/** A newer version is published: once per version, until closed. */
+function UpdateBanner() {
+  const version = useLive((s) => s.system?.update_available ?? null)
+  const [dismissed, setDismissed] = useState(() => window.localStorage.getItem(DISMISSED_UPDATE_KEY))
+  if (!version || dismissed === version) return null
+  return (
+    <div role="status" className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-b border-warn/40 bg-warn/10 px-4 py-1.5 text-center text-xs text-warn">
+      <CircleArrowUp className="size-4 shrink-0" aria-hidden />
+      RustNVR {version}{t(' est disponible.', ' is available.')}
+      <Link to="/about" className="font-medium underline">
+        {t("Voir les nouveautés et comment mettre à jour", "See what's new and how to update")}
+      </Link>
+      <button
+        type="button"
+        aria-label={t('Masquer jusqu’à la prochaine version', 'Hide until the next version')}
+        title={t('Masquer jusqu’à la prochaine version', 'Hide until the next version')}
+        className="rounded p-0.5 hover:bg-warn/20"
+        onClick={() => {
+          window.localStorage.setItem(DISMISSED_UPDATE_KEY, version)
+          setDismissed(version)
+        }}
+      >
+        <X className="size-3.5" aria-hidden />
+      </button>
+    </div>
+  )
+}
+
+export function AppLayout({ children }: { children: ReactNode }) {
+  const { mode } = useData()
+  const [collapsed, setCollapsed] = useStoredFlag('rustnvr.sidebar.collapsed', false)
+  const [mobileOpen, setMobileOpen] = useState(false)
+  return (
+    <div className="flex min-h-screen">
+      <Sidebar collapsed={collapsed} onToggleCollapsed={() => setCollapsed(!collapsed)} mobileOpen={mobileOpen} onCloseMobile={() => setMobileOpen(false)} />
+      <div className="flex min-w-0 flex-1 flex-col">
+        {mode === 'demo' ? (
+          <DemoBanner />
+        ) : (
+          <>
+            <RestartBanner />
+            <UpdateBanner />
+            <NoAuthBanner />
+          </>
+        )}
+        <Topbar onOpenMenu={() => setMobileOpen(true)} />
+        <main className="mx-auto w-full max-w-[1920px] flex-1 p-4 lg:p-6">{children}</main>
+      </div>
+    </div>
+  )
+}

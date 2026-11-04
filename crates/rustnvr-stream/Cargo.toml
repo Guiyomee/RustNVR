@@ -1,0 +1,24 @@
+[package]
+name = "rustnvr-stream"
+description = "RustNVR RTSP ingestion: Retina sessions, per-stream supervision, bounded fan-out"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+futures.workspace = true
+retina.workspace = true
+rustnvr-core.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rustnvr-testkit.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true

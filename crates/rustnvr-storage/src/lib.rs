@@ -1,0 +1,984 @@
+//! RustNVR database (SQLite, WAL): detection events and per-camera motion
+//! detection settings, plus the event thumbnails stored next to it.
+//!
+//! Recordings are not indexed here (yet): they are found by scanning the
+//! recording directories.
+//!
+//! Layout of the data directory:
+//! - `rustnvr.db` (+ `-wal`, `-shm`): the database;
+//! - `thumbnails/<camera>/<event id>.jpg`: event thumbnails.
+
+use rustnvr_core::{CameraId, DetectedObject, DetectionEvent, EventKind, MotionSettings};
+use sqlx::Row as _;
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteRow,
+    SqliteSynchronous,
+};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// Database errors.
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    /// SQLite error.
+    #[error("database: {0}")]
+    Sqlx(#[from] sqlx::Error),
+    /// Schema migration error.
+    #[error("database migration: {0}")]
+    Migrate(#[from] sqlx::migrate::MigrateError),
+    /// File system error (data directory, thumbnails).
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+    /// Stored JSON that cannot be read back.
+    #[error("database: invalid stored value: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+/// Most events returned by one query.
+pub const MAX_EVENTS_PER_QUERY: u32 = 1000;
+
+/// Filter of [`Database::events`].
+#[derive(Clone, Debug, Default)]
+pub struct EventFilter {
+    /// Only this camera.
+    pub camera: Option<CameraId>,
+    /// Events overlapping `[from_ms, to_ms)`.
+    pub from_ms: i64,
+    /// See `from_ms`.
+    pub to_ms: i64,
+    /// Most events returned (newest first), capped at [`MAX_EVENTS_PER_QUERY`].
+    pub limit: u32,
+}
+
+/// A finished recording segment in the index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentRecord {
+    /// Storage destination (`local`, …).
+    pub destination: String,
+    /// Camera identifier.
+    pub camera: String,
+    /// `YYYY-MM-DD` directory.
+    pub day: String,
+    /// File name.
+    pub file: String,
+    /// First frame (ms since the Unix epoch).
+    pub start_ms: i64,
+    /// End of the last frame.
+    pub end_ms: i64,
+    /// File size.
+    pub bytes: u64,
+}
+
+fn segment_from_row(r: &SqliteRow) -> Result<SegmentRecord, DbError> {
+    let bytes: i64 = r.try_get("bytes")?;
+    Ok(SegmentRecord {
+        destination: r.try_get("destination")?,
+        camera: r.try_get("camera")?,
+        day: r.try_get("day")?,
+        file: r.try_get("file")?,
+        start_ms: r.try_get("start_ms")?,
+        end_ms: r.try_get("end_ms")?,
+        bytes: u64::try_from(bytes).unwrap_or(0),
+    })
+}
+
+/// A period of recordings kept whatever the retention.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedRange {
+    /// Identifier.
+    pub id: i64,
+    /// Camera identifier.
+    pub camera: String,
+    /// Start (ms since the Unix epoch).
+    pub start_ms: i64,
+    /// End (ms since the Unix epoch).
+    pub end_ms: i64,
+    /// Why it is kept, as typed by the user.
+    pub note: String,
+    /// When it was protected.
+    pub created_ms: i64,
+}
+
+fn protected_from_row(r: &SqliteRow) -> Result<ProtectedRange, DbError> {
+    Ok(ProtectedRange {
+        id: r.try_get("id")?,
+        camera: r.try_get("camera")?,
+        start_ms: r.try_get("start_ms")?,
+        end_ms: r.try_get("end_ms")?,
+        note: r.try_get("note")?,
+        created_ms: r.try_get("created_ms")?,
+    })
+}
+
+/// An account (never its password).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserRecord {
+    /// Login name.
+    pub username: String,
+    /// `admin` or `viewer`.
+    pub role: String,
+    /// Creation time (ms since the Unix epoch).
+    pub created_ms: i64,
+}
+
+/// The database and the thumbnails directory.
+#[derive(Clone)]
+pub struct Database {
+    pool: SqlitePool,
+    thumbnails: PathBuf,
+}
+
+fn event_from_row(row: &SqliteRow) -> Result<DetectionEvent, DbError> {
+    let camera: String = row.try_get("camera")?;
+    let zones: String = row.try_get("zones")?;
+    let thumbnail: Option<String> = row.try_get("thumbnail")?;
+    let score: f64 = row.try_get("score")?;
+    let objects: String = row.try_get("objects")?;
+    Ok(DetectionEvent {
+        id: row.try_get("id")?,
+        // Identifiers were validated when the event was written.
+        camera: CameraId::new(camera).map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
+        kind: EventKind::Motion,
+        start_ms: row.try_get("start_ms")?,
+        end_ms: row.try_get("end_ms")?,
+        score: score as f32,
+        zones: serde_json::from_str(&zones)?,
+        has_thumbnail: thumbnail.is_some(),
+        objects: serde_json::from_str(&objects)?,
+    })
+}
+
+impl Database {
+    /// Opens (creating it if needed) the database in `dir`, applies pending
+    /// migrations and closes events left open by a crash.
+    pub async fn open(dir: &Path) -> Result<Self, DbError> {
+        std::fs::create_dir_all(dir)?;
+        let options = SqliteConnectOptions::new()
+            .filename(dir.join("rustnvr.db"))
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            // WAL + NORMAL: durable except for the last transactions on power loss.
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(5));
+        // SQLite serializes writes; a few connections are enough for reads.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await?;
+        sqlx::migrate!("./migrations").run(&pool).await?;
+        let db = Self {
+            pool,
+            thumbnails: dir.join("thumbnails"),
+        };
+        let closed = sqlx::query("UPDATE events SET end_ms = start_ms WHERE end_ms IS NULL")
+            .execute(&db.pool)
+            .await?
+            .rows_affected();
+        if closed > 0 {
+            tracing::info!(
+                events = closed,
+                "closed events left open by an interruption"
+            );
+        }
+        Ok(db)
+    }
+
+    /// Records the start of an event and returns it with its identifier.
+    pub async fn start_event(
+        &self,
+        camera: &CameraId,
+        kind: EventKind,
+        start_ms: i64,
+        score: f32,
+        zones: &[String],
+    ) -> Result<DetectionEvent, DbError> {
+        let id = sqlx::query(
+            "INSERT INTO events (camera, kind, start_ms, score, zones) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(camera.as_str())
+        .bind(kind.as_str())
+        .bind(start_ms)
+        .bind(f64::from(score))
+        .bind(serde_json::to_string(zones)?)
+        .execute(&self.pool)
+        .await?
+        .last_insert_rowid();
+        Ok(DetectionEvent {
+            id,
+            camera: camera.clone(),
+            kind,
+            start_ms,
+            end_ms: None,
+            score,
+            zones: zones.to_vec(),
+            has_thumbnail: false,
+            objects: Vec::new(),
+        })
+    }
+
+    /// Stores the objects recognized in the thumbnail of event `id`.
+    pub async fn set_objects(&self, id: i64, objects: &[DetectedObject]) -> Result<(), DbError> {
+        sqlx::query("UPDATE events SET objects = ? WHERE id = ?")
+            .bind(serde_json::to_string(objects)?)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Updates the end (or `None` while ongoing), score and zones of an event.
+    pub async fn update_event(&self, event: &DetectionEvent) -> Result<(), DbError> {
+        sqlx::query("UPDATE events SET end_ms = ?, score = ?, zones = ? WHERE id = ?")
+            .bind(event.end_ms)
+            .bind(f64::from(event.score))
+            .bind(serde_json::to_string(&event.zones)?)
+            .bind(event.id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Stores the thumbnail of an event (JPEG).
+    pub async fn set_thumbnail(&self, event: &DetectionEvent, jpeg: &[u8]) -> Result<(), DbError> {
+        let dir = self.thumbnails.join(event.camera.as_str());
+        let name = format!("{}.jpg", event.id);
+        let jpeg = jpeg.to_vec();
+        let path = dir.join(&name);
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(path, jpeg)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        sqlx::query("UPDATE events SET thumbnail = ? WHERE id = ?")
+            .bind(format!("{}/{name}", event.camera.as_str()))
+            .bind(event.id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// One event.
+    pub async fn event(&self, id: i64) -> Result<Option<DetectionEvent>, DbError> {
+        sqlx::query("SELECT * FROM events WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|r| event_from_row(&r))
+            .transpose()
+    }
+
+    /// Path of the thumbnail of an event, if it has one.
+    pub async fn thumbnail_path(&self, id: i64) -> Result<Option<PathBuf>, DbError> {
+        let name: Option<Option<String>> =
+            sqlx::query_scalar("SELECT thumbnail FROM events WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(name.flatten().map(|n| self.thumbnails.join(n)))
+    }
+
+    /// Events overlapping the filter's period, newest first.
+    pub async fn events(&self, f: &EventFilter) -> Result<Vec<DetectionEvent>, DbError> {
+        let limit = f.limit.clamp(1, MAX_EVENTS_PER_QUERY);
+        // An ongoing event (end_ms NULL) overlaps any period after its start.
+        let rows = sqlx::query(
+            "SELECT * FROM events \
+             WHERE (?1 IS NULL OR camera = ?1) AND start_ms < ?3 AND COALESCE(end_ms, ?3) >= ?2 \
+             ORDER BY start_ms DESC LIMIT ?4",
+        )
+        .bind(f.camera.as_ref().map(CameraId::as_str))
+        .bind(f.from_ms)
+        .bind(f.to_ms)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(event_from_row).collect()
+    }
+
+    /// Deletes the events that started before `before_ms`, with their
+    /// thumbnails; returns how many were deleted.
+    pub async fn delete_events_before(&self, before_ms: i64) -> Result<u64, DbError> {
+        let thumbnails: Vec<String> = sqlx::query_scalar(
+            "SELECT thumbnail FROM events \
+             WHERE start_ms < ? AND end_ms IS NOT NULL AND thumbnail IS NOT NULL",
+        )
+        .bind(before_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        let deleted = sqlx::query("DELETE FROM events WHERE start_ms < ? AND end_ms IS NOT NULL")
+            .bind(before_ms)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        let root = self.thumbnails.clone();
+        tokio::task::spawn_blocking(move || {
+            for t in thumbnails {
+                let _ = std::fs::remove_file(root.join(t));
+            }
+        })
+        .await
+        .map_err(std::io::Error::other)?;
+        Ok(deleted)
+    }
+
+    /// Motion detection settings of every camera that has some.
+    pub async fn motion_settings(&self) -> Result<HashMap<String, MotionSettings>, DbError> {
+        let rows = sqlx::query("SELECT camera, settings FROM motion_settings")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = HashMap::new();
+        for r in rows {
+            let settings: String = r.try_get("settings")?;
+            out.insert(r.try_get("camera")?, serde_json::from_str(&settings)?);
+        }
+        Ok(out)
+    }
+
+    /// Stores the motion detection settings of a camera.
+    pub async fn set_motion_settings(
+        &self,
+        camera: &CameraId,
+        settings: &MotionSettings,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO motion_settings (camera, settings) VALUES (?, ?) \
+             ON CONFLICT (camera) DO UPDATE SET settings = excluded.settings",
+        )
+        .bind(camera.as_str())
+        .bind(serde_json::to_string(settings)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Forgets the motion detection settings of a removed camera.
+    pub async fn delete_motion_settings(&self, camera: &CameraId) -> Result<(), DbError> {
+        sqlx::query("DELETE FROM motion_settings WHERE camera = ?")
+            .bind(camera.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Every account, by name.
+    pub async fn users(&self) -> Result<Vec<UserRecord>, DbError> {
+        let rows = sqlx::query("SELECT username, role, created_ms FROM users ORDER BY username")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(UserRecord {
+                    username: r.try_get("username")?,
+                    role: r.try_get("role")?,
+                    created_ms: r.try_get("created_ms")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Password hash and role of an account.
+    pub async fn user_secret(&self, username: &str) -> Result<Option<(String, String)>, DbError> {
+        let row = sqlx::query("SELECT password_hash, role FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|r| Ok((r.try_get("password_hash")?, r.try_get("role")?)))
+            .transpose()
+    }
+
+    /// Creates an account; false if the name is taken.
+    pub async fn create_user(
+        &self,
+        username: &str,
+        password_hash: &str,
+        role: &str,
+        now_ms: i64,
+    ) -> Result<bool, DbError> {
+        let done = sqlx::query(
+            "INSERT INTO users (username, password_hash, role, created_ms) VALUES (?, ?, ?, ?) \n             ON CONFLICT (username) DO NOTHING",
+        )
+        .bind(username)
+        .bind(password_hash)
+        .bind(role)
+        .bind(now_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Changes the password and/or role of an account; false if it does not exist.
+    pub async fn update_user(
+        &self,
+        username: &str,
+        password_hash: Option<&str>,
+        role: Option<&str>,
+    ) -> Result<bool, DbError> {
+        let done = sqlx::query(
+            "UPDATE users SET password_hash = COALESCE(?, password_hash), role = COALESCE(?, role) \n             WHERE username = ?",
+        )
+        .bind(password_hash)
+        .bind(role)
+        .bind(username)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Deletes an account and its sessions; false if it did not exist.
+    pub async fn delete_user(&self, username: &str) -> Result<bool, DbError> {
+        self.delete_sessions_of(username).await?;
+        let done = sqlx::query("DELETE FROM users WHERE username = ?")
+            .bind(username)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Records a login session.
+    pub async fn create_session(
+        &self,
+        token_hash: &str,
+        username: &str,
+        now_ms: i64,
+        expires_ms: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO sessions (token_hash, username, created_ms, expires_ms) VALUES (?, ?, ?, ?)",
+        )
+        .bind(token_hash)
+        .bind(username)
+        .bind(now_ms)
+        .bind(expires_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Account and role of a valid session.
+    pub async fn session_user(
+        &self,
+        token_hash: &str,
+        now_ms: i64,
+    ) -> Result<Option<(String, String)>, DbError> {
+        let row = sqlx::query(
+            "SELECT u.username, u.role FROM sessions s JOIN users u ON u.username = s.username \n             WHERE s.token_hash = ? AND s.expires_ms > ?",
+        )
+        .bind(token_hash)
+        .bind(now_ms)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| Ok((r.try_get("username")?, r.try_get("role")?)))
+            .transpose()
+    }
+
+    /// Ends a session.
+    pub async fn delete_session(&self, token_hash: &str) -> Result<(), DbError> {
+        sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+            .bind(token_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Ends every session of an account (password changed, account removed).
+    pub async fn delete_sessions_of(&self, username: &str) -> Result<(), DbError> {
+        sqlx::query("DELETE FROM sessions WHERE username = ?")
+            .bind(username)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Forgets expired sessions.
+    pub async fn purge_sessions(&self, now_ms: i64) -> Result<u64, DbError> {
+        Ok(sqlx::query("DELETE FROM sessions WHERE expires_ms <= ?")
+            .bind(now_ms)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
+    /// Camera, start and recognized object labels of every event started in
+    /// `[from_ms, to_ms)`, for statistics (no thumbnails nor zones).
+    pub async fn event_summaries(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<(String, i64, Vec<String>)>, DbError> {
+        let rows = sqlx::query(
+            "SELECT camera, start_ms, objects FROM events WHERE start_ms >= ? AND start_ms < ?",
+        )
+        .bind(from_ms)
+        .bind(to_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                let objects: String = r.try_get("objects")?;
+                let mut labels: Vec<String> = serde_json::from_str::<Vec<DetectedObject>>(&objects)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|o| o.label)
+                    .collect();
+                labels.sort_unstable();
+                labels.dedup();
+                Ok((r.try_get("camera")?, r.try_get("start_ms")?, labels))
+            })
+            .collect()
+    }
+
+    /// Records a crossing of line `line` of `camera`.
+    pub async fn add_crossing(
+        &self,
+        camera: &str,
+        line: &str,
+        forward: bool,
+        at_ms: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query("INSERT INTO crossings (camera, line, forward, at_ms) VALUES (?, ?, ?, ?)")
+            .bind(camera)
+            .bind(line)
+            .bind(forward)
+            .bind(at_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Crossings in `[from_ms, to_ms)`: camera, line, forward, time.
+    pub async fn crossings(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<(String, String, bool, i64)>, DbError> {
+        sqlx::query(
+            "SELECT camera, line, forward, at_ms FROM crossings WHERE at_ms >= ? AND at_ms < ? ORDER BY at_ms",
+        )
+        .bind(from_ms)
+        .bind(to_ms)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| {
+            Ok((
+                r.try_get("camera")?,
+                r.try_get("line")?,
+                r.try_get("forward")?,
+                r.try_get("at_ms")?,
+            ))
+        })
+        .collect()
+    }
+
+    /// Removes crossings older than `before_ms` (with the events retention).
+    pub async fn delete_crossings_before(&self, before_ms: i64) -> Result<u64, DbError> {
+        Ok(sqlx::query("DELETE FROM crossings WHERE at_ms < ?")
+            .bind(before_ms)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
+    /// Protects the recordings of `camera` between `start_ms` and `end_ms`.
+    pub async fn protect(
+        &self,
+        camera: &str,
+        start_ms: i64,
+        end_ms: i64,
+        note: &str,
+        now_ms: i64,
+    ) -> Result<ProtectedRange, DbError> {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO protected_ranges (camera, start_ms, end_ms, note, created_ms) \
+             VALUES (?, ?, ?, ?, ?) RETURNING id",
+        )
+        .bind(camera)
+        .bind(start_ms)
+        .bind(end_ms)
+        .bind(note)
+        .bind(now_ms)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(ProtectedRange {
+            id,
+            camera: camera.to_owned(),
+            start_ms,
+            end_ms,
+            note: note.to_owned(),
+            created_ms: now_ms,
+        })
+    }
+
+    /// Removes a protection; `false` if there was none with this identifier.
+    pub async fn unprotect(&self, id: i64) -> Result<bool, DbError> {
+        Ok(sqlx::query("DELETE FROM protected_ranges WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            > 0)
+    }
+
+    /// Every protected period, most recent first.
+    pub async fn protected_ranges(&self) -> Result<Vec<ProtectedRange>, DbError> {
+        sqlx::query("SELECT * FROM protected_ranges ORDER BY start_ms DESC")
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(protected_from_row)
+            .collect()
+    }
+
+    /// Adds or replaces a segment in the index.
+    pub async fn upsert_segment(&self, s: &SegmentRecord) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO segments (destination, camera, day, file, start_ms, end_ms, bytes) \n             VALUES (?, ?, ?, ?, ?, ?, ?) \n             ON CONFLICT (destination, camera, file) DO UPDATE SET \n             day = excluded.day, start_ms = excluded.start_ms, end_ms = excluded.end_ms, \n             bytes = excluded.bytes",
+        )
+        .bind(&s.destination)
+        .bind(&s.camera)
+        .bind(&s.day)
+        .bind(&s.file)
+        .bind(s.start_ms)
+        .bind(s.end_ms)
+        .bind(i64::try_from(s.bytes).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Segments of a camera overlapping `[from_ms, to_ms)`, by start then destination.
+    pub async fn segments(
+        &self,
+        camera: &str,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<SegmentRecord>, DbError> {
+        let rows = sqlx::query(
+            "SELECT * FROM segments WHERE camera = ? AND start_ms < ? AND end_ms > ? \n             ORDER BY start_ms, destination",
+        )
+        .bind(camera)
+        .bind(to_ms)
+        .bind(from_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(segment_from_row).collect()
+    }
+
+    /// Every indexed segment of a destination (for reconciliation with the files).
+    pub async fn destination_segments(
+        &self,
+        destination: &str,
+    ) -> Result<Vec<SegmentRecord>, DbError> {
+        let rows = sqlx::query("SELECT * FROM segments WHERE destination = ?")
+            .bind(destination)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(segment_from_row).collect()
+    }
+
+    /// Removes a segment from the index.
+    pub async fn delete_segment(
+        &self,
+        destination: &str,
+        camera: &str,
+        file: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query("DELETE FROM segments WHERE destination = ? AND camera = ? AND file = ?")
+            .bind(destination)
+            .bind(camera)
+            .bind(file)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Forgets the segments of destinations that no longer exist.
+    pub async fn retain_destinations(&self, ids: &[String]) -> Result<u64, DbError> {
+        let all: Vec<String> = sqlx::query_scalar("SELECT DISTINCT destination FROM segments")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut removed = 0;
+        for d in all.into_iter().filter(|d| !ids.contains(d)) {
+            removed += sqlx::query("DELETE FROM segments WHERE destination = ?")
+                .bind(d)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        }
+        Ok(removed)
+    }
+
+    /// Closes the connections (pending writes are flushed).
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustnvr_core::MotionZone;
+
+    fn cam(id: &str) -> CameraId {
+        CameraId::new(id).expect("id")
+    }
+
+    #[tokio::test]
+    async fn events_round_trip_and_retention() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        let a = cam("a");
+        let mut e1 = db
+            .start_event(&a, EventKind::Motion, 1_000, 0.1, &["Allée".into()])
+            .await
+            .expect("start");
+        e1.end_ms = Some(5_000);
+        e1.score = 0.4;
+        db.update_event(&e1).await.expect("update");
+        db.set_thumbnail(&e1, b"\xff\xd8jpeg").await.expect("thumb");
+        let person = DetectedObject {
+            label: "person".into(),
+            score: 0.9,
+            bbox: Some([0.1, 0.2, 0.3, 0.4]),
+            zone: Some("Allée".into()),
+        };
+        db.set_objects(e1.id, std::slice::from_ref(&person))
+            .await
+            .expect("objects");
+        let e2 = db
+            .start_event(&cam("b"), EventKind::Motion, 10_000, 0.2, &[])
+            .await
+            .expect("start");
+
+        let all = db
+            .events(&EventFilter {
+                camera: None,
+                from_ms: 0,
+                to_ms: 20_000,
+                limit: 10,
+            })
+            .await
+            .expect("list");
+        assert_eq!(
+            all.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![e2.id, e1.id]
+        );
+        assert_eq!(all[1].zones, vec!["Allée".to_owned()]);
+        assert_eq!(all[1].objects, vec![person]);
+        assert!(all[0].objects.is_empty());
+        assert!(all[1].has_thumbnail && (all[1].score - 0.4).abs() < 1e-6);
+        // Ongoing events overlap any later period.
+        let later = db
+            .events(&EventFilter {
+                camera: Some(cam("b")),
+                from_ms: 50_000,
+                to_ms: 60_000,
+                limit: 10,
+            })
+            .await
+            .expect("list");
+        assert_eq!(later.len(), 1);
+        // Overlap: [1000, 5000] is in [4000, 4500).
+        let mid = db
+            .events(&EventFilter {
+                camera: Some(a.clone()),
+                from_ms: 4_000,
+                to_ms: 4_500,
+                limit: 10,
+            })
+            .await
+            .expect("list");
+        assert_eq!(mid.len(), 1);
+
+        let thumb = db.thumbnail_path(e1.id).await.expect("path").expect("some");
+        assert!(thumb.is_file());
+        assert_eq!(db.delete_events_before(9_000).await.expect("delete"), 1);
+        assert!(!thumb.exists());
+        assert!(db.event(e1.id).await.expect("get").is_none());
+        db.close().await;
+
+        // Reopening closes the event left ongoing.
+        let db = Database::open(dir.path()).await.expect("reopen");
+        let e2 = db.event(e2.id).await.expect("get").expect("some");
+        assert_eq!(e2.end_ms, Some(10_000));
+    }
+
+    #[tokio::test]
+    async fn segment_index() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        let seg = |dest: &str, file: &str, start: i64| SegmentRecord {
+            destination: dest.into(),
+            camera: "a".into(),
+            day: "2026-11-02".into(),
+            file: file.into(),
+            start_ms: start,
+            end_ms: start + 60_000,
+            bytes: 100,
+        };
+        db.upsert_segment(&seg("local", "s1.mp4", 0))
+            .await
+            .expect("insert");
+        db.upsert_segment(&seg("nas", "s1.mp4", 0))
+            .await
+            .expect("insert");
+        db.upsert_segment(&seg("local", "s2.mp4", 60_000))
+            .await
+            .expect("insert");
+        db.upsert_segment(&seg("local", "s2.mp4", 60_000))
+            .await
+            .expect("upsert");
+        let found = db.segments("a", 30_000, 70_000).await.expect("query");
+        assert_eq!(
+            found
+                .iter()
+                .map(|s| (s.destination.as_str(), s.file.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("local", "s1.mp4"), ("nas", "s1.mp4"), ("local", "s2.mp4")]
+        );
+        assert!(
+            db.segments("a", 120_000, 130_000)
+                .await
+                .expect("q")
+                .is_empty()
+        );
+        db.delete_segment("local", "a", "s2.mp4")
+            .await
+            .expect("delete");
+        assert_eq!(db.destination_segments("local").await.expect("q").len(), 1);
+        assert_eq!(
+            db.retain_destinations(&["local".into()])
+                .await
+                .expect("retain"),
+            1
+        );
+        assert!(db.destination_segments("nas").await.expect("q").is_empty());
+    }
+
+    #[tokio::test]
+    async fn users_and_sessions() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        assert!(
+            db.create_user("alice", "h1", "admin", 1)
+                .await
+                .expect("create")
+        );
+        assert!(
+            !db.create_user("alice", "h2", "viewer", 2)
+                .await
+                .expect("dup"),
+            "taken"
+        );
+        assert_eq!(
+            db.user_secret("alice").await.expect("get"),
+            Some(("h1".into(), "admin".into()))
+        );
+        db.create_session("t1", "alice", 10, 100)
+            .await
+            .expect("session");
+        assert_eq!(
+            db.session_user("t1", 50).await.expect("s"),
+            Some(("alice".into(), "admin".into()))
+        );
+        assert_eq!(
+            db.session_user("t1", 100).await.expect("s"),
+            None,
+            "expired"
+        );
+        assert!(
+            db.update_user("alice", None, Some("viewer"))
+                .await
+                .expect("update")
+        );
+        assert_eq!(
+            db.session_user("t1", 50).await.expect("s").map(|u| u.1),
+            Some("viewer".into())
+        );
+        assert_eq!(db.purge_sessions(100).await.expect("purge"), 1);
+        db.create_session("t2", "alice", 10, 100)
+            .await
+            .expect("session");
+        assert!(db.delete_user("alice").await.expect("delete"));
+        assert_eq!(
+            db.session_user("t2", 50).await.expect("s"),
+            None,
+            "sessions removed"
+        );
+        assert!(db.users().await.expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn crossings_round_trip() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        db.add_crossing("jardin", "portail", true, 1_000)
+            .await
+            .expect("add");
+        db.add_crossing("jardin", "portail", false, 2_000)
+            .await
+            .expect("add");
+        db.add_crossing("entree", "porte", true, 9_000)
+            .await
+            .expect("add");
+        let got = db.crossings(0, 5_000).await.expect("list");
+        assert_eq!(
+            got,
+            vec![
+                ("jardin".to_owned(), "portail".to_owned(), true, 1_000),
+                ("jardin".to_owned(), "portail".to_owned(), false, 2_000),
+            ]
+        );
+        assert_eq!(db.delete_crossings_before(5_000).await.expect("purge"), 2);
+        assert_eq!(db.crossings(0, 10_000).await.expect("list").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn protected_ranges_round_trip() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        let a = db
+            .protect("jardin", 1_000, 61_000, "colis", 5)
+            .await
+            .expect("protect");
+        let b = db
+            .protect("entree", 2_000, 3_000, "", 6)
+            .await
+            .expect("protect");
+        let all = db.protected_ranges().await.expect("list");
+        assert_eq!(all, vec![b.clone(), a.clone()]);
+        assert!(db.unprotect(b.id).await.expect("unprotect"));
+        assert!(!db.unprotect(b.id).await.expect("again"));
+        assert_eq!(db.protected_ranges().await.expect("list"), vec![a]);
+    }
+
+    #[tokio::test]
+    async fn motion_settings_round_trip() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        let s = MotionSettings {
+            enabled: true,
+            sensitivity: 70,
+            zones: vec![MotionZone {
+                name: "Allée".into(),
+                points: vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]],
+                sensitivity: 40,
+                objects: Vec::new(),
+            }],
+            objects: vec!["person".into()],
+            masks: Vec::new(),
+            lines: Vec::new(),
+        };
+        db.set_motion_settings(&cam("a"), &s).await.expect("set");
+        db.set_motion_settings(&cam("a"), &s).await.expect("upsert");
+        assert_eq!(db.motion_settings().await.expect("get").get("a"), Some(&s));
+        db.delete_motion_settings(&cam("a")).await.expect("delete");
+        assert!(db.motion_settings().await.expect("get").is_empty());
+        // The JSON accepted by the API.
+        let json = r#"{"enabled":true,"sensitivity":60,"zones":[{"name":"Z","points":[[0,0],[1,0],[0.5,1]],"sensitivity":40}]}"#;
+        let parsed: MotionSettings = serde_json::from_str(json).expect("json");
+        assert!(parsed.problems().is_empty());
+    }
+}

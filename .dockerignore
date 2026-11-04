@@ -1,0 +1,13 @@
+# Build outputs
+target
+**/node_modules
+web/dist
+
+# Local configuration: camera passwords, never in an image
+config.toml
+*.ui.toml
+.env
+docker-data
+
+.git
+.vscode

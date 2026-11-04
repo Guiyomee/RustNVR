@@ -1,0 +1,50 @@
+# RustNVR with Docker Compose: docker compose up -d --build
+# Password of the « admin » account in a .env file next to this file:
+#   RUSTNVR_WEB_PASSWORD=un-mot-de-passe-solide
+# Interface: https://<machine>:8080 (self-signed certificate). See docs/DOCKER.md.
+#
+# Settings of your own machine (a NAS folder, a graphics card) are best kept
+# in a second file, merged with this one (see compose.homelab.example.yaml):
+#   docker compose -f compose.yaml -f compose.override.yaml up -d
+# (a file named compose.override.yaml is even merged without -f).
+services:
+  rustnvr:
+    build: .
+    image: rustnvr:local
+    container_name: rustnvr
+    restart: unless-stopped
+    # Reaps the FFmpeg processes, forwards `docker stop`.
+    init: true
+    # Host network: WebRTC (UDP), ONVIF camera discovery (multicast) and the
+    # cameras reached as from the host. Without it (bridge), remove this line
+    # and uncomment `ports`: the standard live view works, WebRTC and the
+    # automatic ONVIF discovery do not.
+    network_mode: host
+    # ports:
+    #   - "8080:8080"
+    environment:
+      TZ: Europe/Paris
+      RUSTNVR_WEB_PASSWORD: ${RUSTNVR_WEB_PASSWORD:?set RUSTNVR_WEB_PASSWORD in .env}
+    volumes:
+      - rustnvr-config:/config
+      - rustnvr-data:/data
+      # Recordings on another disk or a NAS mounted on the host (owned by
+      # uid 1000), declared then as a destination in Paramètres → Stockage:
+      # - /mnt/nas/rustnvr:/nas
+    # Graphics card (Paramètres → Intelligence artificielle → Cartes
+    # graphiques; H.264 conversions on the card). Intel / AMD: give the card
+    # to the container, with the group owning it on the host
+    # (`stat -c '%g %G' /dev/dri/renderD128`):
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - "992"
+    # NVIDIA (needs nvidia-container-toolkit on the host); « video » lets
+    # FFmpeg encode with NVENC:
+    # gpus: all
+    # and, under `environment:`:
+    #   NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+
+volumes:
+  rustnvr-config:
+  rustnvr-data:

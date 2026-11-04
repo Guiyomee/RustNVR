@@ -1,0 +1,6 @@
+# Scripts run in Linux containers keep LF line endings.
+*.sh text eol=lf
+Dockerfile text eol=lf
+# Pictures embedded in the program: never converted.
+*.jpg binary
+*.png binary

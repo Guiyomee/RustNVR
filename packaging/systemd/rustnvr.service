@@ -1,0 +1,49 @@
+# RustNVR as a systemd service. Installation: see docs/INSTALLATION.md.
+#
+#   /usr/local/bin/rustnvr                 binary
+#   /usr/local/share/rustnvr/web           built interface (web.static_dir)
+#   /etc/rustnvr/config.toml               configuration (the *.ui.toml files
+#                                          saved by the interface go next to it)
+#   /etc/rustnvr/rustnvr.env               passwords (password_env), mode 0600
+#   /var/lib/rustnvr                       recordings and data (recordings_dir)
+
+[Unit]
+Description=RustNVR network video recorder
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=rustnvr
+Group=rustnvr
+EnvironmentFile=-/etc/rustnvr/rustnvr.env
+ExecStartPre=/usr/local/bin/rustnvr check-config -c /etc/rustnvr/config.toml
+ExecStart=/usr/local/bin/rustnvr run -c /etc/rustnvr/config.toml
+# SIGTERM: open segments are finished and renamed before exiting.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+# Hardening. Add NAS mount points (or other recording paths) to
+# ReadWritePaths, e.g. ReadWritePaths=/etc/rustnvr /var/lib/rustnvr /mnt/nas
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/rustnvr /var/lib/rustnvr
+# An SFTP private key under /home needs ProtectHome=read-only instead.
+ProtectHome=yes
+PrivateTmp=yes
+# Hardware video acceleration (VAAPI, /dev/dri) would need PrivateDevices=no.
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+UMask=0027
+# Listening on a port below 1024 (e.g. 443):
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[package]
+name = "rustnvr-mqtt"
+description = "RustNVR MQTT client: camera states, motion events, snapshots and Home Assistant discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+rustnvr-core.workspace = true
+serde.workspace = true
+serde_json = "1.0"
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
