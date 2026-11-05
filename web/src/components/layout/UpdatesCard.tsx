@@ -17,7 +17,7 @@ const INSTALL: Record<UpdateStatus['install'], { title: string; steps: string }>
   docker: {
     title: t('RustNVR tourne sous Docker', 'RustNVR runs in Docker'),
     steps:
-      t("Portainer : Stacks → rustnvr → « Pull and redeploy » (en forçant la reconstruction).\nOu sur la machine, dans le dossier du dépôt :\n  git pull && docker compose up -d --build", "Portainer: Stacks → rustnvr → « Pull and redeploy » (forcing the rebuild).\nOr on the machine, in the repository folder:\n  git pull && docker compose up -d --build"),
+      t("Image publiée (ghcr.io/guiyomee/rustnvr), dans le dossier de compose.yaml :\n  docker compose pull && docker compose up -d\nPortainer : Stacks → rustnvr → « Update the stack » avec « Re-pull image ».\nImage construite depuis le code : « Pull and redeploy » en forçant la reconstruction, ou :\n  git pull && docker compose up -d --build", "Published image (ghcr.io/guiyomee/rustnvr), in the folder of compose.yaml:\n  docker compose pull && docker compose up -d\nPortainer: Stacks → rustnvr → « Update the stack » with « Re-pull image ».\nImage built from the code: « Pull and redeploy » forcing the rebuild, or:\n  git pull && docker compose up -d --build"),
   },
   systemd: {
     title: t('RustNVR tourne comme service systemd', 'RustNVR runs as a systemd service'),

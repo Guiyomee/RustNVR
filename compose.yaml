@@ -1,4 +1,5 @@
-# RustNVR with Docker Compose: docker compose up -d --build
+# RustNVR with Docker Compose: docker compose up -d
+# (update: docker compose pull && docker compose up -d)
 # Password of the « admin » account in a .env file next to this file:
 #   RUSTNVR_WEB_PASSWORD=un-mot-de-passe-solide
 # Interface: https://<machine>:8080 (self-signed certificate). See docs/DOCKER.md.
@@ -9,8 +10,10 @@
 # (a file named compose.override.yaml is even merged without -f).
 services:
   rustnvr:
-    build: .
-    image: rustnvr:local
+    # Image built by GitHub from this repository (Linux x86-64). To build it
+    # yourself from the code instead, replace this line with `build: .` and
+    # run `docker compose up -d --build`.
+    image: ghcr.io/guiyomee/rustnvr:latest
     container_name: rustnvr
     restart: unless-stopped
     # Reaps the FFmpeg processes, forwards `docker stop`.

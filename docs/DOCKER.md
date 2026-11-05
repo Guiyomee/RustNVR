@@ -1,26 +1,46 @@
 # RustNVR sous Docker
 
-Image construite depuis les sources (`Dockerfile` multi-étapes) : interface web
-(Node 24), programme (Rust, avec la reconnaissance ONNX intégrée), puis une
-Debian 13 minimale avec FFmpeg. Le programme tourne sous un compte sans
-privilèges (uid 1000).
+Image multi-étapes (`Dockerfile`) : interface web (Node 24), programme (Rust,
+avec la reconnaissance ONNX intégrée), puis une Debian 13 minimale avec
+FFmpeg. Le programme tourne sous un compte sans privilèges (uid 1000).
 
-> État : fichiers écrits et configuration validée (`rustnvr check-config`) ;
-> **construction et lancement de l'image pas encore vérifiés** (pas de Docker
-> sur la machine de développement).
+Deux façons de l'obtenir :
 
-## 1. Récupérer le code sur la machine Docker
+- **image publiée** `ghcr.io/guiyomee/rustnvr` (Linux x86-64), construite par
+  GitHub à chaque mise à jour du dépôt : rien à compiler ;
+- **construite sur votre machine** depuis le code (`build: .`), par exemple
+  pour une version modifiée.
 
-Par un dépôt Git (Gitea…) ou en copiant le dossier. Dans les deux cas, **ne
-copiez pas** `config.toml` ni les `*.ui.toml` de votre installation : ils
-contiennent les mots de passe des caméras, du MQTT et du stockage
-(`.gitignore` et `.dockerignore` les écartent ; `target/`, `web/node_modules/`
-et `web/dist/` sont inutiles aussi).
+## 1. Image publiée (le plus simple)
 
-## 2. Construire et démarrer
+Il suffit de `compose.yaml` (celui du dépôt GitHub, qui contient
+`image: ghcr.io/guiyomee/rustnvr:latest`) dans un dossier :
 
 ```sh
-cd RUSTFrigate
+mkdir rustnvr && cd rustnvr
+curl -fsSLO https://raw.githubusercontent.com/Guiyomee/RustNVR/main/compose.yaml
+echo 'RUSTNVR_WEB_PASSWORD=un-mot-de-passe-solide' > .env
+chmod 600 .env
+docker compose up -d
+docker compose logs -f
+```
+
+Étiquettes : `latest` (dernière version du dépôt), `2026.11.01` (une version
+publiée, qui ne change plus), `sha-…` (un commit précis).
+
+Avec Portainer : Stacks → Add stack → « Web editor », collez `compose.yaml`
+et ajoutez la variable `RUSTNVR_WEB_PASSWORD`.
+
+## 2. Construire depuis le code
+
+Récupérez le dépôt (Git ou copie du dossier). **Ne copiez pas** `config.toml`
+ni les `*.ui.toml` d'une installation : ils contiennent les mots de passe des
+caméras, du MQTT et du stockage (`.gitignore` et `.dockerignore` les
+écartent ; `target/`, `web/node_modules/` et `web/dist/` sont inutiles aussi).
+Dans `compose.yaml`, remplacez la ligne `image: ghcr.io/…` par `build: .`,
+puis :
+
+```sh
 echo 'RUSTNVR_WEB_PASSWORD=un-mot-de-passe-solide' > .env
 chmod 600 .env
 docker compose up -d --build
@@ -135,10 +155,13 @@ Sans carte, ou si les essais échouent, le processeur convertit comme avant.
 ## 6. Mise à jour, arrêt
 
 ```sh
-# nouvelle version du code, puis :
-docker compose up -d --build
+docker compose pull && docker compose up -d   # image publiée
+docker compose up -d --build                  # construite : après git pull
 docker compose down            # arrête (les volumes sont gardés)
 ```
+
+Avec l'image publiée sous Portainer : « Update the stack » en cochant
+« Re-pull image ».
 
 `docker stop` envoie SIGTERM : RustNVR s'arrête proprement, comme avec systemd.
 

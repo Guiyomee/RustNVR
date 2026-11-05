@@ -10,8 +10,8 @@ et enregistrés **sans décodage ni réencodage** dans des segments MP4 fragment
 > MQTT/Home Assistant.** Direct vidéo par WebSocket/MSE, ou WebRTC (expérimental,
 > réseau local) ; enregistrement local
 > et/ou NAS, S3, SFTP avec rétention ; détection de mouvement sans IA avec zones et
-> événements ; MQTT avec découverte Home Assistant. Docker : voir
-> [docs/DOCKER.md](docs/DOCKER.md).
+> événements ; MQTT avec découverte Home Assistant. Docker : image prête
+> `ghcr.io/guiyomee/rustnvr` (Linux x86-64), voir [docs/DOCKER.md](docs/DOCKER.md).
 
 Documents : **[Docker](docs/DOCKER.md)** · **[Installation (systemd)](docs/INSTALLATION.md)** ·
 **[Home Assistant](docs/HOME_ASSISTANT.md)** · [MQTT](docs/MQTT.md) · [IA](docs/AI.md) ·
