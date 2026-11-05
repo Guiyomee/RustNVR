@@ -139,6 +139,20 @@ pub enum NvrEvent {
         at_ms: i64,
         /// Crossings of this line since local midnight, this one included.
         today: u64,
+        /// Object recognized at the line (optional AI, lines with objects).
+        object: Option<String>,
+        /// Picture of the crossing (JPEG, the object boxed), when taken.
+        picture: Option<Bytes>,
+    },
+    /// A recording destination became unusable (share not mounted, not
+    /// writable, not answering) or usable again.
+    StorageState {
+        /// Destination identifier.
+        destination: String,
+        /// Display name.
+        name: String,
+        /// What is wrong (French); `None`: usable again.
+        problem: Option<String>,
     },
     /// Motion detection was switched on or off for a camera.
     MotionSettingsChanged {

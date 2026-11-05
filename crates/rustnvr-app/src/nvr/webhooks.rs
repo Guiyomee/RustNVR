@@ -1,5 +1,6 @@
 //! Webhooks: an HTTP POST with the event as JSON (and its picture) to the
-//! configured addresses, on motion, recognized objects and end of an event.
+//! configured addresses, on motion, recognized objects and end of an event,
+//! on crossings of lines and when a recording destination fails or recovers.
 //! Discord webhooks, which refuse that JSON, get a Discord message instead
 //! (an embed, the picture attached).
 //!
@@ -201,6 +202,8 @@ fn kind_name(kind: WebhookEvent) -> &'static str {
         WebhookEvent::Motion => "motion",
         WebhookEvent::Objects => "objects",
         WebhookEvent::End => "end",
+        WebhookEvent::Crossing => "crossing",
+        WebhookEvent::Storage => "storage",
     }
 }
 
@@ -382,18 +385,208 @@ async fn picture(shared: &Shared, kind: WebhookEvent, event: &DetectionEvent) ->
     }
 }
 
-/// Follows the detection events and queues the calls.
+/// Whether a webhook wants a crossing of `camera`, seen with `object`.
+fn wants_crossing(hook: &WebhookConfig, camera: &str, object: Option<&str>) -> bool {
+    hook.enabled
+        && hook.events.contains(&WebhookEvent::Crossing)
+        && (hook.cameras.is_empty() || hook.cameras.iter().any(|c| c == camera))
+        && (hook.objects.is_empty() || object.is_some_and(|o| hook.objects.iter().any(|h| h == o)))
+}
+
+/// Whether some webhook wants the picture of the crossings of `camera`
+/// (taken only then).
+pub(super) fn want_crossing_picture(shared: &Shared, camera: &rustnvr_core::CameraId) -> bool {
+    shared
+        .webhooks
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        // A webhook limited to objects gets only checked crossings, whose
+        // picture is always taken.
+        .any(|h| h.image && h.objects.is_empty() && wants_crossing(h, camera.as_str(), None))
+}
+
+/// A crossing of a line, for the calls.
+struct CrossingCall<'a> {
+    camera: &'a str,
+    camera_name: &'a str,
+    line: &'a str,
+    forward: bool,
+    at_ms: i64,
+    today: u64,
+    object: Option<&'a str>,
+}
+
+/// « dans le sens de la flèche » or « dans l'autre sens ».
+fn direction_text(forward: bool) -> &'static str {
+    if forward {
+        "dans le sens de la flèche"
+    } else {
+        "dans l'autre sens"
+    }
+}
+
+/// JSON sent for a crossing.
+fn crossing_body(c: &CrossingCall<'_>, image: Option<&[u8]>) -> Value {
+    json!({
+        "type": "crossing",
+        "camera": c.camera,
+        "camera_name": c.camera_name,
+        "crossing": {
+            "line": c.line,
+            "direction": if c.forward { "forward" } else { "backward" },
+            "at_ms": c.at_ms,
+            "today": c.today,
+            "object": c.object,
+        },
+        "image": image.map(|jpeg| format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(jpeg)
+        )),
+        "rustnvr": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Discord message with one embed (the attached picture shown when
+/// `with_picture`).
+fn discord_message(
+    title: String,
+    color: u32,
+    description: String,
+    at_ms: i64,
+    with_picture: bool,
+) -> Value {
+    let mut embed = json!({
+        "title": title,
+        "color": color,
+        "description": description,
+        "footer": { "text": format!("RustNVR {}", env!("CARGO_PKG_VERSION")) },
+    });
+    if let Ok(at) = jiff::Timestamp::from_millisecond(at_ms) {
+        embed["timestamp"] = at.to_string().into();
+    }
+    let mut payload = json!({ "embeds": [embed] });
+    if with_picture {
+        payload["embeds"][0]["image"] = json!({ "url": format!("attachment://{DISCORD_PICTURE}") });
+        payload["attachments"] = json!([{ "id": 0, "filename": DISCORD_PICTURE }]);
+    }
+    payload
+}
+
+/// Discord message for a crossing.
+fn crossing_discord(c: &CrossingCall<'_>, with_picture: bool) -> Value {
+    let what = c.object.map_or("Passage", object_name);
+    let passages = if c.today > 1 { "passages" } else { "passage" };
+    discord_message(
+        format!("{what} · {} · {}", c.line, c.camera_name),
+        0x8B_5C_F6,
+        format!(
+            "Ligne « {} » franchie {}.\nAujourd'hui : {} {passages}.",
+            c.line,
+            direction_text(c.forward),
+            c.today
+        ),
+        c.at_ms,
+        with_picture,
+    )
+}
+
+/// JSON sent when a destination changes state.
+fn storage_body(destination: &str, name: &str, problem: Option<&str>, at_ms: i64) -> Value {
+    json!({
+        "type": "storage",
+        "storage": {
+            "destination": destination,
+            "name": name,
+            "available": problem.is_none(),
+            "problem": problem,
+            "at_ms": at_ms,
+        },
+        "rustnvr": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Discord message when a destination changes state.
+fn storage_discord(name: &str, problem: Option<&str>, at_ms: i64) -> Value {
+    match problem {
+        Some(problem) => discord_message(
+            format!("Stockage dégradé · {name}"),
+            0xEF_44_44,
+            problem.to_owned(),
+            at_ms,
+            false,
+        ),
+        None => discord_message(
+            format!("Stockage rétabli · {name}"),
+            0x22_C5_5E,
+            "La destination est de nouveau utilisable.".to_owned(),
+            at_ms,
+            false,
+        ),
+    }
+}
+
+/// Name of `camera` (its identifier when it has none).
+async fn camera_name(shared: &Shared, camera: &rustnvr_core::CameraId) -> String {
+    shared
+        .state
+        .lock()
+        .await
+        .configs
+        .iter()
+        .find(|c| c.id == *camera)
+        .and_then(|c| c.name.clone())
+        .unwrap_or_else(|| camera.as_str().to_owned())
+}
+
+/// The calls waiting for each webhook (one queue and one sending task per
+/// webhook name and address).
+struct Queues {
+    queues: HashMap<String, mpsc::Sender<Call>>,
+    cancel: CancellationToken,
+}
+
+impl Queues {
+    fn key(h: &WebhookConfig) -> String {
+        format!("{}\n{}", h.name, h.url)
+    }
+
+    /// Ends the tasks of the webhooks removed or changed.
+    fn keep(&mut self, hooks: &[WebhookConfig]) {
+        self.queues
+            .retain(|k, _| hooks.iter().any(|h| Self::key(h) == *k));
+    }
+
+    fn push(&mut self, hook: &WebhookConfig, body: Body) {
+        let cancel = &self.cancel;
+        let tx = self.queues.entry(Self::key(hook)).or_insert_with(|| {
+            let (tx, rx) = mpsc::channel(QUEUE);
+            tokio::spawn(send_calls(rx, cancel.child_token()));
+            tx
+        });
+        let call = Call {
+            hook: hook.clone(),
+            body,
+        };
+        if tx.try_send(call).is_err() {
+            warn!(webhook = %hook.name, "webhook queue full: call dropped");
+        }
+    }
+}
+
+/// Follows the events and queues the calls.
 pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
-    // One queue and one sending task per webhook (name and address).
-    let key = |h: &WebhookConfig| format!("{}\n{}", h.name, h.url);
-    let mut queues: HashMap<String, mpsc::Sender<Call>> = HashMap::new();
+    let mut queues = Queues {
+        queues: HashMap::new(),
+        cancel: cancel.clone(),
+    };
     let mut events = shared.engine.events.subscribe();
     let mut sent: HashMap<i64, Sent> = HashMap::new();
     loop {
         let event = tokio::select! {
             _ = cancel.cancelled() => return,
             e = events.recv() => match e {
-                Ok(NvrEvent::Detection(e)) => e,
+                Ok(e @ (NvrEvent::Detection(_) | NvrEvent::Crossing { .. } | NvrEvent::StorageState { .. })) => e,
                 Ok(_) => continue,
                 Err(RecvError::Lagged(n)) => {
                     warn!(skipped = n, "webhooks lagging behind the events");
@@ -408,10 +601,72 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         // Webhooks removed or changed: their task ends with their queue.
-        queues.retain(|k, _| hooks.iter().any(|h| key(h) == *k));
+        queues.keep(&hooks);
         if hooks.iter().all(|h| !h.enabled) {
             continue;
         }
+        let event = match event {
+            NvrEvent::Detection(e) => e,
+            NvrEvent::Crossing {
+                camera,
+                line,
+                forward,
+                at_ms,
+                today,
+                object,
+                picture,
+            } => {
+                let name = camera_name(&shared, &camera).await;
+                let call = CrossingCall {
+                    camera: camera.as_str(),
+                    camera_name: &name,
+                    line: &line,
+                    forward,
+                    at_ms,
+                    today,
+                    object: object.as_deref(),
+                };
+                for hook in hooks
+                    .iter()
+                    .filter(|h| wants_crossing(h, call.camera, call.object))
+                {
+                    let jpeg = picture.as_ref().filter(|_| hook.image);
+                    let body = if hook.is_discord() {
+                        Body::Discord {
+                            payload: crossing_discord(&call, jpeg.is_some()),
+                            jpeg: jpeg.cloned(),
+                        }
+                    } else {
+                        Body::Json(crossing_body(&call, jpeg.map(|b| &b[..])))
+                    };
+                    queues.push(hook, body);
+                }
+                continue;
+            }
+            NvrEvent::StorageState {
+                destination,
+                name,
+                problem,
+            } => {
+                let at_ms = jiff::Timestamp::now().as_millisecond();
+                for hook in hooks
+                    .iter()
+                    .filter(|h| h.enabled && h.events.contains(&WebhookEvent::Storage))
+                {
+                    let body = if hook.is_discord() {
+                        Body::Discord {
+                            payload: storage_discord(&name, problem.as_deref(), at_ms),
+                            jpeg: None,
+                        }
+                    } else {
+                        Body::Json(storage_body(&destination, &name, problem.as_deref(), at_ms))
+                    };
+                    queues.push(hook, body);
+                }
+                continue;
+            }
+            _ => continue,
+        };
         if sent.len() > FOLLOWED {
             sent.clear();
         }
@@ -432,15 +687,7 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
         if kinds.is_empty() {
             continue;
         }
-        let camera_name = shared
-            .state
-            .lock()
-            .await
-            .configs
-            .iter()
-            .find(|c| c.id == event.camera)
-            .and_then(|c| c.name.clone())
-            .unwrap_or_else(|| event.camera.as_str().to_owned());
+        let camera_name = camera_name(&shared, &event.camera).await;
         for kind in kinds {
             let targets: Vec<&WebhookConfig> =
                 hooks.iter().filter(|h| wanted(h, kind, &event)).collect();
@@ -454,18 +701,10 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
             };
             for hook in targets {
                 let jpeg = image.as_ref().filter(|_| hook.image);
-                let call = Call {
-                    hook: hook.clone(),
-                    body: request(hook, kind_name(kind), &event, &camera_name, jpeg),
-                };
-                let tx = queues.entry(key(hook)).or_insert_with(|| {
-                    let (tx, rx) = mpsc::channel(QUEUE);
-                    tokio::spawn(send_calls(rx, cancel.child_token()));
-                    tx
-                });
-                if tx.try_send(call).is_err() {
-                    warn!(webhook = %hook.name, "webhook queue full: call dropped");
-                }
+                queues.push(
+                    hook,
+                    request(hook, kind_name(kind), &event, &camera_name, jpeg),
+                );
             }
         }
     }
@@ -639,6 +878,54 @@ mod tests {
         assert_eq!(b["camera_name"], "Jardin");
         assert_eq!(b["event"]["objects"][0]["label"], "person");
         assert_eq!(b["image"], "data:image/jpeg;base64,/9g=");
+    }
+
+    #[test]
+    fn crossing_and_storage_calls() {
+        let crossings = WebhookConfig {
+            events: vec![WebhookEvent::Crossing],
+            ..hook()
+        };
+        assert!(wants_crossing(&crossings, "jardin", None));
+        assert!(!wants_crossing(&hook(), "jardin", None), "not chosen");
+        let persons = WebhookConfig {
+            objects: vec!["person".into()],
+            cameras: vec!["jardin".into()],
+            ..crossings.clone()
+        };
+        assert!(wants_crossing(&persons, "jardin", Some("person")));
+        assert!(
+            !wants_crossing(&persons, "jardin", None),
+            "unchecked crossing"
+        );
+        assert!(!wants_crossing(&persons, "jardin", Some("car")));
+        assert!(!wants_crossing(&persons, "entree", Some("person")));
+        let call = CrossingCall {
+            camera: "jardin",
+            camera_name: "Jardin",
+            line: "Portail",
+            forward: true,
+            at_ms: 1_700_000_000_000,
+            today: 3,
+            object: Some("person"),
+        };
+        let d = crossing_discord(&call, true);
+        assert_eq!(d["embeds"][0]["title"], "Personne · Portail · Jardin");
+        assert!(
+            d["embeds"][0]["description"]
+                .as_str()
+                .is_some_and(|s| s.contains("3 passages"))
+        );
+        assert_eq!(d["attachments"][0]["filename"], DISCORD_PICTURE);
+        let j = crossing_body(&call, None);
+        assert_eq!(j["type"], "crossing");
+        assert_eq!(j["crossing"]["object"], "person");
+        assert_eq!(j["crossing"]["direction"], "forward");
+        let lost = storage_discord("NAS", Some("/nas n'est pas monté"), 1);
+        assert_eq!(lost["embeds"][0]["title"], "Stockage dégradé · NAS");
+        assert!(lost.get("attachments").is_none());
+        let back = storage_body("nas", "NAS", None, 1);
+        assert_eq!(back["storage"]["available"], true);
     }
 
     #[test]

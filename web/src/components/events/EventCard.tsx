@@ -1,7 +1,7 @@
 import { Activity } from 'lucide-react'
 import { memo } from 'react'
 import { useIsDemo } from '../../data/DataContext'
-import { demoSpec } from '../../data/demo/fixtures'
+import { demoPicture, demoSpec } from '../../data/demo/fixtures'
 import { useInView } from '../../hooks/useUi'
 import { formatDate, formatDuration, formatTime } from '../../lib/format'
 import { objectLabel } from '../../lib/objects'
@@ -48,6 +48,7 @@ function Thumbnail({ event, className }: { event: NvrEvent; className: string })
         </>
       ) : demo ? (
         <div className="h-full w-full" style={{ background: `linear-gradient(160deg, hsl(${hue} 30% 28%), hsl(${hue} 20% 12%))` }} aria-hidden>
+          {visible && demoPicture(event.camera) && <img src={demoPicture(event.camera) ?? ''} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" />}
           <span className="absolute right-1 bottom-1 rounded bg-black/55 px-1 text-[9px] font-semibold text-warn">{t('DÉMO', 'DEMO')}</span>
         </div>
       ) : (

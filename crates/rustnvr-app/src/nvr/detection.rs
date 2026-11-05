@@ -133,30 +133,8 @@ pub(super) async fn run_events(
                         }
                     }
                     MotionUpdate::Crossing { camera, line, forward, at_ms } => {
-                        if let Err(err) = db.add_crossing(camera.as_str(), &line, forward, at_ms).await {
-                            warn!(%camera, error = %err, "cannot record a crossing");
-                            continue;
-                        }
-                        // Today's count of the line, for MQTT.
-                        let midnight = jiff::Zoned::now()
-                            .start_of_day()
-                            .map_or(at_ms, |z| z.timestamp().as_millisecond());
-                        let today = db
-                            .crossings(midnight, at_ms + 1)
-                            .await
-                            .map_or(0, |list| {
-                                list.iter()
-                                    .filter(|(c, l, _, _)| c == camera.as_str() && *l == line)
-                                    .count() as u64
-                            });
-                        info!(%camera, line, forward, today, "line crossed");
-                        let _ = shared.engine.events.send(NvrEvent::Crossing {
-                            camera,
-                            line,
-                            forward,
-                            at_ms,
-                            today,
-                        });
+                        // A picture may be analysed first: off this loop.
+                        tokio::spawn(crossing(shared.clone(), db.clone(), camera, line, forward, at_ms));
                     }
                 }
             }
@@ -182,6 +160,146 @@ pub(super) async fn run_events(
             }
         }
     }
+}
+
+/// Distance (fraction of the picture) from a line within which a recognized
+/// object is taken as the one crossing it.
+const AT_LINE: f32 = 0.25;
+
+/// Distance from `p` to the segment `a`–`b` (fractions of the picture).
+fn distance_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
+}
+
+/// Whether `o` is at `line`: the bottom middle (feet) or the centre of its
+/// box is near the line. An object without a box counts.
+fn at_line(o: &DetectedObject, line: &rustnvr_core::CrossingLine) -> bool {
+    let Some([x1, y1, x2, y2]) = o.bbox else {
+        return true;
+    };
+    let x = (x1 + x2) / 2.0;
+    [[x, y2], [x, (y1 + y2) / 2.0]]
+        .into_iter()
+        .any(|p| distance_to_segment(p, line.a, line.b) <= AT_LINE)
+}
+
+/// Latest picture of `camera` (privacy masks applied), if it is running.
+async fn camera_picture(
+    shared: &Shared,
+    camera: &CameraId,
+    settings: &MotionSettings,
+) -> Option<Bytes> {
+    let tap = {
+        let state = shared.state.lock().await;
+        state.running.get(camera).map(|rt| rt.detection_tap())
+    }?;
+    match snapshot_jpeg(
+        &shared.ffmpeg,
+        &tap,
+        THUMBNAIL_WIDTH,
+        &settings.mask_rects(),
+    )
+    .await
+    {
+        Ok(jpeg) => Some(jpeg),
+        Err(e) => {
+            debug!(%camera, error = %e, "no picture of the crossing");
+            None
+        }
+    }
+}
+
+/// Checks, records and announces a crossing of `line`. For a line limited
+/// to objects (with object recognition running), a picture is analysed
+/// first: the crossing counts only when one of the objects is at the line.
+async fn crossing(
+    shared: Arc<Shared>,
+    db: Database,
+    camera: CameraId,
+    line: String,
+    forward: bool,
+    at_ms: i64,
+) {
+    let settings = camera_settings(&shared, &camera).await;
+    let Some(geometry) = settings.lines.iter().find(|l| l.name == line).cloned() else {
+        return;
+    };
+    let ai = if geometry.objects.is_empty() {
+        None
+    } else {
+        shared.ai()
+    };
+    let mut picture = None;
+    if ai.is_some() || super::webhooks::want_crossing_picture(&shared, &camera) {
+        picture = camera_picture(&shared, &camera, &settings).await;
+    }
+    let mut object = None;
+    if let Some(ai) = ai {
+        let Some(jpeg) = picture.clone() else {
+            debug!(%camera, line, "crossing not checked: no picture");
+            return;
+        };
+        match ai.analyze(&jpeg).await {
+            Ok(objects) => {
+                let seen: Vec<DetectedObject> = objects
+                    .into_iter()
+                    .filter(|o| geometry.objects.contains(&o.label) && at_line(o, &geometry))
+                    .collect();
+                let Some(best) = seen.iter().max_by(|a, b| a.score.total_cmp(&b.score)) else {
+                    debug!(%camera, line, "crossing ignored: none of the line's objects at the line");
+                    return;
+                };
+                let label = best.label.clone();
+                let boxes: Vec<[f32; 4]> = seen
+                    .iter()
+                    .filter(|o| o.label == label)
+                    .filter_map(|o| o.bbox)
+                    .collect();
+                if let Ok(boxed) = boxed_jpeg(&shared.ffmpeg, jpeg, &boxes).await {
+                    picture = Some(boxed);
+                }
+                object = Some(label);
+            }
+            // Counted all the same, without object (webhooks limited to
+            // objects skip it).
+            Err(e) => {
+                warn!(%camera, line, error = %e, "cannot check the crossing: object recognition failed")
+            }
+        }
+    }
+    if let Err(err) = db
+        .add_crossing(camera.as_str(), &line, forward, at_ms)
+        .await
+    {
+        warn!(%camera, error = %err, "cannot record a crossing");
+        return;
+    }
+    // Today's count of the line, for MQTT.
+    let midnight = jiff::Zoned::now()
+        .start_of_day()
+        .map_or(at_ms, |z| z.timestamp().as_millisecond());
+    let today = db.crossings(midnight, at_ms + 1).await.map_or(0, |list| {
+        list.iter()
+            .filter(|(c, l, _, _)| c == camera.as_str() && *l == line)
+            .count() as u64
+    });
+    info!(%camera, line, forward, today, object = object.as_deref().unwrap_or(""), "line crossed");
+    let _ = shared.engine.events.send(NvrEvent::Crossing {
+        camera,
+        line,
+        forward,
+        at_ms,
+        today,
+        object,
+        picture,
+    });
 }
 
 /// Takes, stores and announces the thumbnail of an event.
@@ -558,6 +676,11 @@ impl NvrView for MqttBridge {
                     .map(|d| (d.used_bytes as f64 * 100.0 / d.total_bytes as f64) as f32),
                 low_space: !shared
                     .low_space
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty(),
+                storage_problem: !shared
+                    .storage_problems
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .is_empty(),
@@ -1109,4 +1232,40 @@ pub(super) async fn ai_test(
             base64::engine::general_purpose::STANDARD.encode(&jpeg)
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustnvr_core::{CrossingDirection, CrossingLine};
+
+    #[test]
+    fn finds_the_object_at_the_line() {
+        // A gate across the bottom of the picture.
+        let gate = CrossingLine {
+            name: "portail".into(),
+            a: [0.2, 0.7],
+            b: [0.8, 0.7],
+            direction: CrossingDirection::Both,
+            objects: vec!["person".into()],
+        };
+        let person = |bbox| DetectedObject {
+            label: "person".into(),
+            score: 0.9,
+            bbox: Some(bbox),
+            zone: None,
+        };
+        // Feet on the gate.
+        assert!(at_line(&person([0.4, 0.3, 0.5, 0.72]), &gate));
+        // Far away, in the top corner.
+        assert!(!at_line(&person([0.0, 0.0, 0.1, 0.2]), &gate));
+        // Beyond the end of the gate: measured to its end.
+        assert!((distance_to_segment([1.0, 0.7], gate.a, gate.b) - 0.2).abs() < 1e-6);
+        // No box: cannot tell, counts.
+        let unboxed = DetectedObject {
+            bbox: None,
+            ..person([0.0; 4])
+        };
+        assert!(at_line(&unboxed, &gate));
+    }
 }

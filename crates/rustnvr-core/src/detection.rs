@@ -76,6 +76,10 @@ pub struct CrossingLine {
     /// Crossings counted.
     #[serde(default)]
     pub direction: CrossingDirection,
+    /// Recognized objects (optional AI) one of which must be seen at the
+    /// line for a crossing to count, e.g. `["person"]`; empty: any motion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<String>,
 }
 
 impl Default for MotionSettings {
@@ -132,29 +136,25 @@ impl MotionZone {
 impl MotionSettings {
     /// Whether a recognized object counts for this camera, with the zone it
     /// is in: `None` when it does not count. An object is placed at the
-    /// bottom middle of its box (where a person stands). If its label is
-    /// chosen in some zones, it counts only inside one of them; otherwise it
-    /// counts anywhere. Labels not in [`Self::objects`] (when not empty) never
-    /// count.
+    /// bottom middle of its box (where a person stands). Without zones it
+    /// counts anywhere. With zones it counts only inside one of them: one of
+    /// the zones listing its label when some do, any zone otherwise; an
+    /// object without a box cannot be placed and does not count then. Labels
+    /// not in [`Self::objects`] (when not empty) never count.
     pub fn locate(&self, o: &DetectedObject) -> Option<Option<String>> {
         if !self.objects.is_empty() && !self.objects.contains(&o.label) {
             return None;
         }
-        let point = o.bbox.map(|b| ((b[0] + b[2]) / 2.0, b[3]));
-        let inside = |z: &&MotionZone| point.is_some_and(|(x, y)| z.contains(x, y));
-        let restricted: Vec<&MotionZone> = self
-            .zones
-            .iter()
-            .filter(|z| z.objects.contains(&o.label))
-            .collect();
-        if restricted.is_empty() {
-            Some(self.zones.iter().find(inside).map(|z| z.name.clone()))
-        } else {
-            restricted
-                .into_iter()
-                .find(inside)
-                .map(|z| Some(z.name.clone()))
+        if self.zones.is_empty() {
+            return Some(None);
         }
+        let (x, y) = o.bbox.map(|b| ((b[0] + b[2]) / 2.0, b[3]))?;
+        let restricted = self.zones.iter().any(|z| z.objects.contains(&o.label));
+        self.zones
+            .iter()
+            .filter(|z| !restricted || z.objects.contains(&o.label))
+            .find(|z| z.contains(x, y))
+            .map(|z| Some(z.name.clone()))
     }
 }
 
@@ -220,6 +220,9 @@ impl MotionSettings {
                     "ligne {:?} : extrémités dans l'image (0 à 1) et assez éloignées",
                     l.name
                 ));
+            }
+            if l.objects.len() > 16 || l.objects.iter().any(|o| o.is_empty() || o.len() > 64) {
+                p.push(format!("ligne {:?} : objets invalides", l.name));
             }
         }
         let mut names: Vec<&str> = self.lines.iter().map(|l| l.name.trim()).collect();
@@ -334,9 +337,27 @@ mod tests {
             settings.locate(&object("person", [0.6, 0.2, 0.8, 0.9])),
             None
         );
-        // A car is not restricted by the path: counts anywhere.
+        // A car is not restricted to the path, but there are zones: it counts
+        // inside any of them, never outside.
         assert_eq!(
-            settings.locate(&object("car", [0.6, 0.2, 0.9, 0.9])),
+            settings.locate(&object("car", [0.1, 0.6, 0.3, 0.9])),
+            Some(Some("Allée".into()))
+        );
+        assert_eq!(settings.locate(&object("car", [0.6, 0.2, 0.9, 0.9])), None);
+        // Without a box it cannot be placed in a zone.
+        let unplaced = DetectedObject {
+            bbox: None,
+            ..object("car", [0.0; 4])
+        };
+        assert_eq!(settings.locate(&unplaced), None);
+        // Without zones: anywhere.
+        let whole = MotionSettings {
+            zones: Vec::new(),
+            ..settings.clone()
+        };
+        assert_eq!(whole.locate(&unplaced), Some(None));
+        assert_eq!(
+            whole.locate(&object("car", [0.6, 0.2, 0.9, 0.9])),
             Some(None)
         );
         // Objects of the camera: a car is not wanted at all.

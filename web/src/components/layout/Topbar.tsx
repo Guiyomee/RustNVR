@@ -213,11 +213,12 @@ export function Topbar({ onOpenMenu }: { onOpenMenu: () => void }) {
         <Metric
           icon={<HardDrive className="size-4" />}
           label={t('Vidéos', 'Videos')}
-          value={storage ? `${formatBytes(storage.recordings_bytes)}${system?.low_space.length ? t(' · espace faible', ' · low space') : ''}` : '—'}
-          warn={Boolean(system?.low_space.length)}
+          value={storage ? `${formatBytes(storage.recordings_bytes)}${system?.storage_problems?.length ? t(' · dégradé', ' · degraded') : system?.low_space.length ? t(' · espace faible', ' · low space') : ''}` : '—'}
+          warn={Boolean(system?.low_space.length || system?.storage_problems?.length)}
           title={[
             t('Enregistrements de RustNVR, tous points de stockage :', 'RustNVR recordings, every destination:'),
             perDestination,
+            ...(system?.storage_problems ?? []).map((p) => t(`Dégradé : ${p.name} — ${p.problem}`, `Degraded: ${p.name} — ${p.problem}`)),
             system?.low_space.length ? t(`Espace faible : ${system.low_space.join(', ')}`, `Low space: ${system.low_space.join(', ')}`) : '',
           ]
             .filter(Boolean)

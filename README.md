@@ -19,6 +19,17 @@ Documents : **[Docker](docs/DOCKER.md)** · **[Installation (systemd)](docs/INST
 [API_CONTRACT.md](API_CONTRACT.md) ·
 [ADR 0001 (RTSP, conteneur, WebRTC, MQTT)](docs/adr/0001-choix-techniques-fondamentaux.md)
 
+## Aperçu
+
+Captures du mode démo (`/?demo=1`) : caméras et événements fictifs, illustrés
+par des photos libres de droits ([crédits](web/public/demo/CREDITS.md)).
+
+![Vue d'ensemble : caméras, événements récents, stockage](docs/images/demo-overview.jpg)
+
+| Événements | Une caméra |
+|---|---|
+| ![Événements avec leurs vignettes](docs/images/demo-events.jpg) | ![Page d'une caméra, onglet Direct](docs/images/demo-camera.jpg) |
+
 ## Fonctionnalités disponibles
 
 - Caméras déclarées dans un fichier TOML validé au démarrage (toutes les

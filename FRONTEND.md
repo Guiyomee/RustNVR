@@ -98,8 +98,10 @@ Garanties :
   (`key={mode}`) : aucun état ne passe d'un mode à l'autre ;
 - bandeau orange permanent, badge « Mode démo » dans la barre latérale,
   « (démo) » dans les noms et les états, badge DÉMO sur chaque image ;
-- les images de démonstration sont des dessins SVG portant la mention
-  « Prévisualisation de démonstration », jamais une fausse vidéo ;
+- les images de démonstration sont des photos fixes libres de droits (CC0,
+  Wikimedia Commons, `public/demo/`, crédits dans `public/demo/CREDITS.md`)
+  portant la mention « Image fixe · démo », jamais une fausse vidéo (dessin SVG
+  si une photo manque) ;
 - les enregistrements fictifs n'ont pas de fichier : la lecture est
   désactivée avec une explication.
 

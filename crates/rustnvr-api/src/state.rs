@@ -191,6 +191,8 @@ pub struct ApiState {
     pub(crate) login_guard: crate::auth::LoginGuard,
     /// Names of the destinations short of space (updated every minute).
     low_space: RwLock<Vec<String>>,
+    /// Destinations that cannot be used: name, problem (every minute).
+    storage_problems: RwLock<Vec<(String, String)>>,
     /// `storage.default_destination`.
     default_destination: RwLock<String>,
     /// H.264 conversions on the graphics card: state shown, card in use.
@@ -248,6 +250,7 @@ impl ApiState {
             has_users: std::sync::atomic::AtomicBool::new(false),
             login_guard: crate::auth::LoginGuard::default(),
             low_space: RwLock::new(Vec::new()),
+            storage_problems: RwLock::new(Vec::new()),
             default_destination: RwLock::new(LOCAL_DESTINATION.to_owned()),
             hw: RwLock::new((crate::dto::HwAccelDto::default(), None)),
             hw_test: tokio::sync::Mutex::new(()),
@@ -432,6 +435,15 @@ impl ApiState {
         self.low_space_percent.load(Ordering::Relaxed)
     }
 
+    /// Records the destinations that cannot be used (name, problem), shown
+    /// by `GET /system`.
+    pub fn set_storage_problems(&self, problems: Vec<(String, String)>) {
+        *self
+            .storage_problems
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = problems;
+    }
+
     /// Records the destinations short of space (shown by `GET /system`).
     pub fn set_low_space(&self, names: Vec<String>) {
         *self.low_space.write().unwrap_or_else(|e| e.into_inner()) = names;
@@ -541,6 +553,16 @@ impl ApiState {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
+            storage_problems: self
+                .storage_problems
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|(name, problem)| crate::dto::StorageProblemDto {
+                    name: name.clone(),
+                    problem: problem.clone(),
+                })
+                .collect(),
             restart_needed: self.exe.as_ref().is_some_and(ExeIdentity::replaced),
             update_available: {
                 let u = self.updates.read().unwrap_or_else(|e| e.into_inner());

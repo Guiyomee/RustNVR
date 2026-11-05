@@ -18,6 +18,8 @@ const EVENTS: { key: Webhook['events'][number]; label: string; help: string }[] 
   { key: 'motion', label: t('Mouvement', 'Motion'), help: t('avec l’image, ≈ 1 s après le début', 'with the picture, ≈ 1 s after the start') },
   { key: 'objects', label: t('Objets reconnus', 'Recognized objects'), help: t('IA optionnelle, image encadrée', 'optional AI, picture with boxes') },
   { key: 'end', label: t('Fin de l’événement', 'End of the event'), help: t('durée et objets, sans image', 'length and objects, no picture') },
+  { key: 'crossing', label: t('Passage de ligne', 'Line crossing'), help: t('ligne de passage franchie (avec l’objet vu sur la ligne)', 'crossing line crossed (with the object seen at the line)') },
+  { key: 'storage', label: t('Stockage dégradé', 'Storage degraded'), help: t('partage non monté, en lecture seule ou qui ne répond plus ; puis rétabli', 'share not mounted, read-only or not answering; then back') },
 ]
 
 /** Objects offered as filters: the usual ones (people, vehicles, animals). */
@@ -78,7 +80,7 @@ function HookEditor({ hook, onChange, onRemove, disabled }: { hook: Webhook; onC
         <label className="min-w-72 flex-1 text-sm">
           {t('Adresse appelée (POST)', 'Address called (POST)')}
           <input className={inputCls} value={hook.url} disabled={disabled} placeholder="https://n8n.maison/webhook/…" onChange={(e) => set('url', e.target.value)} />
-          {discord && <span className="mt-1 block text-xs text-ok">{t('Webhook Discord : envoyé comme un message Discord (titre, objets, zones, image jointe).', 'Discord webhook: sent as a Discord message (title, objects, zones, attached picture).')}</span>}
+          {discord && <span className="mt-1 block text-xs text-ok">{t('Webhook Discord : envoyé comme un message Discord (titre, objets, zones, passages, image jointe).', 'Discord webhook: sent as a Discord message (title, objects, zones, crossings, attached picture).')}</span>}
         </label>
         <Switch checked={hook.enabled} onChange={(v) => set('enabled', v)} label={t('Actif', 'Active')} disabledReason={disabled ? t('Lecture seule', 'Read only') : null} />
       </div>
@@ -112,7 +114,7 @@ function HookEditor({ hook, onChange, onRemove, disabled }: { hook: Webhook; onC
         </div>
       </div>
       <div className="space-y-1">
-        <span className="text-xs text-muted">{t('Objets (aucun coché : tous les événements ; sinon seulement les objets reconnus cochés, sans les simples mouvements)', 'Objects (none ticked: every event; otherwise only the ticked recognized objects, without plain motion)')}</span>
+        <span className="text-xs text-muted">{t('Objets (aucun coché : tous les événements ; sinon seulement les objets reconnus cochés, sans les simples mouvements ni les passages sans objet)', 'Objects (none ticked: every event; otherwise only the ticked recognized objects, without plain motion nor crossings without object)')}</span>
         <div className="flex flex-wrap gap-1.5">
           {FILTER_OBJECTS.map((l) => (
             <Chip key={l} on={hook.objects.includes(l)} label={objectLabel(l)} disabled={disabled} onClick={() => set('objects', toggle(hook.objects, l))} />

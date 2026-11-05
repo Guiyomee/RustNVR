@@ -90,6 +90,9 @@ pub struct SystemDto {
     pub cameras_online: usize,
     /// Storage destinations short of space (names); empty when all is well.
     pub low_space: Vec<String>,
+    /// Storage destinations that cannot be used (share not mounted, not
+    /// writable, not answering); empty when all is well.
+    pub storage_problems: Vec<StorageProblemDto>,
     /// The executable was replaced on disk since startup (an update was
     /// installed): restart the server to use it.
     pub restart_needed: bool,
@@ -574,6 +577,37 @@ pub enum WsMessage {
         /// Error.
         message: String,
     },
+    /// A line was crossed.
+    Crossing {
+        /// The crossing.
+        crossing: CrossingDto,
+    },
+}
+
+/// A storage destination that cannot be used.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct StorageProblemDto {
+    /// Display name of the destination.
+    pub name: String,
+    /// What is wrong (French).
+    pub problem: String,
+}
+
+/// A crossing of a line (WebSocket `crossing`).
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct CrossingDto {
+    /// Camera identifier.
+    pub camera: String,
+    /// Name of the line.
+    pub line: String,
+    /// `forward` (the arrow of the interface) or `backward`.
+    pub direction: &'static str,
+    /// When, in milliseconds since the Unix epoch.
+    pub at_ms: i64,
+    /// Crossings of the line since local midnight.
+    pub today: u64,
+    /// Object recognized at the line (lines limited to objects), if any.
+    pub object: Option<String>,
 }
 
 /// Error body: `{"error": {"code": "...", "message": "..."}}`.

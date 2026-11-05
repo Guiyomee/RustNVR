@@ -1,7 +1,7 @@
 import { CircleOff, MonitorOff, VideoOff } from 'lucide-react'
 import { memo, useEffect, useState } from 'react'
 import { useCapability, useIsDemo } from '../../data/DataContext'
-import { demoSpec } from '../../data/demo/fixtures'
+import { demoPicture, demoSpec } from '../../data/demo/fixtures'
 import { usePageVisible } from '../../hooks/useUi'
 import { formatTime } from '../../lib/format'
 import type { Camera } from '../../types/api'
@@ -109,10 +109,25 @@ function Clock() {
   return <>{formatTime(now, true)}</>
 }
 
-/** Drawn scene for demo mode. It is not video and says so. */
+/** Still photo for demo mode (a drawn scene if it is missing). It is not video and says so. */
 function DemoPreview({ camera, animate }: { camera: Camera; animate: boolean }) {
   const hue = demoSpec(camera.id)?.hue ?? 210
+  const picture = demoPicture(camera.id)
+  const [broken, setBroken] = useState(false)
   if (camera.status !== 'online') return <StatusPanel camera={camera} liveAvailable={false} large={false} />
+  if (picture && !broken) {
+    return (
+      <div className="relative h-full w-full overflow-hidden bg-bg-2">
+        <img src={picture} alt="" decoding="async" className="absolute inset-0 h-full w-full object-cover" onError={() => setBroken(true)} />
+        <div className="absolute right-2 bottom-2 rounded bg-black/55 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-warn uppercase" title={t('Photo libre de droits (CC0) : ce n’est pas une caméra.', 'Royalty-free photo (CC0): this is not a camera.')}>
+          {t('Image fixe · démo', 'Still picture · demo')}
+        </div>
+        <div className="absolute bottom-2 left-2 rounded bg-black/55 px-1.5 py-0.5 font-mono text-[10px] text-fg/90 tabular">
+          {animate ? <Clock /> : '--:--:--'}
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="relative h-full w-full overflow-hidden bg-bg-2">
       <svg viewBox="0 0 160 90" preserveAspectRatio="xMidYMid slice" className="absolute inset-0 h-full w-full" aria-hidden>

@@ -19,6 +19,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
+/// File written then deleted at the root of a destination to check that it
+/// accepts writes.
+const WRITE_PROBE: &str = ".rustnvr-write-test";
+
 /// A place where segments can be written.
 #[derive(Clone, Debug)]
 pub struct Destination {
@@ -68,6 +72,26 @@ impl Destination {
     /// Whether the destination can be written now.
     pub fn is_available(&self) -> bool {
         self.unavailable_reason().is_none()
+    }
+
+    /// Like [`Self::unavailable_reason`], also writing (then deleting) a
+    /// small file: a share mounted read-only or refusing writes is found
+    /// before a recording fails. Blocking; may hang on a hung network share.
+    pub fn problem(&self) -> Option<String> {
+        if let Some(reason) = self.unavailable_reason() {
+            return Some(reason);
+        }
+        let probe = self.root.join(WRITE_PROBE);
+        match std::fs::write(&probe, b"rustnvr") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&probe);
+                None
+            }
+            Err(e) => Some(format!(
+                "{} : écriture impossible ({e})",
+                self.root.display()
+            )),
+        }
     }
 }
 
@@ -172,6 +196,23 @@ mod tests {
             d.unavailable_reason()
         );
         assert!(dest(Path::new("/"), false).is_available());
+    }
+
+    #[test]
+    fn problem_checks_writes_and_leaves_nothing() {
+        let dir = tempfile::tempdir().expect("tmp");
+        assert_eq!(dest(dir.path(), false).problem(), None);
+        assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 0);
+        let missing = dest(&dir.path().join("gone"), false);
+        assert!(
+            missing
+                .problem()
+                .is_some_and(|r| r.contains("inaccessible"))
+        );
+        // A file where the directory should be: not writable as a directory.
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").expect("file");
+        assert!(dest(&file, false).problem().is_some());
     }
 
     #[test]

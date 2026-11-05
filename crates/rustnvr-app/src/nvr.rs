@@ -497,6 +497,9 @@ struct Shared {
     managed_settings_file: Option<PathBuf>,
     /// Destinations short of space (names), updated every minute.
     low_space: std::sync::Mutex<Vec<String>>,
+    /// Destinations that cannot be used (name, problem), updated every
+    /// minute.
+    storage_problems: std::sync::Mutex<Vec<(String, String)>>,
     /// Database, thumbnails and outboxes of remote destinations.
     data_dir: PathBuf,
     /// One uploader per S3 / SFTP destination.
@@ -684,6 +687,7 @@ impl Nvr {
             general: std::sync::Mutex::new(detection::GeneralSettings::from_config(config)),
             managed_settings_file: config.managed_settings_file.clone(),
             low_space: std::sync::Mutex::new(Vec::new()),
+            storage_problems: std::sync::Mutex::new(Vec::new()),
             data_dir: data_dir.clone(),
             uploaders: tokio::sync::Mutex::new(HashMap::new()),
             upload_status: std::sync::Mutex::new(HashMap::new()),
@@ -1728,6 +1732,7 @@ async fn log_events(mut rx: tokio::sync::broadcast::Receiver<NvrEvent>, cancel: 
                 | NvrEvent::Snapshot { .. }
                 | NvrEvent::ObjectSnapshot { .. }
                 | NvrEvent::Crossing { .. }
+                | NvrEvent::StorageState { .. }
                 | NvrEvent::MotionSettingsChanged { .. },
             ) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -1809,12 +1814,69 @@ async fn log_metrics(shared: Arc<Shared>, interval: Duration, cancel: Cancellati
     }
 }
 
-/// Checks free space on every destination each minute: frees the reserve
-/// (`min_free_gb`) by deleting the oldest recordings, and reports the
-/// destinations short of space.
+/// Longest wait for the check of one destination (a hung network share).
+const DESTINATION_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// First check after the start, once the webhooks and MQTT listen.
+const DISK_FIRST_CHECK: Duration = Duration::from_secs(5);
+
+/// What is wrong with each destination (by identifier), checked in parallel
+/// off the runtime. A check still running from the previous round (a hung
+/// share) is waited for again instead of being started twice.
+async fn destination_problems(
+    targets: &[(Destination, RetentionConfig)],
+    pending: &mut HashMap<String, tokio::task::JoinHandle<Option<String>>>,
+) -> HashMap<String, String> {
+    let mut checks: Vec<(
+        String,
+        std::path::PathBuf,
+        tokio::task::JoinHandle<Option<String>>,
+    )> = targets
+        .iter()
+        .map(|(d, _)| {
+            let handle = pending.remove(&d.id).unwrap_or_else(|| {
+                let d = d.clone();
+                tokio::task::spawn_blocking(move || d.problem())
+            });
+            (d.id.clone(), d.root.clone(), handle)
+        })
+        .collect();
+    pending.clear();
+    let deadline = tokio::time::Instant::now() + DESTINATION_CHECK_TIMEOUT;
+    let mut out = HashMap::new();
+    for (id, root, handle) in &mut checks {
+        match tokio::time::timeout_at(deadline, &mut *handle).await {
+            Ok(Ok(Some(problem))) => {
+                out.insert(id.clone(), problem);
+            }
+            Ok(Ok(None) | Err(_)) => {}
+            Err(_) => {
+                out.insert(
+                    id.clone(),
+                    format!("{} ne répond pas (partage réseau bloqué ?)", root.display()),
+                );
+            }
+        }
+    }
+    for (id, _, handle) in checks {
+        if !handle.is_finished() {
+            pending.insert(id, handle);
+        }
+    }
+    out
+}
+
+/// Checks every destination each minute: reports those that cannot be used
+/// (share not mounted, not writable, not answering) when that changes, frees
+/// the reserve (`min_free_gb`) by deleting the oldest recordings, and
+/// reports the destinations short of space.
 async fn run_disk_monitor(shared: Arc<Shared>, cancel: CancellationToken) {
-    let mut ticker = tokio::time::interval(DISK_CHECK_INTERVAL);
+    let mut ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + DISK_FIRST_CHECK,
+        DISK_CHECK_INTERVAL,
+    );
     let mut previous: Vec<String> = Vec::new();
+    let mut previous_problems: HashMap<String, String> = HashMap::new();
+    let mut pending = HashMap::new();
     let mut events = shared.engine.events.subscribe();
     loop {
         tokio::select! {
@@ -1830,6 +1892,39 @@ async fn run_disk_monitor(shared: Arc<Shared>, cancel: CancellationToken) {
             }
         }
         let targets = shared.state.lock().await.storage.all();
+        let problems = destination_problems(&targets, &mut pending).await;
+        for (dest, _) in &targets {
+            let now = problems.get(&dest.id);
+            if now == previous_problems.get(&dest.id) {
+                continue;
+            }
+            match now {
+                Some(problem) => warn!(destination = %dest.id, %problem, "destination unusable"),
+                None => info!(destination = %dest.id, "destination usable again"),
+            }
+            let _ = shared.engine.events.send(NvrEvent::StorageState {
+                destination: dest.id.clone(),
+                name: dest.name.clone(),
+                problem: now.cloned(),
+            });
+        }
+        let report: Vec<(String, String)> = targets
+            .iter()
+            .filter_map(|(d, _)| Some((d.name.clone(), problems.get(&d.id)?.clone())))
+            .collect();
+        if let Some(api) = shared.api.get() {
+            api.set_storage_problems(report.clone());
+        }
+        *shared
+            .storage_problems
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = report;
+        previous_problems = problems.clone();
+        // Space: only on the destinations that answer.
+        let targets: Vec<_> = targets
+            .into_iter()
+            .filter(|(d, _)| !problems.contains_key(&d.id))
+            .collect();
         let percent = shared.general().low_space_percent;
         let protected = protected_ranges(&shared).await;
         let checked = tokio::task::spawn_blocking(move || {

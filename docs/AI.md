@@ -103,7 +103,9 @@ retire.
    zone Allée. Une personne n'est alors gardée que si le bas de son cadre (ses
    pieds) est dans une zone où « Personne » est cochée : quelqu'un qui passe
    sur le trottoir, même visible au-dessus de la haie, est ignoré. Les objets
-   cochés dans aucune zone comptent partout. Le nom de la zone est indiqué
+   cochés dans aucune zone comptent dans toutes les zones. Avec des zones,
+   rien ne compte en dehors (ni mouvement, ni objet reconnu) ; sans zone,
+   toute l'image compte. Le nom de la zone est indiqué
    avec l'objet (« Personne 87 % (Allée) »), dans l'API et dans MQTT.
 
 Les réglages saisis dans l'interface sont écrits dans `ai.ui.toml`, à côté de

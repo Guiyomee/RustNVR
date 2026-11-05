@@ -16,11 +16,12 @@
 //! | `<p>/<camera>/snapshot` | JPEG of the last event | yes |
 //! | `<p>/<camera>/<object>/snapshot` | JPEG of the last recognized object of that kind (`person`, `car`…), boxes drawn | yes |
 //! | `<p>/<camera>/event` | JSON of each event change | no |
-//! | `<p>/<camera>/crossing` | JSON of each crossing of a line (`line`, `direction`, `at_ms`, `today`) | no |
+//! | `<p>/<camera>/crossing` | JSON of each crossing of a line (`line`, `direction`, `at_ms`, `today`, `object`) | no |
 //! | `<p>/<camera>/line/<line>/today` | crossings of the line since midnight | yes |
 //! | `<p>/cameras_online` | number | yes |
 //! | `<p>/disk_used_percent` | number (local recordings disk) | yes |
 //! | `<p>/disk_low` | `ON` / `OFF` (a destination is short of space) | yes |
+//! | `<p>/storage_problem` | `ON` / `OFF` (a destination cannot be used: share not mounted, not writable…) | yes |
 //!
 //! Messages are queued without ever blocking the NVR: when the broker is
 //! unreachable the client reconnects with an increasing delay, and the whole
@@ -92,6 +93,9 @@ pub struct SystemView {
     pub disk_used_percent: Option<f32>,
     /// A storage destination is short of space.
     pub low_space: bool,
+    /// A storage destination cannot be used (share not mounted, not
+    /// writable, not answering).
+    pub storage_problem: bool,
 }
 
 /// What the MQTT client reads from, and asks to, the NVR.
@@ -538,6 +542,8 @@ impl Client {
         }
         let topic = self.topics.system("disk_low");
         self.publish(topic, true, on_off(s.low_space));
+        let topic = self.topics.system("storage_problem");
+        self.publish(topic, true, on_off(s.storage_problem));
     }
 
     async fn on_connected(&mut self) {
@@ -622,6 +628,8 @@ impl Client {
                 forward,
                 at_ms,
                 today,
+                object,
+                ..
             } => {
                 let level = topic_label(&line);
                 let topic = self.topics.camera(&camera, "crossing");
@@ -630,6 +638,7 @@ impl Client {
                     "direction": if forward { "forward" } else { "backward" },
                     "at_ms": at_ms,
                     "today": today,
+                    "object": object,
                 });
                 self.publish(topic, false, body.to_string());
                 let topic = self.topics.camera(&camera, &format!("line/{level}/today"));
@@ -650,6 +659,7 @@ impl Client {
                 self.publish(topic, true, on_off(enabled));
             }
             NvrEvent::CamerasChanged => self.sync_cameras(false).await,
+            NvrEvent::StorageState { .. } => self.publish_system().await,
             NvrEvent::StreamState { .. }
             | NvrEvent::SegmentFinished(_)
             | NvrEvent::RecorderError { .. } => {}

@@ -91,7 +91,7 @@ export function WebrtcPlayer({ cameraId, stream, large = false }: { cameraId: st
         className="h-full w-full object-contain"
         onPlaying={() => setStatus({ kind: 'playing' })}
       />
-      <span className="pointer-events-none absolute top-2 left-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-ok">WEBRTC</span>
+      <span className="pointer-events-none absolute top-2 right-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-ok">WEBRTC</span>
       {status.kind === 'connecting' && (
         <div className="absolute inset-0 flex items-center justify-center text-muted">
           <LoaderCircle className={`${large ? 'size-8' : 'size-5'} animate-spin`} aria-label={t('Connexion WebRTC', 'WebRTC connection')} />

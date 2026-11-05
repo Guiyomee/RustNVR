@@ -240,6 +240,21 @@ pub(crate) fn nvr_configs(prefix: &str, client_id: &str, topics: &Topics) -> Vec
             .to_string(),
         ),
         (
+            config_topic(prefix, "binary_sensor", client_id, "storage_problem"),
+            json!({
+                "name": "Stockage dégradé",
+                "unique_id": format!("{node}_storage_problem"),
+                "object_id": format!("{node}_storage_problem"),
+                "device_class": "problem",
+                "state_topic": topics.system("storage_problem"),
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "device": nvr_device(client_id),
+                "availability": availability,
+            })
+            .to_string(),
+        ),
+        (
             config_topic(prefix, "sensor", client_id, "disk_used_percent"),
             json!({
                 "name": "Disque des enregistrements",

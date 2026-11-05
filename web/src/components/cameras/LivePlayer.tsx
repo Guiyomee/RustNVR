@@ -241,10 +241,11 @@ export function LivePlayer({
           {muted ? <VolumeX className="size-4" /> : <Volume2 className="size-4" />}
         </button>
       )}
-      {status.kind === 'playing' && (
-        <div className="pointer-events-none absolute top-2 left-2 flex gap-1">
-          <span className="rounded bg-err px-1.5 py-0.5 text-[11px] font-semibold tracking-wide text-white uppercase">● Live</span>
-          {status.converted && (
+      {/* No « Live » badge: an online camera is obviously live, and the top
+          left corner belongs to the recording state (REC, motion). */}
+      {status.kind === 'playing' && status.converted && (
+        <div className="pointer-events-none absolute top-2 right-2 flex gap-1">
+          {(
             <span
               className="rounded bg-black/60 px-1.5 py-0.5 text-[11px] text-fg/90"
               title={t("Ce navigateur ne décode pas le codec de la caméra : le serveur convertit le direct en H.264 (l'enregistrement reste d'origine).", "This browser cannot decode the camera codec: the server converts the live view to H.264 (the recording stays original).")}

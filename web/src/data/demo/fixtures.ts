@@ -44,6 +44,12 @@ export function demoSpec(id: string): DemoCameraSpec | undefined {
   return DEMO_CAMERAS.find((c) => c.id === id)
 }
 
+/** Still photo standing for a demo camera (CC0, see public/demo/CREDITS.md); null for other cameras. */
+export function demoPicture(id: string): string | null {
+  if (!demoSpec(id)) return null
+  return `${import.meta.env.BASE_URL}demo/${id.slice(DEMO_PREFIX.length)}.jpg`
+}
+
 export function demoCamera(spec: DemoCameraSpec, now: number, jitter: number): Camera {
   const offline = spec.offlineMinutes !== undefined
   return {

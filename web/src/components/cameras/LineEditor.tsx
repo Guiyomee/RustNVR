@@ -1,6 +1,7 @@
 import { Trash } from 'lucide-react'
 import { useRef, useState, type PointerEvent, type ReactNode } from 'react'
 import type { CrossingLine } from '../../types/api'
+import { objectLabel } from '../../lib/objects'
 import { Button } from '../ui/Button'
 import { t } from '../../lib/i18n'
 
@@ -13,6 +14,9 @@ const DIRECTIONS: { value: CrossingLine['direction']; label: string }[] = [
   { value: 'forward', label: t('Sens de la flèche', 'Arrow direction') },
   { value: 'backward', label: t('Sens inverse', 'Opposite direction') },
 ]
+
+/** Objects offered first for a line (when the AI recognizes them). */
+const LINE_OBJECTS = ['person', 'car', 'bicycle', 'motorcycle', 'truck', 'dog', 'cat']
 
 /** Arrow showing the « forward » side: from the left of a → b to its right. */
 function Arrow({ l }: { l: CrossingLine }) {
@@ -38,7 +42,12 @@ function Arrow({ l }: { l: CrossingLine }) {
  * Crossing lines over a camera picture: click two points to draw a line, then
  * choose which crossings count. Coordinates are fractions of the picture.
  */
-export function LineEditor({ background, lines, onChange, disabled = false }: { background: ReactNode; lines: CrossingLine[]; onChange: (lines: CrossingLine[]) => void; disabled?: boolean }) {
+/**
+ * `objects`: labels the object recognition (optional AI) offers; empty when it
+ * is off — the object choice of a line is then not offered.
+ */
+export function LineEditor({ background, lines, onChange, objects = [], disabled = false }: { background: ReactNode; lines: CrossingLine[]; onChange: (lines: CrossingLine[]) => void; objects?: string[]; disabled?: boolean }) {
+  const offered = LINE_OBJECTS.filter((l) => objects.includes(l))
   const svgRef = useRef<SVGSVGElement>(null)
   const [first, setFirst] = useState<[number, number] | null>(null)
   const [hover, setHover] = useState<[number, number] | null>(null)
@@ -111,11 +120,43 @@ export function LineEditor({ background, lines, onChange, disabled = false }: { 
                   </option>
                 ))}
               </select>
+              {(offered.length > 0 || (l.objects ?? []).length > 0) && (
+                <div className="space-y-1">
+                  <span className="block text-xs text-muted">{t('Compter seulement (vérifié par l’IA)', 'Count only (checked by the AI)')}</span>
+                  <div className="flex flex-wrap gap-1">
+                    {[...new Set([...offered, ...(l.objects ?? [])])].map((label) => {
+                      const on = (l.objects ?? []).includes(label)
+                      return (
+                        <button
+                          key={label}
+                          type="button"
+                          aria-pressed={on}
+                          disabled={disabled}
+                          onClick={() => {
+                            const list = l.objects ?? []
+                            set(i, { objects: on ? list.filter((x) => x !== label) : [...list, label] })
+                          }}
+                          className={`rounded-full border px-2 py-0.5 text-[11px] disabled:opacity-60 ${on ? 'border-accent bg-accent/15 text-fg' : 'border-line text-muted hover:text-fg'}`}
+                        >
+                          {objectLabel(label)}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <span className={`block text-xs ${(l.objects ?? []).length > 0 && objects.length === 0 ? 'text-warn' : 'text-muted'}`}>
+                    {(l.objects ?? []).length === 0
+                      ? t('Aucun coché : tout ce qui bouge compte.', 'None ticked: anything moving counts.')
+                      : objects.length === 0
+                        ? t('Reconnaissance d’objets arrêtée : tout ce qui bouge compte en attendant.', 'Object recognition off: anything moving counts meanwhile.')
+                        : t('Une image est analysée à chaque passage : il ne compte (et ne notifie) que si l’un de ces objets est sur la ligne.', 'A picture is analysed at each crossing: it counts (and notifies) only when one of these objects is at the line.')}
+                  </span>
+                </div>
+              )}
             </div>
           ))
         )}
         <p className="text-xs text-muted">
-          {t('Compte le passage du centre de ce qui bouge au-dessus de la ligne (5 images par seconde, sans IA) ; nécessite la détection activée. Fiable pour une personne ou un véhicule à la fois (portail, porte) ; plusieurs mouvements simultanés se confondent. Compteurs : Événements → Activité, et MQTT.', 'Counts when the centre of what moves passes over the line (5 pictures per second, no AI); needs detection on. Reliable for one person or vehicle at a time (gate, door); several simultaneous movements get mixed up. Counters: Events → Activity, and MQTT.')}
+          {t('Compte le passage du centre de ce qui bouge au-dessus de la ligne (5 images par seconde, sans IA) ; nécessite la détection activée. Fiable pour une personne ou un véhicule à la fois (portail, porte) ; plusieurs mouvements simultanés se confondent. Compteurs : Événements → Activité, et MQTT. Notifications : cloche (passages vérifiés par l’IA) et Paramètres → Webhooks (« Passage de ligne »).', 'Counts when the centre of what moves passes over the line (5 pictures per second, no AI); needs detection on. Reliable for one person or vehicle at a time (gate, door); several simultaneous movements get mixed up. Counters: Events → Activity, and MQTT. Notifications: bell (crossings checked by the AI) and Settings → Webhooks (« Line crossing »).')}
         </p>
       </div>
     </div>

@@ -164,7 +164,7 @@ export function ZoneEditor({
                     )
                   })}
                 </div>
-                <span className="mt-1 block">{t("Par exemple « Personne » pour une allée : une personne n'est alors gardée que si ses pieds sont dans une zone où elle est cochée. Les objets cochés nulle part comptent partout.", "For example « Person » for a path: a person is then only kept if their feet are in a zone where it is ticked. Objects ticked nowhere count everywhere.")}</span>
+                <span className="mt-1 block">{t("Par exemple « Personne » pour une allée : une personne n'est alors gardée que si ses pieds sont dans une zone où elle est cochée. Les objets cochés nulle part comptent dans toutes les zones, jamais en dehors.", "For example « Person » for a path: a person is then only kept if their feet are in a zone where it is ticked. Objects ticked nowhere count in every zone, never outside.")}</span>
               </div>
             )}
             <div className="flex flex-wrap gap-2">

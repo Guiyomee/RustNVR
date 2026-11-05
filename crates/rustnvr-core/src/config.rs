@@ -795,6 +795,12 @@ pub enum WebhookEvent {
     Objects,
     /// The event ended.
     End,
+    /// A crossing line was crossed (with the object seen at the line, for
+    /// lines limited to objects).
+    Crossing,
+    /// A recording destination became unusable (share not mounted, not
+    /// writable…) or usable again. Not limited by cameras nor objects.
+    Storage,
 }
 
 fn default_webhook_events() -> Vec<WebhookEvent> {
@@ -816,7 +822,8 @@ pub struct WebhookConfig {
     #[serde(default)]
     pub cameras: Vec<String>,
     /// Only events with one of these objects (labels); empty: every event.
-    /// With objects, « motion » calls are skipped.
+    /// With objects, « motion » calls are skipped, and crossings count only
+    /// when one of these objects was seen at the line.
     #[serde(default)]
     pub objects: Vec<String>,
     /// What the webhook is called for.

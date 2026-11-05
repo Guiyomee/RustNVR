@@ -67,12 +67,13 @@ retenus vides).
 | `<p>/<caméra>/recording` | `ON` / `OFF` | oui |
 | `<p>/<caméra>/snapshot` | JPEG du dernier événement | oui |
 | `<p>/<caméra>/<objet>/snapshot` | JPEG de la dernière image où un objet de ce type (`person`, `car`, `dog`…) a été reconnu, cadres bleus de ces objets dessinés ; publié avant le passage de `person` à `ON` | oui |
-| `<p>/<caméra>/crossing` | JSON de chaque passage d'une ligne : `line`, `direction` (`forward` / `backward`), `at_ms`, `today` | non |
+| `<p>/<caméra>/crossing` | JSON de chaque passage d'une ligne : `line`, `direction` (`forward` / `backward`), `at_ms`, `today`, `object` (objet vu sur la ligne, lignes limitées à des objets ; sinon `null`) | non |
 | `<p>/<caméra>/line/<ligne>/today` | passages de la ligne depuis minuit | oui |
 | `<p>/<caméra>/event` | JSON à chaque début, mise à jour et fin d'événement | non |
 | `<p>/cameras_online` | nombre | oui |
 | `<p>/disk_used_percent` | nombre | oui |
 | `<p>/disk_low` | `ON` / `OFF` (un point de stockage à court d'espace) | oui |
+| `<p>/storage_problem` | `ON` / `OFF` (un point de stockage inutilisable : partage non monté, en lecture seule, qui ne répond pas…) ; entité « Stockage dégradé » | oui |
 
 Exemple de message `event` :
 

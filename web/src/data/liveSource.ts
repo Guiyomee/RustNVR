@@ -7,6 +7,7 @@ import { LiveStore } from '../state/liveStore'
 import type { EventKind } from '../types/api'
 import type { DataSource } from './source'
 import { t } from '../lib/i18n'
+import { objectLabel } from '../lib/objects'
 
 /** Provider labels (COCO classes) behind each object kind. */
 const OBJECT_KINDS: Partial<Record<EventKind, string[]>> = {
@@ -62,9 +63,19 @@ export function createLiveSource(): DataSource {
         onMessage: (msg) => {
           switch (msg.type) {
             case 'system': {
-              const before = store.getState().system?.low_space.join(', ') ?? ''
+              const previous = store.getState().system
+              const before = previous?.low_space.join(', ') ?? ''
               store.set({ system: msg.system })
               const low = msg.system.low_space.join(', ')
+              const problems = (s?: { name: string; problem: string }[]) => new Map((s ?? []).map((p) => [p.name, p.problem]))
+              const was = problems(previous?.storage_problems)
+              const now = problems(msg.system.storage_problems)
+              for (const [name, problem] of now) {
+                if (was.get(name) !== problem) store.notify('error', t(`Stockage dégradé : ${name} — ${problem}`, `Storage degraded: ${name} — ${problem}`))
+              }
+              for (const name of was.keys()) {
+                if (!now.has(name)) store.notify('info', t(`Stockage rétabli : ${name}`, `Storage back: ${name}`))
+              }
               if (low && low !== before) store.notify('warning', t(`Espace disque faible : ${low}`, `Low disk space: ${low}`))
               break
             }
@@ -83,6 +94,16 @@ export function createLiveSource(): DataSource {
             case 'recorder_error':
               store.notify('error', t(`Erreur d'écriture : ${msg.message}`, `Write error: ${msg.message}`), msg.camera)
               break
+            case 'crossing': {
+              // Only crossings checked by the AI: lines counting anything
+              // moving would flood the bell.
+              const c = msg.crossing
+              if (c.object) {
+                const name = store.getState().cameras.find((x) => x.id === c.camera)?.name ?? c.camera
+                store.notify('info', t(`${name} : ${objectLabel(c.object)} — ligne « ${c.line} » franchie`, `${name}: ${objectLabel(c.object)} — line « ${c.line} » crossed`), c.camera)
+              }
+              break
+            }
           }
         },
       })

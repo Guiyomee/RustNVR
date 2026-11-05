@@ -187,6 +187,11 @@ export function MotionPanel({ camera }: { camera: Camera }) {
           disabled={reason !== null}
           background={demo ? <CameraPlayer camera={camera} active={false} /> : snapshots ? <Snapshot camera={camera} stamp={shot} /> : null}
         />
+        {s.zones.length > 0 && (
+          <p className="mt-2 text-xs text-muted">
+            {t("Avec des zones, rien n'est détecté en dehors : ni mouvement, ni objet reconnu (pieds hors des zones). Les lignes de passage restent actives partout.", "With zones, nothing is detected outside them: neither motion nor recognized objects (feet outside the zones). Crossing lines stay active everywhere.")}
+          </p>
+        )}
       </div>
 
       <div>
@@ -194,6 +199,7 @@ export function MotionPanel({ camera }: { camera: Camera }) {
         <LineEditor
           lines={s.lines ?? []}
           onChange={(lines) => edit({ lines })}
+          objects={offered}
           disabled={reason !== null}
           background={demo ? <CameraPlayer camera={camera} active={false} /> : snapshots ? <Snapshot camera={camera} stamp={shot} /> : null}
         />

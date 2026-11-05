@@ -94,6 +94,7 @@ détection de mouvement est possible (base de données et FFmpeg).
   "service_cpu_percent": 14.8, "service_memory_bytes": 169869312,
   "service_memory_limit_bytes": null, "service_scope": "container",
   "cameras_total": 4, "cameras_enabled": 3, "cameras_online": 2, "low_space": [],
+  "storage_problems": [{ "name": "NAS", "problem": "/nas est sur le disque système : le partage réseau n'est pas monté" }],
   "restart_needed": false,
   "gpus": [{ "id": "card0", "name": "Intel Alder Lake-N [UHD Graphics]", "vendor": "intel",
              "driver": "i915", "device": "/dev/dri/renderD128", "status": "usable",
@@ -139,6 +140,15 @@ demandant de redémarrer le serveur.
 `low_space` : noms des points de stockage à court d'espace (occupation au-delà de
 `storage.low_space_percent`, 90 % par défaut, ou espace libre sous leur réserve),
 mis à jour chaque minute.
+
+`storage_problems` : points de stockage inutilisables, vérifiés chaque minute
+(5 s après le démarrage) : dossier absent, partage réseau non monté
+(`require_mount`), écriture refusée (un petit fichier `.rustnvr-write-test`
+est écrit puis effacé à la racine : partage monté en lecture seule…) ou
+partage qui ne répond pas en 10 s. Chaque changement (dégradé, puis rétabli)
+est aussi annoncé aux webhooks (`storage`), à MQTT (`<p>/storage_problem`) et
+au journal ; l'interface le notifie (cloche) et le signale dans la barre du
+haut.
 
 `cpu_percent` : machine, tous cœurs ; `memory_*` : machine (sous Docker, la
 machine hôte). `process_*` : le programme RustNVR seul, CPU en % d'un cœur.
@@ -554,10 +564,21 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
 
 - `events` : `motion` (une fois l'image de l'événement prise, ≈ 1 s après le
   début), `objects` (objets reconnus, image avec les cadres), `end` (fin, sans
-  image). Par défaut `motion` et `objects`.
+  image), `crossing` (ligne de passage franchie) et `storage` (point de
+  stockage inutilisable, puis rétabli ; ni caméras ni objets ne le filtrent).
+  Par défaut `motion` et `objects`.
 - `cameras` vide : toutes ; `objects` vide : tous les événements. Avec des
-  objets, les appels `motion` sont sautés et `objects` / `end` n'ont lieu que
-  si l'un de ces objets a été reconnu.
+  objets, les appels `motion` sont sautés, `objects` / `end` n'ont lieu que
+  si l'un de ces objets a été reconnu, et `crossing` seulement pour un passage
+  vérifié avec l'un d'eux (ligne limitée à des objets, voir `lines`).
+- Corps d'un passage : `{ "type": "crossing", "camera", "camera_name",
+  "crossing": { "line", "direction": "forward" | "backward", "at_ms",
+  "today", "object": "person" | null }, "image", "rustnvr" }` ; l'image (si
+  prise) est celle analysée, l'objet encadré. D'un point de stockage :
+  `{ "type": "storage", "storage": { "destination", "name", "available",
+  "problem", "at_ms" }, "rustnvr" }`. Discord : « Personne · Portail ·
+  Jardin » (ou « Passage · … ») avec le sens et le compte du jour ;
+  « Stockage dégradé · NAS » avec la raison, puis « Stockage rétabli · NAS ».
 - Corps envoyé : `{ "type", "camera", "camera_name", "event": { "id",
   "start_ms", "end_ms", "score", "zones", "objects" }, "image":
   "data:image/jpeg;base64,…" | null, "rustnvr" }`.
@@ -698,7 +719,9 @@ valent aussi pour les caméras de `config.toml`.
   l'image (0..1). Le mouvement n'est compté que dans les zones.
   Chaque zone peut avoir `objects` (IA optionnelle) : ces objets ne comptent
   que si le bas de leur cadre (les pieds d'une personne) est dans l'une des
-  zones qui les citent ; les objets cités nulle part comptent partout. L'objet
+  zones qui les citent ; les objets cités nulle part comptent dans toutes les
+  zones. Avec des zones, rien ne compte en dehors : ni mouvement, ni objet
+  reconnu (un objet sans cadre, qu'on ne peut placer, non plus). L'objet
   gardé porte alors `zone` (nom de la zone) dans l'événement et dans MQTT.
 - `masks` : masques de confidentialité, 8 au plus,
   `{ "name": "Voisin", "rect": [x1, y1, x2, y2] }` en fractions de l'image.
@@ -718,8 +741,15 @@ valent aussi pour les caméras de `config.toml`.
   par ligne en 2 s ; un saut de plus de 30 % de l'image n'est pas un passage.
   Une seule chose en mouvement à la fois : plusieurs mouvements simultanés se
   confondent. Passages en base (purgés avec les événements), dans MQTT
-  (`<p>/<caméra>/crossing`, `<p>/<caméra>/line/<ligne>/today`) et dans
-  `GET /crossings`.
+  (`<p>/<caméra>/crossing`, `<p>/<caméra>/line/<ligne>/today`), dans
+  `GET /crossings`, sur le WebSocket (`crossing`) et aux webhooks
+  (`crossing`).
+  `objects` (facultatif, IA optionnelle), par exemple `["person"]` : à chaque
+  passage, l'image du moment est analysée ; le passage ne compte (et n'est
+  annoncé, avec `object`) que si l'un de ces objets est sur la ligne (bas ou
+  centre de son cadre à moins de 25 % de l'image du segment). Reconnaissance
+  arrêtée : tout passage compte, sans `object` ; reconnaissance en échec : le
+  passage compte sans `object` (avertissement au journal).
 - `PUT` redémarre la détection de cette caméra (pas son flux) et renvoie les
   réglages enregistrés. 400 si invalide ; 503 si `enabled` sans FFmpeg.
 
@@ -867,6 +897,7 @@ Messages serveur → client (le client n'envoie rien) :
 | `segment` | `{ "recording": Recording }` | segment terminé |
 | `event` | `{ "event": Event }` | événement commencé, complété (vignette, zones) ou terminé ; suivi du message `camera` (état `motion`) |
 | `recorder_error` | `{ "camera": "id", "message": "…" }` | erreur d'écriture |
+| `crossing` | `{ "crossing": { "camera", "line", "direction", "at_ms", "today", "object" } }` | ligne de passage franchie (l'interface notifie ceux qui ont un `object`) |
 
 Si le client prend du retard, il reçoit de nouveau l'état complet. Le serveur
 ferme proprement les WebSocket à l'arrêt.

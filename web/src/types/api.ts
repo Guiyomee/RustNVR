@@ -49,6 +49,8 @@ export interface SystemInfo {
   cameras_online: number
   /** Storage destinations short of space (names). */
   low_space: string[]
+  /** Storage destinations that cannot be used (share not mounted, not writable, not answering). */
+  storage_problems?: StorageProblem[]
   /** The executable was replaced on disk (update installed): restart the server. */
   restart_needed: boolean
   /** A newer version was published on the watched repository. */
@@ -191,6 +193,27 @@ export interface CrossingLine {
   a: [number, number]
   b: [number, number]
   direction: 'both' | 'forward' | 'backward'
+  /** Objects (optional AI) one of which must be seen at the line for a crossing to count; absent or empty: any motion. */
+  objects?: string[]
+}
+
+/** A storage destination that cannot be used. */
+export interface StorageProblem {
+  name: string
+  /** What is wrong (French). */
+  problem: string
+}
+
+/** A crossing of a line (WebSocket `crossing`). */
+export interface Crossing {
+  camera: string
+  line: string
+  direction: 'forward' | 'backward'
+  at_ms: number
+  /** Crossings of the line since local midnight. */
+  today: number
+  /** Object recognized at the line (lines limited to objects). */
+  object: string | null
 }
 
 /** A rectangle hidden from view, `[x1, y1, x2, y2]` in picture fractions. */
@@ -458,6 +481,7 @@ export type WsMessage =
   | { type: 'segment'; recording: Recording }
   | { type: 'event'; event: NvrEvent }
   | { type: 'recorder_error'; camera: string; message: string }
+  | { type: 'crossing'; crossing: Crossing }
 
 export interface ApiErrorBody {
   error: { code: string; message: string }
@@ -597,7 +621,7 @@ export interface Webhook {
   cameras: string[]
   /** Object labels; empty: every event. */
   objects: string[]
-  events: ('motion' | 'objects' | 'end')[]
+  events: ('motion' | 'objects' | 'end' | 'crossing' | 'storage')[]
   /** The picture is sent (base64 in the JSON). */
   image: boolean
 }
