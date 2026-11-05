@@ -1,27 +1,73 @@
-# Builds the Docker image and publishes it to the GitHub registry:
+# Checks the code, then (only if every check passes) builds the Docker image
+# and publishes it to the GitHub registry:
 #   ghcr.io/guiyomee/rustnvr:latest       every push to main
 #   ghcr.io/guiyomee/rustnvr:2026.11.01   a release tag v2026.11.01
 #   ghcr.io/guiyomee/rustnvr:sha-abc1234  every build
-name: Docker image
+# Pull requests are checked, never published.
+name: Checks and Docker image
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  check:
+    name: fmt, clippy, tests, web build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+
+      # FFmpeg: the motion detection tests and the decoding of recorded
+      # segments (ffprobe) run instead of being skipped.
+      - name: FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Web interface (typecheck + build)
+        working-directory: web
+        run: npm ci --no-audit --no-fund && npm run build
+
   image:
+    needs: check
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7
 
