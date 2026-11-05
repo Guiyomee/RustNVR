@@ -73,6 +73,13 @@ enum Command {
         #[arg(long)]
         no_frame: bool,
     },
+    /// Checks that the running RustNVR answers (container health check):
+    /// exit status 0 when `GET /api/v1/health` answers on `web.listen`.
+    Health {
+        /// Configuration file.
+        #[arg(short, long, default_value = "config.toml")]
+        config: PathBuf,
+    },
     /// Repairs segments interrupted by a crash (also done automatically at startup).
     Recover {
         /// Recordings directory.
@@ -108,6 +115,31 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
             } else {
                 ExitCode::FAILURE
             })
+        }
+        Command::Health { config } => {
+            let c = Config::load(&config)?;
+            anyhow::ensure!(
+                c.web.enabled,
+                "the web server is disabled (web.enabled = false)"
+            );
+            let url = health_url(&c.web)?;
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                // Its own (often self-signed) certificate, on this machine.
+                .danger_accept_invalid_certs(true)
+                .build()?;
+            let reply = client
+                .get(&url)
+                .send()
+                .await
+                .with_context(|| format!("{url} does not answer"))?;
+            anyhow::ensure!(
+                reply.status().is_success(),
+                "{url} answered {}",
+                reply.status()
+            );
+            println!("ok");
+            Ok(ExitCode::SUCCESS)
         }
         Command::CheckConfig { config } => {
             let c = Config::load(&config)?;
@@ -218,6 +250,31 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
     }
 }
 
+/// Health check address of the server of `web`: its port on this machine
+/// (the loopback address when it listens on every address), over HTTPS when
+/// it serves TLS.
+fn health_url(web: &rustnvr_core::config::WebConfig) -> anyhow::Result<String> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    let addr: SocketAddr = web
+        .listen
+        .parse()
+        .with_context(|| format!("web.listen {:?} is not an address:port", web.listen))?;
+    let ip = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    let scheme = if web.tls_self_signed || web.tls_cert.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    Ok(format!(
+        "{scheme}://{}/api/v1/health",
+        SocketAddr::new(ip, addr.port())
+    ))
+}
+
 async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -233,4 +290,33 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
         .await
         .context("cannot listen for Ctrl-C")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::health_url;
+    use rustnvr_core::config::WebConfig;
+
+    #[test]
+    fn health_check_address() {
+        let web = |listen: &str, tls: bool| WebConfig {
+            listen: listen.to_owned(),
+            tls_self_signed: tls,
+            ..WebConfig::default()
+        };
+        let url = |w: WebConfig| health_url(&w).expect("url");
+        assert_eq!(
+            url(web("0.0.0.0:8080", true)),
+            "https://127.0.0.1:8080/api/v1/health"
+        );
+        assert_eq!(
+            url(web("[::]:8080", false)),
+            "http://[::1]:8080/api/v1/health"
+        );
+        assert_eq!(
+            url(web("192.168.1.5:9000", false)),
+            "http://192.168.1.5:9000/api/v1/health"
+        );
+        assert!(health_url(&web("nvr:8080", false)).is_err());
+    }
 }

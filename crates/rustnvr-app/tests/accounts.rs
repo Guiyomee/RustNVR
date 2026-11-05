@@ -102,6 +102,9 @@ async fn accounts_sessions_and_roles() {
     // Now every API route needs a session (no browser Basic prompt).
     let r = http(addr, "GET", "/api/v1/cameras", None, "").await;
     assert_eq!(r.status, 401);
+    // Except the container health check, which says nothing more.
+    let r = http(addr, "GET", "/api/v1/health", None, "").await;
+    assert_eq!((r.status, r.body["status"].as_str()), (200, Some("ok")));
     assert!(!r.headers.to_ascii_lowercase().contains("www-authenticate"));
     assert_eq!(
         http(addr, "GET", "/api/v1/cameras", None, &admin)

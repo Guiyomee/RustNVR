@@ -487,15 +487,19 @@ mod tests {
             )
         );
 
-        // Intel: busy = time out of RC6 since the previous sample.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let wall = s.idle["card0"].0.elapsed().as_millis() as u64;
+        // Intel: busy = time out of RC6 since the previous sample. The
+        // previous sample is moved 10 s back, of which 2.5 s idle: 75 %
+        // busy, whatever the speed of the machine running the test.
+        let previous = &mut s.idle.get_mut("card0").expect("previous sample").0;
+        *previous = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(10))
+            .expect("10 s ago");
         write(
             &roots.sys.join("class/drm/card0/gt/gt0/rc6_residency_ms"),
-            &format!("{}\n", 1000 + wall / 4),
+            "3500\n",
         );
         let busy = s.sample()[0].busy_percent.expect("busy figure");
-        assert!((70.0..=80.0).contains(&busy), "{busy}");
+        assert!((74.0..=76.0).contains(&busy), "{busy}");
     }
 
     #[test]

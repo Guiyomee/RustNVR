@@ -55,5 +55,9 @@ WORKDIR /data
 # camera passwords included). /data: recordings, database, thumbnails.
 VOLUME ["/config", "/data"]
 EXPOSE 8080
+# Health (« healthy » in Portainer / docker ps): the program asks the running
+# server for GET /api/v1/health on its own port (there is no curl here).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["rustnvr", "health", "-c", "/config/config.toml"]
 ENTRYPOINT ["rustnvr-entrypoint"]
 CMD ["run", "-c", "/config/config.toml"]

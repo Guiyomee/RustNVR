@@ -165,6 +165,12 @@ Avec l'image publiée sous Portainer : « Update the stack » en cochant
 
 `docker stop` envoie SIGTERM : RustNVR s'arrête proprement, comme avec systemd.
 
+L'image a un contrôle de santé : toutes les 30 s, `rustnvr health` interroge le
+serveur (`GET /api/v1/health`). Portainer et `docker ps` affichent alors
+« healthy », ou « unhealthy » après 3 échecs (port déjà pris, configuration
+invalide, serveur bloqué). Docker ne redémarre pas seul un conteneur
+« unhealthy » ; `restart: unless-stopped` le relance s'il s'arrête.
+
 ### Être prévenu des nouvelles versions
 
 À propos → Mises à jour : indiquez l'adresse du dépôt (par exemple

@@ -228,6 +228,9 @@ async fn identify(state: &ApiState, headers: &HeaderMap) -> Option<Principal> {
 }
 
 /// Routes reachable without credentials.
+/// Path of the health check, always reachable without authentication.
+const HEALTH_PATH: &str = "/api/v1/health";
+
 fn public(path: &str) -> bool {
     !path.starts_with("/api/")
         || matches!(
@@ -279,6 +282,10 @@ pub(crate) async fn require_auth(
             "cross-origin request refused",
         )
         .into_response();
+    }
+    // The container health check, with or without accounts.
+    if path == HEALTH_PATH {
+        return next.run(req).await;
     }
     // Without accounts there is no login page: everything stays behind Basic.
     if public(&path) && state.database.get().is_some() {

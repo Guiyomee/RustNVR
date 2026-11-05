@@ -46,7 +46,8 @@ par des photos libres de droits ([crédits](web/public/demo/CREDITS.md)).
   automatique au démarrage (troncature au dernier fragment complet).
 - Erreurs d'écriture (disque plein) : segment sauvé jusqu'au dernier fragment
   complet, reprise différée.
-- Commandes `probe` (test de connexion), `check-config`, `recover`.
+- Commandes `probe` (test de connexion), `check-config`, `recover`, `health`
+  (le serveur en marche répond-il ? Contrôle de santé de l'image Docker).
 - Ajout, modification et suppression de caméras depuis l'interface Web, sans
   redémarrage, avec test de connexion. Elles sont stockées dans
   `cameras.ui.toml` (à côté de `config.toml`, lisible par son seul propriétaire,

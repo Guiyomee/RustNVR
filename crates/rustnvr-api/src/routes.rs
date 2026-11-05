@@ -68,6 +68,15 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// `GET /api/v1/health`: answers while the server runs (container
+/// health check): `{"status":"ok"}`. Public and reveals nothing.
+async fn health() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        r#"{"status":"ok"}"#,
+    )
+}
+
 async fn capabilities(State(state): State<Arc<ApiState>>) -> Json<CapabilitiesDto> {
     Json(CapabilitiesDto {
         api_version: 1,
@@ -463,6 +472,7 @@ async fn interface_cache(req: Request, next: middleware::Next) -> Response {
 /// authentication when it is configured.
 pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
     let api = Router::new()
+        .route("/health", get(health))
         .route("/capabilities", get(capabilities))
         .route("/system", get(system))
         .route("/cameras", get(cameras).post(create_camera))

@@ -66,6 +66,14 @@ mot de passe de caméra : seul `rtsp://hôte:port` est exposé.
 Toutes sont couvertes par `crates/rustnvr-api/tests/api.rs` et ont été
 vérifiées contre un serveur réel.
 
+### `GET /api/v1/health`
+
+`{ "status": "ok" }` tant que le serveur tourne. **Sans authentification**,
+comptes ou non, et sans aucune information : c'est le contrôle de santé de
+l'image Docker (`rustnvr health -c config.toml` l'appelle sur le port de
+`web.listen`, en HTTPS si le serveur sert du TLS, certificat non vérifié
+puisque c'est la même machine ; code de sortie 0 ou 1).
+
 ### `GET /api/v1/capabilities`
 
 Ce que le serveur sait réellement faire. L'interface s'en sert pour afficher
