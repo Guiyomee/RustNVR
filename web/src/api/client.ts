@@ -45,7 +45,12 @@ export function apiSend<T>(method: 'POST' | 'PUT' | 'DELETE', path: string, body
   return apiRequest<T>(method, path, body, timeoutMs)
 }
 
-async function apiRequest<T>(method: string, path: string, body: unknown, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+/** POST with a JSON body, answered by a file (errors are JSON as usual). */
+export function apiSendForFile(path: string, body: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Blob> {
+  return apiRequest<Blob>('POST', path, body, timeoutMs, undefined, true)
+}
+
+async function apiRequest<T>(method: string, path: string, body: unknown, timeoutMs: number, signal?: AbortSignal, file = false): Promise<T> {
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort('timeout'), timeoutMs)
   const onAbort = () => controller.abort('cancelled')
@@ -89,6 +94,7 @@ async function apiRequest<T>(method: string, path: string, body: unknown, timeou
     throw new ApiError('http', message, response.status, code)
   }
   if (response.status === 204) return null as T
+  if (file) return (await response.blob()) as T
   try {
     return (await response.json()) as T
   } catch {

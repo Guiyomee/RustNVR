@@ -193,6 +193,8 @@ pub struct ApiState {
     low_space: RwLock<Vec<String>>,
     /// Destinations that cannot be used: name, problem (every minute).
     storage_problems: RwLock<Vec<(String, String)>>,
+    /// A configuration backup was restored since startup.
+    config_restored: std::sync::atomic::AtomicBool,
     /// `storage.default_destination`.
     default_destination: RwLock<String>,
     /// H.264 conversions on the graphics card: state shown, card in use.
@@ -251,6 +253,7 @@ impl ApiState {
             login_guard: crate::auth::LoginGuard::default(),
             low_space: RwLock::new(Vec::new()),
             storage_problems: RwLock::new(Vec::new()),
+            config_restored: std::sync::atomic::AtomicBool::new(false),
             default_destination: RwLock::new(LOCAL_DESTINATION.to_owned()),
             hw: RwLock::new((crate::dto::HwAccelDto::default(), None)),
             hw_test: tokio::sync::Mutex::new(()),
@@ -435,6 +438,12 @@ impl ApiState {
         self.low_space_percent.load(Ordering::Relaxed)
     }
 
+    /// Records that a configuration backup was restored: the server must be
+    /// restarted to use it.
+    pub fn set_config_restored(&self) {
+        self.config_restored.store(true, Ordering::Relaxed);
+    }
+
     /// Records the destinations that cannot be used (name, problem), shown
     /// by `GET /system`.
     pub fn set_storage_problems(&self, problems: Vec<(String, String)>) {
@@ -564,6 +573,7 @@ impl ApiState {
                 })
                 .collect(),
             restart_needed: self.exe.as_ref().is_some_and(ExeIdentity::replaced),
+            config_restored: self.config_restored.load(Ordering::Relaxed),
             update_available: {
                 let u = self.updates.read().unwrap_or_else(|e| e.into_inner());
                 u.latest.clone().filter(|_| u.available)

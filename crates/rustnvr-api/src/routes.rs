@@ -103,6 +103,7 @@ async fn capabilities(State(state): State<Arc<ApiState>>) -> Json<CapabilitiesDt
             .unwrap_or_else(|e| e.into_inner())
             .is_some(),
         users: state.database.get().is_some(),
+        backup: state.control.get().is_some(),
     })
 }
 
@@ -517,11 +518,25 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
             "/cameras/{id}/audio",
             axum::routing::put(detection::set_audio),
         )
+        .route(
+            "/cameras/{id}/presence/reset",
+            post(crate::stats::reset_presence),
+        )
         .route("/mqtt", get(detection::mqtt).put(detection::set_mqtt))
         .route("/ai", get(detection::ai).put(detection::set_ai))
         .route("/ai/test", post(detection::ai_test))
         .route("/ai/probe", post(detection::ai_probe))
         .route("/ai/models/{id}", post(detection::ai_download_model))
+        .route("/ai/captures", get(crate::replay::days))
+        .route(
+            "/ai/captures/{camera}/{day}",
+            get(crate::replay::pictures).delete(crate::replay::delete),
+        )
+        .route(
+            "/ai/captures/{camera}/{day}/{file}",
+            get(crate::replay::picture),
+        )
+        .route("/ai/replay", post(crate::replay::replay))
         .route(
             "/updates",
             get(detection::updates).put(detection::set_updates),
@@ -532,6 +547,9 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
             get(detection::webhooks).put(detection::set_webhooks),
         )
         .route("/webhooks/test", post(detection::test_webhook))
+        .route("/backup", post(crate::backup::create))
+        .route("/backup/inspect", post(crate::backup::inspect))
+        .route("/backup/restore", post(crate::backup::restore))
         .route(
             "/protected",
             get(crate::protect::list).post(crate::protect::protect),

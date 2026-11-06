@@ -66,6 +66,7 @@ class PageBoundary extends Component<{ children: ReactNode; path: string }, { er
 const CamerasPage = lazyPage(() => import('./pages/CamerasPage').then((m) => m.CamerasPage))
 const CameraDetailPage = lazyPage(() => import('./pages/CameraDetailPage').then((m) => m.CameraDetailPage))
 const EventsPage = lazyPage(() => import('./pages/EventsPage').then((m) => m.EventsPage))
+const ImagesPage = lazyPage(() => import('./pages/ImagesPage').then((m) => m.ImagesPage))
 const PlaybackPage = lazyPage(() => import('./pages/PlaybackPage').then((m) => m.PlaybackPage))
 const StoragePage = lazyPage(() => import('./pages/StoragePage').then((m) => m.StoragePage))
 const SettingsPage = lazyPage(() => import('./pages/SettingsPage').then((m) => m.SettingsPage))
@@ -98,6 +99,7 @@ function Routes() {
   else if (path === '/cameras') page = <CamerasPage />
   else if (detail) page = <CameraDetailPage key={detail.id} id={detail.id ?? ''} />
   else if (path === '/events') page = <EventsPage />
+  else if (path === '/images') page = <ImagesPage />
   else if (path === '/playback') page = <PlaybackPage />
   else if (path === '/storage') page = <StoragePage />
   else if (path === '/settings') page = <SettingsPage />

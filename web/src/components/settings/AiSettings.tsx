@@ -13,6 +13,7 @@ import { Button } from '../ui/Button'
 import { Badge } from '../ui/Card'
 import { ErrorState, LoadingState } from '../ui/States'
 import { t } from '../../lib/i18n'
+import { AiReplay } from './AiReplay'
 
 const inputCls = 'mt-1 h-9 w-full rounded-md border border-line bg-bg-2 px-3 text-sm text-fg outline-none focus:border-accent disabled:opacity-60'
 
@@ -28,6 +29,7 @@ interface Form {
   maxPictures: string
   interval: string
   timeout: string
+  keepPictures: boolean
 }
 
 function toForm(s: Settings): Form {
@@ -42,6 +44,7 @@ function toForm(s: Settings): Form {
     maxPictures: String(s.max_pictures),
     interval: String(s.interval_seconds),
     timeout: String(s.timeout_seconds),
+    keepPictures: s.keep_pictures ?? false,
   }
 }
 
@@ -52,6 +55,7 @@ function toSettings(f: Form): Settings {
     max_pictures: Number(f.maxPictures),
     interval_seconds: Number(f.interval),
     timeout_seconds: Number(f.timeout),
+    keep_pictures: f.keepPictures,
   }
   if (f.kind === 'onnx') return { ...base, provider: { type: 'onnx', model: f.model.trim() } }
   if (f.kind === 'http') return { ...base, provider: { type: 'deepstack_http', url: f.url.trim(), ...(f.apiKeyEnv.trim() ? { api_key_env: f.apiKeyEnv.trim() } : {}) } }
@@ -475,6 +479,14 @@ export function AiSettings() {
             <ObjectChoice value={form.labels} onChange={(l) => set('labels', l)} disabled={disabled} />
           </div>
 
+          <label className="flex max-w-xl items-start gap-2 text-sm">
+            <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={form.keepPictures} disabled={disabled} onChange={(e) => set('keepPictures', e.target.checked)} />
+            <span>
+              {t('Garder les images analysées', 'Keep the analysed pictures')}
+              <span className="block text-xs text-muted">{t('Chaque image envoyée à l’IA, avec ce qu’elle y a trouvé, dans la destination par défaut (dossier .captures) : pour rejouer l’IA dessus ci-dessous et voir si elle détecte bien. Supprimées avec les vidéos (même nombre de jours). Quelques Mo par jour et par caméra.', 'Every picture sent to the AI, with what it found, in the default destination (.captures folder): to replay the AI on them below and see whether it detects well. Deleted with the videos (same number of days). A few MB per day and camera.')}</span>
+            </span>
+          </label>
+
           <details className="text-sm">
             <summary className="cursor-pointer text-muted">{t('Réglages avancés', 'Advanced settings')}</summary>
             <div className="mt-2 grid max-w-xl gap-3 sm:grid-cols-3">
@@ -505,6 +517,7 @@ export function AiSettings() {
       </div>
 
       {form.kind !== 'none' && <AiTest active={v.active !== null} />}
+      {form.kind !== 'none' && <AiReplay active={v.active !== null} />}
     </div>
   )
 }

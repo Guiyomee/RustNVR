@@ -1,10 +1,11 @@
-import { CirclePlay, HardDrive, Info, LayoutDashboard, MonitorPlay, Settings, Activity, Video } from 'lucide-react'
+import { CirclePlay, HardDrive, Images, Info, LayoutDashboard, MonitorPlay, Settings, Activity, Video } from 'lucide-react'
 import { t } from '../../lib/i18n'
 
 export const NAV_ITEMS = [
   { to: '/', label: t("Vue d'ensemble", "Overview"), icon: LayoutDashboard },
   { to: '/cameras', label: t('Caméras', 'Cameras'), icon: Video },
   { to: '/events', label: t('Événements', 'Events'), icon: Activity },
+  { to: '/images', label: t('Images', 'Pictures'), icon: Images },
   { to: '/playback', label: t('Lecture', 'Playback'), icon: CirclePlay },
   { to: '/mur', label: t("Mur d'écrans", "Video wall"), icon: MonitorPlay },
   { to: '/storage', label: t('Stockage', 'Storage'), icon: HardDrive },

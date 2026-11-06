@@ -10,6 +10,7 @@ pub mod hwaccel;
 pub mod sysinfo;
 
 pub mod auth;
+mod backup;
 pub mod control;
 mod detection;
 mod discovery;
@@ -19,6 +20,7 @@ pub mod logs;
 mod playback;
 mod protect;
 mod recordings;
+mod replay;
 mod routes;
 mod state;
 mod stats;
@@ -28,9 +30,10 @@ pub mod transcode;
 mod ws;
 
 pub use control::{
-    AiModelView, AiProbeInput, AiProbeResult, AiTestObject, AiTestResult, AiView, CameraInput,
-    ControlError, DestinationInput, MqttInput, MqttView, NvrControl, SettingsInput, SettingsView,
-    StreamInput, WebhookTestResult,
+    AiModelView, AiProbeInput, AiProbeResult, AiTestObject, AiTestResult, AiView, BackupCamera,
+    BackupFile, BackupPreview, BackupRestored, CameraInput, CaptureDay, CapturePicture,
+    ControlError, DestinationInput, MqttInput, MqttView, NvrControl, ReplayPicture, ReplayResult,
+    SettingsInput, SettingsView, StreamInput, WebhookTestResult,
 };
 pub use routes::router;
 pub use state::{ApiState, CameraEditInfo, CameraSource, DestinationInfo, StreamSource};

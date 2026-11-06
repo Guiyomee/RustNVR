@@ -4,7 +4,9 @@
 //! integration tests need is exposed here.
 
 pub mod ai_store;
+pub mod backup;
 pub mod camera_store;
+pub mod captures;
 pub mod logging;
 pub mod mqtt_store;
 pub mod nvr;

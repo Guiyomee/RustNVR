@@ -144,6 +144,16 @@ pub enum NvrEvent {
         /// Picture of the crossing (JPEG, the object boxed), when taken.
         picture: Option<Bytes>,
     },
+    /// Who is inside, as counted by a line with `presence` (after a
+    /// crossing, a reset, or at midnight).
+    Presence {
+        /// Camera.
+        camera: CameraId,
+        /// Name of the line.
+        line: String,
+        /// People (or objects) inside.
+        present: u64,
+    },
     /// A recording destination became unusable (share not mounted, not
     /// writable, not answering) or usable again.
     StorageState {

@@ -1,6 +1,7 @@
 //! Webhooks: an HTTP POST with the event as JSON (and its picture) to the
 //! configured addresses, on motion, recognized objects and end of an event,
-//! on crossings of lines and when a recording destination fails or recovers.
+//! on crossings of lines, when a recording destination fails or recovers,
+//! and when a camera goes offline or comes back.
 //! Discord webhooks, which refuse that JSON, get a Discord message instead
 //! (an embed, the picture attached).
 //!
@@ -13,7 +14,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use rustnvr_api::{ControlError, WebhookTestResult};
 use rustnvr_core::config::{MANAGED_WEBHOOKS_FILE, WebhookConfig, WebhookEvent};
-use rustnvr_core::{DetectionEvent, NvrEvent};
+use rustnvr_core::{CameraId, DetectionEvent, NvrEvent, StreamRole, StreamState};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -204,6 +205,7 @@ fn kind_name(kind: WebhookEvent) -> &'static str {
         WebhookEvent::End => "end",
         WebhookEvent::Crossing => "crossing",
         WebhookEvent::Storage => "storage",
+        WebhookEvent::Camera => "camera",
     }
 }
 
@@ -574,6 +576,176 @@ impl Queues {
     }
 }
 
+/// A camera is reported offline once its main stream has been down this
+/// long: a reconnection of a few seconds is not worth a message.
+const OFFLINE_AFTER: Duration = Duration::from_secs(60);
+/// How often cameras down for long enough are looked for.
+const AVAILABILITY_CHECK: Duration = Duration::from_secs(5);
+
+/// Main stream of one camera, as followed for the « camera » calls.
+struct Watch {
+    online: bool,
+    /// Since when it is online, or offline.
+    since: Instant,
+    /// Its going offline was announced (and its return will be).
+    reported: bool,
+    /// Last connection error (never contains credentials).
+    error: Option<String>,
+}
+
+/// A camera went offline (for [`OFFLINE_AFTER`]) or came back after that.
+#[derive(Debug, PartialEq)]
+enum CameraChange {
+    Offline {
+        camera: CameraId,
+        error: Option<String>,
+        down_for: Duration,
+    },
+    Online {
+        camera: CameraId,
+        down_for: Duration,
+    },
+}
+
+impl CameraChange {
+    fn camera(&self) -> &CameraId {
+        match self {
+            CameraChange::Offline { camera, .. } | CameraChange::Online { camera, .. } => camera,
+        }
+    }
+}
+
+/// Availability of the cameras: offline once their main stream has been
+/// down for [`OFFLINE_AFTER`], back online only after that was reported.
+#[derive(Default)]
+struct Availability {
+    cameras: HashMap<CameraId, Watch>,
+}
+
+impl Availability {
+    /// New state of the main stream of `camera`; its return, if announced.
+    fn state(
+        &mut self,
+        camera: &CameraId,
+        state: &StreamState,
+        now: Instant,
+    ) -> Option<CameraChange> {
+        if matches!(state, StreamState::Stopped) {
+            // Disabled, removed or shutting down: not a failure.
+            self.cameras.remove(camera);
+            return None;
+        }
+        let w = self.cameras.entry(camera.clone()).or_insert(Watch {
+            online: false,
+            since: now,
+            reported: false,
+            error: None,
+        });
+        if state.is_streaming() {
+            let change = w.reported.then(|| CameraChange::Online {
+                camera: camera.clone(),
+                down_for: now.saturating_duration_since(w.since),
+            });
+            if !w.online {
+                *w = Watch {
+                    online: true,
+                    since: now,
+                    reported: false,
+                    error: None,
+                };
+            }
+            return change;
+        }
+        if w.online {
+            w.online = false;
+            w.since = now;
+        }
+        if let StreamState::Retrying { error, .. } = state {
+            w.error = Some(error.clone());
+        }
+        None
+    }
+
+    /// Cameras down for [`OFFLINE_AFTER`] and not reported yet.
+    fn due(&mut self, now: Instant) -> Vec<CameraChange> {
+        let mut out = Vec::new();
+        for (camera, w) in &mut self.cameras {
+            let down_for = now.saturating_duration_since(w.since);
+            if !w.online && !w.reported && down_for >= OFFLINE_AFTER {
+                w.reported = true;
+                out.push(CameraChange::Offline {
+                    camera: camera.clone(),
+                    error: w.error.clone(),
+                    down_for,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// Whether a webhook wants the « camera » calls of `camera` (its objects
+/// filter does not apply).
+fn wants_camera(hook: &WebhookConfig, camera: &str) -> bool {
+    hook.enabled
+        && hook.events.contains(&WebhookEvent::Camera)
+        && (hook.cameras.is_empty() || hook.cameras.iter().any(|c| c == camera))
+}
+
+/// JSON sent when a camera goes offline or comes back.
+fn camera_body(change: &CameraChange, camera_name: &str, at_ms: i64) -> Value {
+    let (online, down_for, error) = match change {
+        CameraChange::Offline {
+            down_for, error, ..
+        } => (false, down_for, error.as_deref()),
+        CameraChange::Online { down_for, .. } => (true, down_for, None),
+    };
+    json!({
+        "type": "camera",
+        "camera": change.camera().as_str(),
+        "camera_name": camera_name,
+        "camera_state": {
+            "online": online,
+            "at_ms": at_ms,
+            "offline_ms": u64::try_from(down_for.as_millis()).unwrap_or(u64::MAX),
+            "error": error,
+        },
+        "rustnvr": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Discord message when a camera goes offline or comes back.
+fn camera_discord(change: &CameraChange, camera_name: &str, at_ms: i64) -> Value {
+    let ms = |d: &Duration| i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
+    match change {
+        CameraChange::Offline {
+            down_for, error, ..
+        } => {
+            let mut text = format!("Plus d'image depuis {}.", duration_text(ms(down_for)));
+            if let Some(e) = error {
+                text.push_str(&format!("\nDernière erreur : {e}"));
+            }
+            discord_message(
+                format!("Caméra hors ligne · {camera_name}"),
+                0xEF_44_44,
+                text,
+                at_ms,
+                false,
+            )
+        }
+        CameraChange::Online { down_for, .. } => discord_message(
+            format!("Caméra rétablie · {camera_name}"),
+            0x22_C5_5E,
+            format!(
+                "De nouveau en ligne après {} sans image.",
+                duration_text(ms(down_for))
+            ),
+            at_ms,
+            false,
+        ),
+    }
+}
+
 /// Follows the events and queues the calls.
 pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
     let mut queues = Queues {
@@ -582,11 +754,17 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
     };
     let mut events = shared.engine.events.subscribe();
     let mut sent: HashMap<i64, Sent> = HashMap::new();
+    let mut availability = Availability::default();
+    let mut ticker = tokio::time::interval(AVAILABILITY_CHECK);
     loop {
         let event = tokio::select! {
             _ = cancel.cancelled() => return,
+            _ = ticker.tick() => None,
             e = events.recv() => match e {
-                Ok(e @ (NvrEvent::Detection(_) | NvrEvent::Crossing { .. } | NvrEvent::StorageState { .. })) => e,
+                Ok(e @ (NvrEvent::Detection(_)
+                    | NvrEvent::Crossing { .. }
+                    | NvrEvent::StorageState { .. }
+                    | NvrEvent::StreamState { role: StreamRole::Main, .. })) => Some(e),
                 Ok(_) => continue,
                 Err(RecvError::Lagged(n)) => {
                     warn!(skipped = n, "webhooks lagging behind the events");
@@ -594,6 +772,15 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                 }
                 Err(RecvError::Closed) => return,
             },
+        };
+        // Followed even without webhooks, to be right when one is added.
+        let now = Instant::now();
+        let changes = match &event {
+            None => availability.due(now),
+            Some(NvrEvent::StreamState { camera, state, .. }) => {
+                availability.state(camera, state, now).into_iter().collect()
+            }
+            Some(_) => Vec::new(),
         };
         let hooks = shared
             .webhooks
@@ -605,6 +792,23 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
         if hooks.iter().all(|h| !h.enabled) {
             continue;
         }
+        for change in changes {
+            let camera = change.camera();
+            let name = camera_name(&shared, camera).await;
+            let at_ms = jiff::Timestamp::now().as_millisecond();
+            for hook in hooks.iter().filter(|h| wants_camera(h, camera.as_str())) {
+                let body = if hook.is_discord() {
+                    Body::Discord {
+                        payload: camera_discord(&change, &name, at_ms),
+                        jpeg: None,
+                    }
+                } else {
+                    Body::Json(camera_body(&change, &name, at_ms))
+                };
+                queues.push(hook, body);
+            }
+        }
+        let Some(event) = event else { continue };
         let event = match event {
             NvrEvent::Detection(e) => e,
             NvrEvent::Crossing {
@@ -878,6 +1082,96 @@ mod tests {
         assert_eq!(b["camera_name"], "Jardin");
         assert_eq!(b["event"]["objects"][0]["label"], "person");
         assert_eq!(b["image"], "data:image/jpeg;base64,/9g=");
+    }
+
+    #[test]
+    fn cameras_are_reported_offline_after_a_minute_then_back() {
+        use std::time::Duration;
+        let cam = CameraId::new("garage").expect("id");
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let streaming = StreamState::Streaming {
+            session: 1,
+            codec: rustnvr_core::VideoCodec::H264,
+            width: 1920,
+            height: 1080,
+            audio: None,
+            since: std::time::SystemTime::now(),
+        };
+        let retrying = StreamState::Retrying {
+            attempt: 1,
+            retry_in: Duration::from_secs(2),
+            error: "DESCRIBE failed".into(),
+        };
+        let mut a = Availability::default();
+        assert_eq!(a.state(&cam, &streaming, at(0)), None);
+        // A short reconnection: nothing.
+        assert_eq!(a.state(&cam, &retrying, at(10)), None);
+        assert!(a.due(at(40)).is_empty());
+        assert_eq!(
+            a.state(&cam, &streaming, at(45)),
+            None,
+            "back before a minute"
+        );
+        // Down for good: reported once, after a minute.
+        a.state(&cam, &retrying, at(100));
+        a.state(&cam, &StreamState::Connecting { attempt: 2 }, at(120));
+        assert!(a.due(at(150)).is_empty());
+        let due = a.due(at(161));
+        assert_eq!(
+            due,
+            [CameraChange::Offline {
+                camera: cam.clone(),
+                error: Some("DESCRIBE failed".into()),
+                down_for: Duration::from_secs(61),
+            }]
+        );
+        assert!(a.due(at(300)).is_empty(), "reported once");
+        // Back: announced with the time it was down.
+        assert_eq!(
+            a.state(&cam, &streaming, at(400)),
+            Some(CameraChange::Online {
+                camera: cam.clone(),
+                down_for: Duration::from_secs(300),
+            })
+        );
+        assert_eq!(a.state(&cam, &streaming, at(401)), None);
+        // A camera that never connects at startup is reported too; a stopped
+        // one (disabled, shutdown) never.
+        let other = CameraId::new("jardin").expect("id");
+        a.state(&other, &StreamState::Idle, at(500));
+        assert_eq!(a.due(at(561)).len(), 1);
+        a.state(&cam, &retrying, at(600));
+        a.state(&cam, &StreamState::Stopped, at(601));
+        assert!(a.due(at(700)).is_empty());
+
+        // Calls: camera filter, messages.
+        let hook = WebhookConfig {
+            events: vec![WebhookEvent::Camera],
+            cameras: vec!["garage".into()],
+            ..hook()
+        };
+        assert!(wants_camera(&hook, "garage") && !wants_camera(&hook, "jardin"));
+        let offline = &due[0];
+        let d = camera_discord(offline, "Garage", 1);
+        assert_eq!(d["embeds"][0]["title"], "Caméra hors ligne · Garage");
+        assert!(
+            d["embeds"][0]["description"]
+                .as_str()
+                .is_some_and(|s| s.contains("1 min 01 s") && s.contains("DESCRIBE failed"))
+        );
+        let back = CameraChange::Online {
+            camera: cam,
+            down_for: Duration::from_secs(300),
+        };
+        assert_eq!(
+            camera_discord(&back, "Garage", 1)["embeds"][0]["title"],
+            "Caméra rétablie · Garage"
+        );
+        let j = camera_body(offline, "Garage", 1);
+        assert_eq!(j["type"], "camera");
+        assert_eq!(j["camera_state"]["online"], false);
+        assert_eq!(j["camera_state"]["offline_ms"], 61_000);
     }
 
     #[test]

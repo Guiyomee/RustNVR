@@ -20,7 +20,7 @@ members = [
 # Calendar versions: year.month.number of the release in the month. Cargo
 # forbids leading zeros: 2026.11.1 here, published as v2026.11.01 (RustNVR's
 # update check reads both the same).
-version = "2026.11.1"
+version = "2026.11.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -40,7 +40,7 @@ rustnvr-ai = { path = "crates/rustnvr-ai" }
 rustnvr-discovery = { path = "crates/rustnvr-discovery" }
 
 anyhow = "1.0.104"
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1.12"
 clap = { version = "4.6", features = ["derive"] }
 futures = "0.3.34"

@@ -17,7 +17,7 @@ pub use camera::{CameraId, InvalidCameraId, StreamRole};
 pub use config::{Config, ConfigError};
 pub use detection::{
     CrossingDirection, CrossingLine, DetectedObject, DetectionEvent, EventKind, MotionSettings,
-    MotionZone, PrivacyMask,
+    MotionZone, PrivacyMask, presence,
 };
 pub use events::{EventBus, NvrEvent, SegmentInfo, StreamState};
 pub use media::{

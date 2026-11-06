@@ -69,7 +69,7 @@ src/
     playback/           RecordingPlayer (HLS : hls.js chargé à la demande, HLS natif, ou fichier par fichier)
     storage/            StorageCard
     settings/           SettingsSection, StorageSettings (points de stockage, rétention), MqttSettings
-  pages/                Overview, Cameras, CameraDetail, Events, Playback, Storage, Settings, About
+  pages/                Overview, Cameras, CameraDetail, Events, Images, Playback, Storage, Settings, About
 ```
 
 Règles :

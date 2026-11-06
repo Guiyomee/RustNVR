@@ -2,6 +2,7 @@
 //! settings and the MQTT client.
 
 use super::{Controller, Shared, State};
+use crate::captures::Capture;
 use crate::{ai_store, mqtt_store};
 use bytes::Bytes;
 use rustnvr_api::{
@@ -180,7 +181,7 @@ fn distance_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
 
 /// Whether `o` is at `line`: the bottom middle (feet) or the centre of its
 /// box is near the line. An object without a box counts.
-fn at_line(o: &DetectedObject, line: &rustnvr_core::CrossingLine) -> bool {
+pub(super) fn at_line(o: &DetectedObject, line: &rustnvr_core::CrossingLine) -> bool {
     let Some([x1, y1, x2, y2]) = o.bbox else {
         return true;
     };
@@ -246,12 +247,29 @@ async fn crossing(
             debug!(%camera, line, "crossing not checked: no picture");
             return;
         };
+        let started = std::time::Instant::now();
         match ai.analyze(&jpeg).await {
             Ok(objects) => {
                 let seen: Vec<DetectedObject> = objects
-                    .into_iter()
+                    .iter()
                     .filter(|o| geometry.objects.contains(&o.label) && at_line(o, &geometry))
+                    .cloned()
                     .collect();
+                keep_picture(
+                    &shared,
+                    &camera,
+                    &jpeg,
+                    Capture {
+                        at_ms: jiff::Timestamp::now().as_millisecond(),
+                        event: None,
+                        picture: None,
+                        line: Some(line.clone()),
+                        provider: ai.provider().to_owned(),
+                        ms: started.elapsed().as_millis() as u64,
+                        found: objects,
+                        kept: seen.iter().map(|o| o.label.clone()).collect(),
+                    },
+                );
                 let Some(best) = seen.iter().max_by(|a, b| a.score.total_cmp(&b.score)) else {
                     debug!(%camera, line, "crossing ignored: none of the line's objects at the line");
                     return;
@@ -290,16 +308,172 @@ async fn crossing(
             .filter(|(c, l, _, _)| c == camera.as_str() && *l == line)
             .count() as u64
     });
-    info!(%camera, line, forward, today, object = object.as_deref().unwrap_or(""), "line crossed");
+    let present = if geometry.presence {
+        Some(line_presence(&db, &camera, &line).await)
+    } else {
+        None
+    };
+    info!(%camera, line, forward, today, object = object.as_deref().unwrap_or(""), present = present.map(|p| p.to_string()).unwrap_or_default(), "line crossed");
     let _ = shared.engine.events.send(NvrEvent::Crossing {
-        camera,
-        line,
+        camera: camera.clone(),
+        line: line.clone(),
         forward,
         at_ms,
         today,
         object,
         picture,
     });
+    if let Some(present) = present {
+        let _ = shared.engine.events.send(NvrEvent::Presence {
+            camera,
+            line,
+            present,
+        });
+    }
+}
+
+/// Keeps an analysed picture and what was found in it, when
+/// `ai.keep_pictures` is on, for the replays. Written off the caller.
+fn keep_picture(shared: &Shared, camera: &CameraId, jpeg: &Bytes, capture: Capture) {
+    let keep = shared
+        .ai_settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .0
+        .keep_pictures;
+    let root = shared
+        .captures_root
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let (true, Some((root, _))) = (keep, root) else {
+        return;
+    };
+    let (camera, jpeg) = (camera.clone(), jpeg.clone());
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = crate::captures::save(&root, &camera, &jpeg, &capture) {
+            warn!(%camera, error = %e, "cannot keep the analysed picture");
+        }
+    });
+}
+
+/// Local midnight of today, in milliseconds since the Unix epoch.
+fn local_midnight_ms() -> i64 {
+    let now = jiff::Zoned::now();
+    now.start_of_day()
+        .map_or(now.timestamp().as_millisecond(), |z| {
+            z.timestamp().as_millisecond()
+        })
+}
+
+/// Who is inside according to `line` of `camera` (a line with `presence`):
+/// entries minus exits since local midnight or its last reset, whichever is
+/// later, never below zero.
+pub(super) async fn line_presence(db: &Database, camera: &CameraId, line: &str) -> u64 {
+    let reset = db
+        .presence_reset(camera.as_str(), line)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    let from = local_midnight_ms().max(reset);
+    match db.line_crossings_since(camera.as_str(), line, from).await {
+        Ok(crossings) => rustnvr_core::presence(crossings),
+        Err(e) => {
+            warn!(%camera, line, error = %e, "cannot count the presence");
+            0
+        }
+    }
+}
+
+/// The lines counting the presence, for each camera.
+async fn presence_lines(shared: &Shared) -> Vec<(CameraId, String)> {
+    let state = shared.state.lock().await;
+    let mut out: Vec<(CameraId, String)> = state
+        .motion
+        .iter()
+        .flat_map(|(camera, s)| {
+            s.lines
+                .iter()
+                .filter(|l| l.presence)
+                .map(|l| (camera.clone(), l.name.clone()))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Who is inside according to every line counting the presence.
+pub(super) async fn presence_counts(shared: &Shared) -> Vec<(CameraId, String, u64)> {
+    let Some(db) = shared.database.as_ref() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (camera, line) in presence_lines(shared).await {
+        let present = line_presence(db, &camera, &line).await;
+        out.push((camera, line, present));
+    }
+    out
+}
+
+/// Starts the presence count of `line` of `camera` again from zero.
+pub(super) async fn reset_presence(
+    shared: &Shared,
+    camera: &CameraId,
+    line: &str,
+) -> Result<(), ControlError> {
+    let db = shared.database.as_ref().ok_or_else(|| {
+        ControlError::Invalid("pas de base de données : aucun comptage".to_owned())
+    })?;
+    if !presence_lines(shared)
+        .await
+        .iter()
+        .any(|(c, l)| c == camera && l == line)
+    {
+        return Err(ControlError::NotFound(format!(
+            "la caméra {camera} n'a pas de ligne {line:?} qui compte les présences"
+        )));
+    }
+    let now = jiff::Timestamp::now().as_millisecond();
+    db.set_presence_reset(camera.as_str(), line, now)
+        .await
+        .map_err(|e| ControlError::Internal(e.to_string()))?;
+    info!(%camera, line, "presence count reset");
+    let _ = shared.engine.events.send(NvrEvent::Presence {
+        camera: camera.clone(),
+        line: line.to_owned(),
+        present: 0,
+    });
+    Ok(())
+}
+
+/// At each local midnight, announces that the presence counts start again
+/// from zero.
+pub(super) async fn run_presence_midnight(shared: Arc<Shared>, cancel: CancellationToken) {
+    loop {
+        let wait = jiff::Zoned::now()
+            .tomorrow()
+            .and_then(|d| d.start_of_day())
+            .ok()
+            .and_then(|midnight| {
+                let ms =
+                    midnight.timestamp().as_millisecond() - jiff::Timestamp::now().as_millisecond();
+                u64::try_from(ms).ok()
+            })
+            .map_or(Duration::from_secs(3600), Duration::from_millis);
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            // A little after midnight, so that « today » is the new day.
+            _ = tokio::time::sleep(wait + Duration::from_secs(1)) => {}
+        }
+        for (camera, line, present) in presence_counts(&shared).await {
+            let _ = shared.engine.events.send(NvrEvent::Presence {
+                camera,
+                line,
+                present,
+            });
+        }
+    }
 }
 
 /// Takes, stores and announces the thumbnail of an event.
@@ -363,15 +537,31 @@ async fn recognize(
     let mut jpeg = thumbnail;
     for picture in 1..=max_pictures {
         let started = std::time::Instant::now();
-        let objects = match ai.analyze(&jpeg).await {
-            Ok(objects) => place(objects, &wanted),
+        let found = match ai.analyze(&jpeg).await {
+            Ok(found) => found,
             Err(e) => {
                 // Do not insist with a provider that does not answer.
                 warn!(camera = %event.camera, error = %e, "object recognition failed");
                 return;
             }
         };
+        let objects = place(found.clone(), &wanted);
         let ms = started.elapsed().as_millis() as u64;
+        keep_picture(
+            shared,
+            &event.camera,
+            &jpeg,
+            Capture {
+                at_ms: jiff::Timestamp::now().as_millisecond(),
+                event: Some(event.id),
+                picture: Some(picture),
+                line: None,
+                provider: ai.provider().to_owned(),
+                ms,
+                found,
+                kept: objects.iter().map(|o| o.label.clone()).collect(),
+            },
+        );
         if !objects.is_empty() {
             let labels: Vec<&str> = objects.iter().map(|o| o.label.as_str()).collect();
             info!(camera = %event.camera, id = event.id, picture, objects = ?labels, ms, "objects recognized");
@@ -628,6 +818,8 @@ impl NvrView for MqttBridge {
             let Some(shared) = self.0.upgrade() else {
                 return Vec::new();
             };
+            // Before locking the state (the counts read it too).
+            let presence = presence_counts(&shared).await;
             let state = shared.state.lock().await;
             state
                 .configs
@@ -645,6 +837,11 @@ impl NvrView for MqttBridge {
                             .is_some_and(|m| m.status.borrow().active),
                         audio_enabled: c.record.audio,
                         person_detection: shared.ai().is_some(),
+                        presence: presence
+                            .iter()
+                            .filter(|(cam, _, _)| *cam == c.id)
+                            .map(|(_, line, n)| (line.clone(), *n))
+                            .collect(),
                     }
                 })
                 .collect()
@@ -722,6 +919,22 @@ impl NvrView for MqttBridge {
             let shared = self.0.upgrade().ok_or("NVR arrêté")?;
             Controller(shared)
                 .set_audio(camera.to_string(), enabled)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn reset_presence(&self, camera: CameraId, label: String) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let shared = self.0.upgrade().ok_or("NVR arrêté")?;
+            // The topic level of a line is its name made topic-safe.
+            let line = presence_lines(&shared)
+                .await
+                .into_iter()
+                .find(|(c, l)| *c == camera && rustnvr_mqtt::topic_label(l) == label)
+                .map(|(_, l)| l)
+                .ok_or_else(|| format!("aucune ligne de présence {label:?}"))?;
+            reset_presence(&shared, &camera, &line)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -975,7 +1188,7 @@ pub(super) async fn set_settings(
 }
 
 /// Detection settings of `camera` (objects and zones that count).
-async fn camera_settings(shared: &Shared, camera: &CameraId) -> MotionSettings {
+pub(super) async fn camera_settings(shared: &Shared, camera: &CameraId) -> MotionSettings {
     shared
         .state
         .lock()
@@ -987,7 +1200,10 @@ async fn camera_settings(shared: &Shared, camera: &CameraId) -> MotionSettings {
 }
 
 /// The objects that count for the camera, each with the zone it is in.
-fn place(objects: Vec<DetectedObject>, settings: &MotionSettings) -> Vec<DetectedObject> {
+pub(super) fn place(
+    objects: Vec<DetectedObject>,
+    settings: &MotionSettings,
+) -> Vec<DetectedObject> {
     objects
         .into_iter()
         .filter_map(|mut o| {
@@ -1248,6 +1464,7 @@ mod tests {
             b: [0.8, 0.7],
             direction: CrossingDirection::Both,
             objects: vec!["person".into()],
+            presence: false,
         };
         let person = |bbox| DetectedObject {
             label: "person".into(),

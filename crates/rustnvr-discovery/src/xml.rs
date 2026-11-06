@@ -13,19 +13,15 @@ pub(crate) struct Element {
     pub children: Vec<Element>,
 }
 
-fn utf8(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
-}
-
 fn start(e: &BytesStart<'_>) -> Element {
     Element {
-        name: utf8(e.local_name().as_ref()),
+        name: e.local_name().as_ref().to_owned(),
         attrs: e
             .attributes()
             .flatten()
             .map(|a| {
                 (
-                    utf8(a.key.local_name().as_ref()),
+                    a.key.local_name().as_ref().to_owned(),
                     a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                         .map(|v| v.into_owned())
                         .unwrap_or_default(),
@@ -72,10 +68,10 @@ pub(crate) fn parse(xml: &str) -> Option<Element> {
                 let el = stack.pop()?;
                 stack.last_mut()?.children.push(el);
             }
-            Event::Text(t) => stack.last_mut()?.text.push_str(&t.decode().ok()?),
-            Event::CData(t) => stack.last_mut()?.text.push_str(&t.decode().ok()?),
+            Event::Text(t) => stack.last_mut()?.text.push_str(&t.xml10_content()),
+            Event::CData(t) => stack.last_mut()?.text.push_str(&t.xml10_content()),
             Event::GeneralRef(r) => {
-                if let Some(c) = entity(&r.decode().ok()?) {
+                if let Some(c) = entity(&r.xml10_content()) {
                     stack.last_mut()?.text.push(c);
                 }
             }

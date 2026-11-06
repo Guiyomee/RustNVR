@@ -80,6 +80,10 @@ pub struct CrossingLine {
     /// line for a crossing to count, e.g. `["person"]`; empty: any motion.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<String>,
+    /// Count who is inside: crossings in the arrow direction enter, the
+    /// others leave (needs both directions counted).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub presence: bool,
 }
 
 impl Default for MotionSettings {
@@ -224,6 +228,12 @@ impl MotionSettings {
             if l.objects.len() > 16 || l.objects.iter().any(|o| o.is_empty() || o.len() > 64) {
                 p.push(format!("ligne {:?} : objets invalides", l.name));
             }
+            if l.presence && l.direction != CrossingDirection::Both {
+                p.push(format!(
+                    "ligne {:?} : le comptage des présences demande les deux sens",
+                    l.name
+                ));
+            }
         }
         let mut names: Vec<&str> = self.lines.iter().map(|l| l.name.trim()).collect();
         names.sort_unstable();
@@ -244,6 +254,17 @@ impl MotionSettings {
             .iter()
             .any(|m| x >= m.rect[0] && x <= m.rect[2] && y >= m.rect[1] && y <= m.rect[3])
     }
+}
+
+/// Who is inside after `crossings`, in order (`true`: entering), starting
+/// from nobody. Never below zero: an exit whose entry was missed is ignored.
+pub fn presence(crossings: impl IntoIterator<Item = bool>) -> u64 {
+    crossings.into_iter().fold(
+        0,
+        |n, entering| {
+            if entering { n + 1 } else { n.saturating_sub(1) }
+        },
+    )
 }
 
 /// What was detected.
@@ -369,6 +390,28 @@ mod tests {
             persons_only.locate(&object("car", [0.1, 0.6, 0.3, 0.9])),
             None
         );
+    }
+
+    #[test]
+    fn counts_who_is_inside() {
+        assert_eq!(presence([]), 0);
+        assert_eq!(presence([true, true, false]), 1);
+        // A missed entry: the exit does not go below zero, the next entry counts.
+        assert_eq!(presence([false, true]), 1);
+        assert_eq!(presence([true, false, false, false, true, true]), 2);
+        let line = CrossingLine {
+            name: "porte".into(),
+            a: [0.1, 0.5],
+            b: [0.9, 0.5],
+            direction: CrossingDirection::Forward,
+            objects: Vec::new(),
+            presence: true,
+        };
+        let s = MotionSettings {
+            lines: vec![line],
+            ..MotionSettings::default()
+        };
+        assert_eq!(s.problems().len(), 1, "presence needs both directions");
     }
 
     #[test]

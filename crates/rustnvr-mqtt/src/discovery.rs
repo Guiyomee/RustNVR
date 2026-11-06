@@ -273,6 +273,83 @@ pub(crate) fn nvr_configs(prefix: &str, client_id: &str, topics: &Topics) -> Vec
     ]
 }
 
+/// Discovery topics of the presence entities of line `label` (sensor and
+/// reset button) of camera `cam`.
+pub(crate) fn presence_config_topics(
+    prefix: &str,
+    client_id: &str,
+    cam: &CameraId,
+    label: &str,
+) -> [String; 2] {
+    [
+        config_topic(
+            prefix,
+            "sensor",
+            client_id,
+            &format!("{cam}_line_{label}_present"),
+        ),
+        config_topic(
+            prefix,
+            "button",
+            client_id,
+            &format!("{cam}_line_{label}_presence_reset"),
+        ),
+    ]
+}
+
+/// Discovery messages of the presence of `line` of camera `c`: who is inside
+/// (sensor) and a reset button.
+pub(crate) fn presence_configs(
+    prefix: &str,
+    client_id: &str,
+    topics: &Topics,
+    c: &CameraView,
+    line: &str,
+) -> Vec<(String, String)> {
+    let node = node_id(client_id);
+    let label = crate::topic_label(line);
+    let device = json!({
+        "identifiers": [format!("{node}_{}", c.id)],
+        "name": c.name,
+        "manufacturer": "RustNVR",
+        "model": "Caméra",
+        "via_device": node,
+    });
+    let availability = json!([{ "topic": topics.availability() }]);
+    let [sensor, button] = presence_config_topics(prefix, client_id, &c.id, &label);
+    vec![
+        (
+            sensor,
+            json!({
+                "name": format!("Présents · {line}"),
+                "unique_id": format!("{node}_{}_line_{label}_present", c.id),
+                "object_id": format!("{node}_{}_line_{label}_present", c.id),
+                "icon": "mdi:account-group",
+                "state_class": "measurement",
+                "state_topic": topics.camera(&c.id, &format!("line/{label}/present")),
+                "device": device,
+                "availability": availability,
+            })
+            .to_string(),
+        ),
+        (
+            button,
+            json!({
+                "name": format!("Remettre à zéro · {line}"),
+                "unique_id": format!("{node}_{}_line_{label}_presence_reset", c.id),
+                "object_id": format!("{node}_{}_line_{label}_presence_reset", c.id),
+                "icon": "mdi:account-off",
+                "entity_category": "config",
+                "command_topic": topics.camera(&c.id, &format!("line/{label}/presence/reset")),
+                "payload_press": "PRESS",
+                "device": device,
+                "availability": availability,
+            })
+            .to_string(),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +368,7 @@ mod tests {
             motion_active: false,
             audio_enabled: true,
             person_detection: true,
+            presence: vec![("Porte du garage".into(), 1)],
         };
         let configs = camera_configs("homeassistant", "rustnvr", &topics, &cam);
         assert_eq!(configs.len(), CAMERA_ENTITIES.len());
@@ -311,6 +389,28 @@ mod tests {
         );
         let audio: Value = serde_json::from_str(&configs[4].1).expect("json");
         assert_eq!(audio["command_topic"], "rustnvr/jardin/audio/set");
+        // Presence of a line: a sensor and a reset button, named after the line.
+        let presence =
+            presence_configs("homeassistant", "rustnvr", &topics, &cam, "Porte du garage");
+        assert_eq!(
+            presence[0].0,
+            "homeassistant/sensor/rustnvr/jardin_line_porte_du_garage_present/config"
+        );
+        let sensor: Value = serde_json::from_str(&presence[0].1).expect("json");
+        assert_eq!(
+            sensor["state_topic"],
+            "rustnvr/jardin/line/porte_du_garage/present"
+        );
+        assert_eq!(sensor["name"], "Présents · Porte du garage");
+        let button: Value = serde_json::from_str(&presence[1].1).expect("json");
+        assert_eq!(
+            button["command_topic"],
+            "rustnvr/jardin/line/porte_du_garage/presence/reset"
+        );
+        assert_eq!(
+            presence_config_topics("homeassistant", "rustnvr", &cam.id, "porte_du_garage")[1],
+            presence[1].0
+        );
         assert_eq!(audio["unique_id"], "rustnvr_jardin_audio");
         let person: Value = serde_json::from_str(&configs[5].1).expect("json");
         assert_eq!(person["state_topic"], "rustnvr/jardin/person");

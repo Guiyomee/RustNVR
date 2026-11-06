@@ -98,7 +98,7 @@ export function LineEditor({ background, lines, onChange, objects = [], disabled
       </div>
       <div className="space-y-3 text-sm">
         {lines.length === 0 ? (
-          <p className="text-xs text-muted">{t('Aucune ligne. Cliquez deux points sur l’image (portail, porte, allée) : chaque passage de ce qui bouge par-dessus sera compté.', 'No line. Click two points on the picture (gate, door, path): each crossing of what moves over it will be counted.')}</p>
+          <p className="text-xs text-muted">{t('Aucune ligne. Cliquez deux points sur l’image (portail, porte, allée) : chaque passage de ce qui bouge par-dessus sera compté. Tracez-la en travers du passage, vers le milieu de l’image, là où passe le milieu du corps : près du bord, ce qui bouge sort de l’image avant de la franchir.', 'No line. Click two points on the picture (gate, door, path): each crossing of what moves over it will be counted. Draw it across the way, towards the middle of the picture, where the middle of the body passes: near the edge, what moves leaves the picture before crossing it.')}</p>
         ) : (
           lines.map((l, i) => (
             <div key={i} className="space-y-1.5">
@@ -113,13 +113,38 @@ export function LineEditor({ background, lines, onChange, objects = [], disabled
                 />
                 <Button size="sm" icon={<Trash className="size-3.5" />} disabledReason={disabled ? t('Lecture seule', 'Read only') : null} aria-label={t(`Supprimer ${l.name}`, `Delete ${l.name}`)} onClick={() => onChange(lines.filter((_, k) => k !== i))} />
               </div>
-              <select className="h-8 w-full rounded-md border border-line bg-bg-2 px-2 text-sm" value={l.direction} disabled={disabled} aria-label={t('Passages comptés', 'Crossings counted')} onChange={(e) => set(i, { direction: e.target.value as CrossingLine['direction'] })}>
+              <select
+                className="h-8 w-full rounded-md border border-line bg-bg-2 px-2 text-sm"
+                value={l.direction}
+                disabled={disabled}
+                aria-label={t('Passages comptés', 'Crossings counted')}
+                // Counting who is inside needs both directions.
+                onChange={(e) => {
+                  const direction = e.target.value as CrossingLine['direction']
+                  set(i, { direction, presence: direction === 'both' ? l.presence : false })
+                }}
+              >
                 {DIRECTIONS.map((d) => (
                   <option key={d.value} value={d.value}>
                     {d.label}
                   </option>
                 ))}
               </select>
+              <label className="flex items-start gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-4 accent-accent"
+                  checked={l.presence ?? false}
+                  disabled={disabled}
+                  onChange={(e) => set(i, { presence: e.target.checked, direction: e.target.checked ? 'both' : l.direction })}
+                />
+                <span>
+                  {t('Compter les présences', 'Count who is inside')}
+                  <span className="block text-muted">
+                    {t('La flèche indique l’entrée : entrées − sorties depuis minuit (ou la remise à zéro). Visible dans Événements → Activité et Home Assistant (« Présents »).', 'The arrow shows the way in: entries − exits since midnight (or the reset). Shown in Events → Activity and Home Assistant (« Present »).')}
+                  </span>
+                </span>
+              </label>
               {(offered.length > 0 || (l.objects ?? []).length > 0) && (
                 <div className="space-y-1">
                   <span className="block text-xs text-muted">{t('Compter seulement (vérifié par l’IA)', 'Count only (checked by the AI)')}</span>

@@ -213,6 +213,62 @@ pub trait NvrControl: Send + Sync {
         &self,
         repository: Option<String>,
     ) -> BoxFuture<'_, Result<crate::dto::UpdateStatus, ControlError>>;
+    /// Who is inside according to each line counting the presence:
+    /// camera, line, count.
+    fn presence(&self) -> BoxFuture<'_, Vec<(String, String, u64)>>;
+    /// Days with kept pictures (`ai.keep_pictures`), the most recent first.
+    fn captures(&self) -> BoxFuture<'_, Result<Vec<CaptureDay>, ControlError>>;
+    /// Kept pictures of `camera` on `day`.
+    fn capture_pictures(
+        &self,
+        camera: String,
+        day: String,
+    ) -> BoxFuture<'_, Result<Vec<CapturePicture>, ControlError>>;
+    /// The JPEG of a kept picture.
+    fn capture_picture(
+        &self,
+        camera: String,
+        day: String,
+        file: String,
+    ) -> BoxFuture<'_, Result<Vec<u8>, ControlError>>;
+    /// Deletes the kept pictures of `camera` on `day`; how many.
+    fn delete_captures(
+        &self,
+        camera: String,
+        day: String,
+    ) -> BoxFuture<'_, Result<usize, ControlError>>;
+    /// Analyses again the kept pictures of `camera` on `day` (only `file`
+    /// when given) with the current recognition settings.
+    fn replay(
+        &self,
+        camera: String,
+        day: String,
+        file: Option<String>,
+    ) -> BoxFuture<'_, Result<ReplayResult, ControlError>>;
+    /// Starts the presence count of a line again from zero.
+    fn reset_presence(
+        &self,
+        camera: String,
+        line: String,
+    ) -> BoxFuture<'_, Result<(), ControlError>>;
+    /// A backup of the configuration (files and detection settings),
+    /// encrypted with `passphrase`.
+    fn backup(&self, passphrase: String) -> BoxFuture<'_, Result<Vec<u8>, ControlError>>;
+    /// Opens a backup and tells what restoring it would do.
+    fn backup_inspect(
+        &self,
+        data: Vec<u8>,
+        passphrase: String,
+    ) -> BoxFuture<'_, Result<BackupPreview, ControlError>>;
+    /// Restores the files `files` of a backup, and its detection settings
+    /// when `motion`; used from the next start of the server.
+    fn backup_restore(
+        &self,
+        data: Vec<u8>,
+        passphrase: String,
+        files: Vec<String>,
+        motion: bool,
+    ) -> BoxFuture<'_, Result<BackupRestored, ControlError>>;
 }
 
 /// Object recognition settings and state (`GET /api/v1/ai`).
@@ -424,4 +480,115 @@ pub struct MqttView {
     pub connected: bool,
     /// Last connection error, if not connected.
     pub error: Option<String>,
+}
+
+/// A file of a backup compared with the current one.
+#[derive(Clone, Debug, Serialize)]
+pub struct BackupFile {
+    /// File name (`config.toml`, `cameras.ui.toml`…).
+    pub name: String,
+    /// `same`, `changed`, `new` (only in the backup) or `not_in_backup`
+    /// (kept as it is).
+    pub state: &'static str,
+}
+
+/// A camera of the configuration once a backup is restored.
+#[derive(Clone, Debug, Serialize)]
+pub struct BackupCamera {
+    /// Identifier.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+}
+
+/// What restoring a backup would do (`POST /api/v1/backup/inspect`).
+#[derive(Clone, Debug, Serialize)]
+pub struct BackupPreview {
+    /// When the backup was made, in milliseconds since the Unix epoch.
+    pub created_ms: i64,
+    /// Version of RustNVR that made it.
+    pub rustnvr: String,
+    /// Each file.
+    pub files: Vec<BackupFile>,
+    /// Cameras once every file of the backup is restored.
+    pub cameras: Vec<BackupCamera>,
+    /// Cameras whose detection settings (zones, lines, masks) are in it.
+    pub motion: Vec<String>,
+    /// Why the restored configuration would not load (empty when it would).
+    pub problems: Vec<String>,
+}
+
+/// What a restore did (`POST /api/v1/backup/restore`).
+#[derive(Clone, Debug, Serialize)]
+pub struct BackupRestored {
+    /// Files written.
+    pub files: Vec<String>,
+    /// Cameras whose detection settings were restored.
+    pub motion: usize,
+    /// Always true: the server uses them from its next start.
+    pub restart_needed: bool,
+}
+
+/// Kept pictures of one camera on one day (`GET /api/v1/ai/captures`).
+#[derive(Clone, Debug, Serialize)]
+pub struct CaptureDay {
+    /// Camera identifier.
+    pub camera: String,
+    /// `YYYY-MM-DD` (UTC).
+    pub day: String,
+    /// Pictures.
+    pub count: usize,
+    /// Size on disk.
+    pub bytes: u64,
+}
+
+/// A kept picture and what the recognition found in it.
+#[derive(Clone, Debug, Serialize)]
+pub struct CapturePicture {
+    /// File name (`GET /api/v1/ai/captures/{camera}/{day}/{file}`).
+    pub file: String,
+    /// When it was analysed.
+    pub at_ms: i64,
+    /// Event and picture number within it, if it was an event picture.
+    pub event: Option<i64>,
+    /// Picture number within the event.
+    pub picture: Option<u32>,
+    /// Crossing line it was checking, if any.
+    pub line: Option<String>,
+    /// Recognition used.
+    pub provider: String,
+    /// Time taken.
+    pub ms: u64,
+    /// Objects found.
+    pub found: Vec<rustnvr_core::DetectedObject>,
+    /// Labels that counted for the camera (objects, zones, line).
+    pub kept: Vec<String>,
+}
+
+/// A kept picture analysed again (`POST /api/v1/ai/replay`).
+#[derive(Clone, Debug, Serialize)]
+pub struct ReplayPicture {
+    /// The picture as kept (what was found then).
+    pub before: CapturePicture,
+    /// Objects found now, with the current recognition settings.
+    pub found: Vec<rustnvr_core::DetectedObject>,
+    /// Labels that count now (current objects, zones, line).
+    pub kept: Vec<String>,
+    /// Time taken now.
+    pub ms: u64,
+    /// The labels that count differ from then.
+    pub changed: bool,
+}
+
+/// The recognition replayed on the kept pictures of a day.
+#[derive(Clone, Debug, Serialize)]
+pub struct ReplayResult {
+    /// Recognition used now.
+    pub provider: String,
+    /// Every picture replayed, in time order.
+    pub pictures: Vec<ReplayPicture>,
+    /// Pictures whose counted labels changed.
+    pub changed: usize,
+    /// Pictures of the day left out (beyond the limit).
+    pub skipped: usize,
 }

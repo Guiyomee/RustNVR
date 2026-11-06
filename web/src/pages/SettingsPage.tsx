@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { ConfigKey, SettingRow, SettingsSection } from '../components/settings/SettingsSection'
 import { AiSettings } from '../components/settings/AiSettings'
+import { BackupSettings } from '../components/settings/BackupSettings'
 import { GeneralSettingsForm } from '../components/settings/GeneralSettingsForm'
 import { LogsViewer } from '../components/settings/LogsViewer'
 import { MqttSettings } from '../components/settings/MqttSettings'
@@ -18,7 +19,8 @@ import { Segmented } from '../components/ui/Tabs'
 import { lang, setLang, t } from '../lib/i18n'
 
 type Category =
-  | 'mqtt'
+    | 'backup'
+| 'mqtt'
   | 'webhooks'
 | 'general'
   | 'cameras'
@@ -41,6 +43,7 @@ const CATEGORIES: { key: Category; label: string }[] = [
   { key: 'storage', label: t('Stockage', 'Storage') },
   { key: 'mqtt', label: 'MQTT / Home Assistant' },
   { key: 'webhooks', label: t('Webhooks', 'Webhooks') },
+  { key: 'backup', label: t('Sauvegarde', 'Backup') },
   { key: 'network', label: t('Réseau', 'Network') },
   { key: 'users', label: t('Utilisateurs', 'Users') },
   { key: 'logs', label: t('Journaux', 'Logs') },
@@ -183,6 +186,12 @@ function Section({ category }: { category: Category }) {
       return (
         <SettingsSection title={t('Webhooks', 'Webhooks')} description={t('Adresses appelées à chaque événement (mouvement, objets reconnus, fin), avec le JSON de l’événement et son image : n8n, Node-RED, Home Assistant, script… sans MQTT. Appliqués tout de suite.', 'Addresses called on each event (motion, recognized objects, end), with the JSON of the event and its picture: n8n, Node-RED, Home Assistant, script… without MQTT. Applied at once.')} available={cap('settings_write')}>
           <WebhooksSettings />
+        </SettingsSection>
+      )
+    case 'backup':
+      return (
+        <SettingsSection title={t('Sauvegarde de la configuration', 'Configuration backup')} description={t('Avant une réinstallation ou un changement de machine : un fichier chiffré par une phrase secrète, à restaurer ici ensuite. La restauration prend effet au redémarrage de RustNVR.', 'Before reinstalling or moving to another machine: a file encrypted with a passphrase, to restore here afterwards. A restore takes effect when RustNVR restarts.')} available={cap('backup')}>
+          <BackupSettings />
         </SettingsSection>
       )
     case 'logs':

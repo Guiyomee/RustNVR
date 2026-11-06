@@ -2,8 +2,13 @@
 // Routes that do not exist yet are documented in API_CONTRACT.md and are not
 // called from here: the data layer reports them as unavailable instead.
 
-import { apiGet, apiSend } from './client'
+import { apiGet, apiSend, apiSendForFile } from './client'
 import type {
+  BackupPreview,
+  BackupRestored,
+  CaptureDay,
+  CapturePicture,
+  ReplayResult,
   AiModel,
   AiProbeResult,
   AiSettings,
@@ -155,7 +160,7 @@ export const setAi = (settings: AiSettings) => apiSend<AiView>('PUT', '/ai', set
 export const testAi = (camera: string) => apiSend<AiTestResult>('POST', `/ai/test?camera=${encodeURIComponent(camera)}`, {}, 60_000)
 export const probeAi = (url: string, apiKeyEnv: string | null) => apiSend<AiProbeResult>('POST', '/ai/probe', { url, api_key_env: apiKeyEnv }, 45_000)
 // Downloads a model of the built-in recognition (checked by its SHA-256) on the server.
-export const downloadAiModel = (id: string) => apiSend<AiModel>('POST', `/ai/models/${encodeURIComponent(id)}`, {}, 6 * 60_000)
+export const downloadAiModel = (id: string) => apiSend<AiModel>('POST', `/ai/models/${encodeURIComponent(id)}`, {}, 31 * 60_000)
 
 // Recent log messages (administrators).
 export const getLogs = (q: { since: number; level: LogLevel; camera?: string; limit?: number }) => {
@@ -188,3 +193,24 @@ export const testWebhook = (hook: Webhook) => apiSend<WebhookTestResult>('POST',
 // Activity statistics (capabilities.events).
 export const getEventStats = (days: 7 | 30) => apiGet<EventStats>(`/events/stats?days=${days}`)
 export const getCrossings = (days: 7 | 30) => apiGet<CrossingStats>(`/crossings?days=${days}`)
+
+// Backup of the configuration (administrators). Argon2 makes them take a moment.
+export const createBackup = (passphrase: string) => apiSendForFile('/backup', { passphrase }, 60_000)
+export const inspectBackup = (data: string, passphrase: string) => apiSend<BackupPreview>('POST', '/backup/inspect', { data, passphrase }, 60_000)
+export const restoreBackup = (data: string, passphrase: string, files: string[], motion: boolean) =>
+  apiSend<BackupRestored>('POST', '/backup/restore', { data, passphrase, files, motion }, 60_000)
+export const resetPresence = (camera: string, line: string) =>
+  apiSend<null>('POST', `/cameras/${encodeURIComponent(camera)}/presence/reset`, { line })
+
+// Kept pictures of the object recognition and its replay on them.
+export const getCaptureDays = () => apiGet<CaptureDay[]>('/ai/captures')
+export const captureUrl = (camera: string, day: string, file: string) =>
+  `/api/v1/ai/captures/${encodeURIComponent(camera)}/${encodeURIComponent(day)}/${encodeURIComponent(file)}`
+export const deleteCaptureDay = (camera: string, day: string) =>
+  apiSend<{ deleted: number }>('DELETE', `/ai/captures/${encodeURIComponent(camera)}/${encodeURIComponent(day)}`)
+// Up to 200 pictures, about 0.5 s each with CodeProject.AI on a processor;
+// one picture (`file`) with YOLOX-x takes a few seconds.
+export const replayCaptures = (camera: string, day: string, file?: string) =>
+  apiSend<ReplayResult>('POST', '/ai/replay', file ? { camera, day, file } : { camera, day }, file ? 60_000 : 300_000)
+export const getCapturePictures = (camera: string, day: string) =>
+  apiGet<CapturePicture[]>(`/ai/captures/${encodeURIComponent(camera)}/${encodeURIComponent(day)}`)

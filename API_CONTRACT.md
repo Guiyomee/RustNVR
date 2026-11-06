@@ -83,7 +83,7 @@ Ce que le serveur sait réellement faire. L'interface s'en sert pour afficher
 { "api_version": 1, "live_video": true, "live_transcode": true, "live_webrtc": true, "snapshots": true, "events": true,
   "motion_detection": true, "camera_management": true, "camera_probe": true,
   "recordings": true, "export": true, "protect": true, "retention": true, "settings_write": true,
-  "mqtt": true, "ai": false, "users": true }
+  "mqtt": true, "ai": false, "users": true, "backup": true }
 ```
 
 `export` : FFmpeg fonctionne (export d'un extrait, voir plus bas).
@@ -572,9 +572,12 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
 
 - `events` : `motion` (une fois l'image de l'événement prise, ≈ 1 s après le
   début), `objects` (objets reconnus, image avec les cadres), `end` (fin, sans
-  image), `crossing` (ligne de passage franchie) et `storage` (point de
-  stockage inutilisable, puis rétabli ; ni caméras ni objets ne le filtrent).
-  Par défaut `motion` et `objects`.
+  image), `crossing` (ligne de passage franchie), `storage` (point de
+  stockage inutilisable, puis rétabli ; ni caméras ni objets ne le filtrent)
+  et `camera` (flux principal d'une caméra coupé depuis **1 minute**, puis de
+  nouveau en ligne ; une reconnexion plus courte n'est pas annoncée, et le
+  retour ne l'est qu'après une annonce « hors ligne » ; filtré par
+  `cameras`, pas par `objects`). Par défaut `motion` et `objects`.
 - `cameras` vide : toutes ; `objects` vide : tous les événements. Avec des
   objets, les appels `motion` sont sautés, `objects` / `end` n'ont lieu que
   si l'un de ces objets a été reconnu, et `crossing` seulement pour un passage
@@ -587,6 +590,11 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   "problem", "at_ms" }, "rustnvr" }`. Discord : « Personne · Portail ·
   Jardin » (ou « Passage · … ») avec le sens et le compte du jour ;
   « Stockage dégradé · NAS » avec la raison, puis « Stockage rétabli · NAS ».
+  D'une caméra : `{ "type": "camera", "camera", "camera_name",
+  "camera_state": { "online", "at_ms", "offline_ms", "error" }, "rustnvr" }`
+  (`offline_ms` : durée sans image ; `error` : dernière erreur de connexion,
+  sans identifiants). Discord : « Caméra hors ligne · Garage » avec la durée
+  et l'erreur, puis « Caméra rétablie · Garage » avec la durée de la coupure.
 - Corps envoyé : `{ "type", "camera", "camera_name", "event": { "id",
   "start_ms", "end_ms", "score", "zones", "objects" }, "image":
   "data:image/jpeg;base64,…" | null, "rustnvr" }`.
@@ -607,6 +615,33 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
 - `POST /test` prend un webhook et l'appelle une fois avec `"type": "test"` :
   `{ "status": 204, "ms": 3, "error": null }` ou `{ "status": null, "error":
   "connexion impossible" }`.
+
+### `POST /api/v1/backup` · `POST /api/v1/backup/inspect` · `POST /api/v1/backup/restore`
+
+Sauvegarde de la configuration, réservée aux administrateurs (elle contient
+tous les mots de passe). Contenu : le fichier de configuration, les fichiers
+écrits par l'interface (`cameras.ui.toml`, `storage.ui.toml`,
+`settings.ui.toml`, `mqtt.ui.toml`, `ai.ui.toml`, `webhooks.ui.toml`,
+`updates.ui.toml`) et les réglages de détection de chaque caméra (zones,
+lignes, masques). Ni enregistrements, ni événements, ni comptes.
+
+- `POST /backup` `{ "passphrase": "…" }` (8 caractères au moins) : le fichier
+  `rustnvr-config-AAAAMMJJ-HHMM.rnvrbak`, entièrement chiffré (clé tirée de la
+  phrase par Argon2id, ChaCha20-Poly1305). 400 si la phrase est trop courte.
+- `POST /backup/inspect` `{ "data": "<fichier en base64>", "passphrase" }` :
+  `{ "created_ms", "rustnvr", "files": [{ "name", "state": "same" | "changed"
+  | "new" | "not_in_backup" }], "cameras": [{ "id", "name" }], "motion":
+  ["jardin"], "problems": [] }`. `cameras` : les caméras une fois tout
+  restauré ; `problems` : pourquoi la configuration restaurée ne se
+  chargerait pas (elle est chargée à l'essai dans un dossier temporaire).
+  400 : phrase incorrecte, fichier abîmé ou pas une sauvegarde.
+- `POST /backup/restore` `{ "data", "passphrase", "files": ["webhooks.ui.toml"],
+  "motion": true }` : écrit les fichiers choisis (de façon atomique, 0600)
+  après avoir vérifié que la configuration résultante se charge, et les
+  réglages de détection si `motion`. `{ "files": [...], "motion": 2,
+  "restart_needed": true }`. Pris en compte au **redémarrage** de RustNVR ;
+  d'ici là `GET /system` renvoie `config_restored: true` (bandeau de
+  l'interface). Un fichier absent de la sauvegarde n'est jamais supprimé.
 
 ### `GET /api/v1/updates` · `PUT /api/v1/updates` · `POST /api/v1/updates/check`
 
@@ -699,14 +734,47 @@ l'interface et appliqués sans redémarrage :
   intégrée (tract n'utilise pas de carte graphique) ; pour CodeProject.AI, le
   champ `inferenceDevice` de sa dernière réponse (`CPU`, `GPU`…), `null` avant
   la première analyse ou avec DeepStack, qui ne le donne pas.
-- `models` : YOLOX-nano, YOLOX-tiny et YOLOX-s (`hint` : vitesse et précision
-  mesurées, voir docs/AI.md). `POST /ai/models/{id}` (administrateur) télécharge un modèle de `models` dans
+- `models` : les sept modèles YOLOX publiés, du plus léger au plus gros
+  (`yolox_nano`, `yolox_tiny`, `yolox_s`, `yolox_m`, `yolox_l`,
+  `yolox_darknet`, `yolox_x` ; `hint` : vitesse, mémoire et précision
+  mesurées, voir docs/AI.md). Téléchargement abandonné au bout de 30 min.
+  `POST /ai/models/{id}` (administrateur) télécharge un modèle de `models` dans
   `<data_dir>/models/` depuis sa publication officielle, vérifie sa taille et
   son empreinte SHA-256 avant de le garder (écrit à côté puis renommé), et
   renvoie l'entrée de `models` (`downloaded: true`). Rien n'est téléchargé si le
   bon fichier est déjà là. 404 pour un modèle inconnu, 500 avec la raison si le
   téléchargement échoue (pas d'accès à Internet, empreinte inattendue). Le
   modèle n'est utilisé qu'après un `PUT /ai` avec son `path`.
+- `keep_pictures` (défaut `false`) : chaque image analysée (images des
+  événements et des passages de ligne vérifiés) est gardée avec ce qui y a
+  été trouvé, rien compris, dans la destination par défaut :
+  `<racine>/.captures/<caméra>/<AAAA-MM-JJ>/<heure UTC>-e<événement>-p<n>.jpg`
+  (ou `-line-<ligne>.jpg`) et un `.json` à côté (`at_ms`, `event`, `picture`,
+  `line`, `provider`, `ms`, `found`, `kept`). Le disque local quand la
+  destination par défaut envoie ailleurs (S3/SFTP) ou ne répond pas. Les
+  jours plus vieux que `retention_days` de cette destination sont effacés
+  (vérifié chaque minute) ; pas de rétention : gardés.
+
+### `GET /api/v1/ai/captures` · `GET /api/v1/ai/captures/{camera}/{day}[/{file}]` · `DELETE /api/v1/ai/captures/{camera}/{day}` · `POST /api/v1/ai/replay`
+
+Images gardées par `keep_pictures` et rejeu de la reconnaissance dessus.
+
+- `GET /ai/captures` : `[{ "camera", "day", "count", "bytes" }]`, le jour le
+  plus récent d'abord. 400 dans les toutes premières secondes après le
+  démarrage (stockage pas encore vérifié).
+- `GET /ai/captures/{camera}/{day}` : les images du jour, dans l'ordre :
+  `[{ "file", "at_ms", "event", "picture", "line", "provider", "ms", "found",
+  "kept" }]` ; `…/{file}` : le JPEG. Les noms sont vérifiés (identifiant de
+  caméra, `AAAA-MM-JJ`, nom de fichier sans `/`) : 400 sinon.
+- `DELETE /ai/captures/{camera}/{day}` (administrateur) : `{ "deleted": 12 }`.
+- `POST /ai/replay` `{ "camera", "day", "file"? }` (administrateur) : analyse
+  de nouveau les images du jour (200 au plus), ou la seule image `file` (404
+  si elle n'existe pas ; page « Images » de l'interface), avec le fournisseur et les
+  réglages actuels (score, objets, zones, lignes) :
+  `{ "provider", "changed", "skipped", "pictures": [{ "before": {…comme
+  ci-dessus}, "found", "kept", "ms", "changed" }] }`. `changed` : les objets
+  qui comptent (`kept`) diffèrent de l'époque. 400 si aucun fournisseur
+  n'est actif.
 
 ### `GET /api/v1/cameras/{id}/motion` · `PUT /api/v1/cameras/{id}/motion`
 
@@ -758,6 +826,15 @@ valent aussi pour les caméras de `config.toml`.
   centre de son cadre à moins de 25 % de l'image du segment). Reconnaissance
   arrêtée : tout passage compte, sans `object` ; reconnaissance en échec : le
   passage compte sans `object` (avertissement au journal).
+  `presence: true` (demande `direction: "both"`) : compte qui est à
+  l'intérieur, la flèche indiquant l'entrée : entrées − sorties depuis minuit
+  (heure locale) ou la dernière remise à zéro, jamais moins de 0 (une sortie
+  dont l'entrée a été manquée est ignorée). Publié dans `GET /crossings`
+  (`present`) et MQTT (`<p>/<caméra>/line/<ligne>/present`, entités Home
+  Assistant « Présents · ligne » et bouton « Remettre à zéro · ligne »).
+  Remise à zéro : `POST /api/v1/cameras/{id}/presence/reset`
+  `{ "line": "Porte du garage" }` → 204 (404 : pas de telle ligne de
+  présence), ou MQTT `<p>/<caméra>/line/<ligne>/presence/reset`.
 - `PUT` redémarre la détection de cette caméra (pas son flux) et renvoie les
   réglages enregistrés. 400 si invalide ; 503 si `enabled` sans FFmpeg.
 
@@ -826,11 +903,14 @@ détection), comptés à l'heure locale du serveur :
 ```json
 { "from_ms": …, "to_ms": …, "days": 7,
   "lines": [{ "camera": "test", "line": "Milieu", "total": 5, "forward": 3,
-              "backward": 2, "today": 5, "by_day": [{ "key": "2026-11-03", "count": 5 }, …] }] }
+              "backward": 2, "today": 5, "by_day": [{ "key": "2026-11-03", "count": 5 }, …],
+              "present": null }] }
 ```
 
-Seules les lignes ayant au moins un passage sur la période sont listées. 400
-pour une autre période, 503 sans base de données.
+Seules les lignes ayant au moins un passage sur la période sont listées,
+plus les lignes qui comptent les présences (`present` : qui est à
+l'intérieur ; `null` pour les autres lignes). 400 pour une autre période,
+503 sans base de données.
 
 ### `GET /api/v1/events/{id}/thumbnail`
 

@@ -59,11 +59,29 @@ personnes comptées à partir de 50 % :
 | YOLOX-tiny | 20 Mo | 101–126 ms (médiane 105) | 70 Mo | plus de choses, mais trois fausses personnes (le chien, deux images de jardin vide) |
 | YOLOX-s | 36 Mo | 392–460 ms (médiane 413) | 110 Mo | toutes les personnes (nuit comprise, 0,66), le chien reconnu, aucune fausse personne |
 
-YOLOX-s est le plus juste ; nano reste le choix des petites machines (N100 :
-temps probablement doublés, non mesuré). L'analyse n'a lieu que sur les
-images des mouvements détectés (5 au plus par événement). Les modèles plus
-gros (`yolox_m`, `yolox_l`, `yolox_x` : 100 à 400 Mo) fonctionnent aussi en
-indiquant leur fichier à la main, mais sont trop lents sans carte graphique. Les modèles YOLOv5/YOLOv8 d'Ultralytics ne
+YOLOX-s est le meilleur compromis ; nano reste le choix des petites machines
+(N100 : temps probablement doublés, non mesuré). L'analyse n'a lieu que sur
+les images des mouvements détectés (5 au plus par événement) et des passages
+de ligne vérifiés.
+
+Les plus gros modèles sont aussi proposés. Mesurés sur 5 images (photos de
+la démo), un i5-11600K ; un i5-6500 met environ 1,5 fois plus de temps (s y
+mesure ≈ 0,5 s par image). mAP : précision moyenne publiée par YOLOX sur les
+80 types d'objets (plus haut = plus juste) :
+
+| Modèle | Fichier | mAP | Temps par image | Mémoire |
+|---|---|---|---|---|
+| YOLOX-s | 36 Mo | 40,5 | ≈ 355 ms | 120 Mo |
+| YOLOX-m | 101 Mo | 47,2 | ≈ 830 ms | 240 Mo |
+| YOLOX-l | 217 Mo | 50,1 | ≈ 1,6 s | 440 Mo |
+| YOLOX-Darknet53 | 255 Mo | 48,0 | ≈ 2,0 s | 560 Mo |
+| YOLOX-x | 396 Mo | 51,5 | ≈ 3,2 s | 800 Mo |
+
+Sur les mêmes voitures, m est nettement plus sûr de lui que s (0,87–0,89
+contre 0,74–0,78) ; l et x ajoutent peu pour beaucoup plus de calcul, et
+Darknet53 est plus lent que l et moins juste. Sans carte graphique, m est le
+plus gros raisonnable ; le mieux est de comparer sur ses propres images avec
+le rejeu (ci-dessous). Les modèles YOLOv5/YOLOv8 d'Ultralytics ne
 sont pas pris en charge (sorties différentes, et licence AGPL).
 
 Mesuré sur 32 images réelles d'une caméra extérieure (640×360, jour et nuit),
@@ -152,6 +170,24 @@ Vérifié (serveur simulé, mire en mouvement) :
 requête conforme, filtres par étiquette et confiance, cadres convertis en
 fractions de l'image, objets dans l'API, MQTT et l'interface, comportement
 quand le fournisseur est arrêté.
+
+## Rejouer l'IA sur de vraies images
+
+Paramètres → Intelligence artificielle → « Garder les images analysées » :
+chaque image envoyée à l'IA (événements, passages de ligne vérifiés) est
+gardée avec ce qu'elle y a trouvé, **même rien**, dans la destination par
+défaut (dossier `.captures`, supprimé avec les vidéos au bout du même nombre
+de jours). Quelques Mo par jour et par caméra.
+
+Ensuite, « Rejouer l'IA » (même page) analyse de nouveau une journée avec
+les réglages actuels et montre, image par image, ce qui change : « Avant :
+rien · Maintenant : Personne 78 % ». Pour choisir un modèle (nano, tiny, s,
+ou un fichier YOLOX plus gros), un score minimal ou des zones sur ses propres
+images, sans attendre de nouveaux événements. 200 images au plus par rejeu.
+
+Vérifié sur une instance de test : images gardées pendant un vrai événement
+(mire GStreamer, deux images, rien trouvé), rejeu avec YOLOX-nano (photo d'un
+parking : « rien » devient quatre voitures), noms de fichiers piégés refusés.
 
 ## Carte graphique (GPU)
 

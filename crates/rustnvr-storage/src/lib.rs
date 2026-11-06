@@ -572,6 +572,59 @@ impl Database {
         .collect()
     }
 
+    /// Directions of the crossings of one line since `from_ms`, in order
+    /// (`true`: in the arrow direction).
+    pub async fn line_crossings_since(
+        &self,
+        camera: &str,
+        line: &str,
+        from_ms: i64,
+    ) -> Result<Vec<bool>, DbError> {
+        sqlx::query(
+            "SELECT forward FROM crossings WHERE camera = ? AND line = ? AND at_ms >= ? ORDER BY at_ms, id",
+        )
+        .bind(camera)
+        .bind(line)
+        .bind(from_ms)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| Ok(r.try_get("forward")?))
+        .collect()
+    }
+
+    /// Last manual reset of the presence count of a line, if any.
+    pub async fn presence_reset(&self, camera: &str, line: &str) -> Result<Option<i64>, DbError> {
+        Ok(
+            sqlx::query("SELECT at_ms FROM presence_resets WHERE camera = ? AND line = ?")
+                .bind(camera)
+                .bind(line)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.try_get("at_ms"))
+                .transpose()?,
+        )
+    }
+
+    /// Records a manual reset of the presence count of a line.
+    pub async fn set_presence_reset(
+        &self,
+        camera: &str,
+        line: &str,
+        at_ms: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO presence_resets (camera, line, at_ms) VALUES (?, ?, ?) \
+             ON CONFLICT (camera, line) DO UPDATE SET at_ms = excluded.at_ms",
+        )
+        .bind(camera)
+        .bind(line)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Removes crossings older than `before_ms` (with the events retention).
     pub async fn delete_crossings_before(&self, before_ms: i64) -> Result<u64, DbError> {
         Ok(sqlx::query("DELETE FROM crossings WHERE at_ms < ?")
@@ -930,6 +983,26 @@ mod tests {
                 ("jardin".to_owned(), "portail".to_owned(), true, 1_000),
                 ("jardin".to_owned(), "portail".to_owned(), false, 2_000),
             ]
+        );
+        assert_eq!(
+            db.line_crossings_since("jardin", "portail", 1_500)
+                .await
+                .expect("line"),
+            vec![false]
+        );
+        assert_eq!(
+            db.presence_reset("jardin", "portail").await.expect("reset"),
+            None
+        );
+        db.set_presence_reset("jardin", "portail", 3_000)
+            .await
+            .expect("set");
+        db.set_presence_reset("jardin", "portail", 4_000)
+            .await
+            .expect("again");
+        assert_eq!(
+            db.presence_reset("jardin", "portail").await.expect("reset"),
+            Some(4_000)
         );
         assert_eq!(db.delete_crossings_before(5_000).await.expect("purge"), 2);
         assert_eq!(db.crossings(0, 10_000).await.expect("list").len(), 1);

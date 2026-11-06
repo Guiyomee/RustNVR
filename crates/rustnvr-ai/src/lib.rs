@@ -480,6 +480,7 @@ mod tests {
             timeout_seconds: 5,
             max_pictures: 4,
             interval_seconds: 2,
+            keep_pictures: false,
         };
         let analyzer = Analyzer::from_config(&config, |_| Some("s3cret".into()))
             .expect("config")

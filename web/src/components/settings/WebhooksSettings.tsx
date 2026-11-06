@@ -20,6 +20,7 @@ const EVENTS: { key: Webhook['events'][number]; label: string; help: string }[] 
   { key: 'end', label: t('Fin de l’événement', 'End of the event'), help: t('durée et objets, sans image', 'length and objects, no picture') },
   { key: 'crossing', label: t('Passage de ligne', 'Line crossing'), help: t('ligne de passage franchie (avec l’objet vu sur la ligne)', 'crossing line crossed (with the object seen at the line)') },
   { key: 'storage', label: t('Stockage dégradé', 'Storage degraded'), help: t('partage non monté, en lecture seule ou qui ne répond plus ; puis rétabli', 'share not mounted, read-only or not answering; then back') },
+  { key: 'camera', label: t('Caméra hors ligne / rétablie', 'Camera offline / back'), help: t('plus d’image depuis 1 min, puis de nouveau en ligne', 'no picture for 1 min, then online again') },
 ]
 
 /** Objects offered as filters: the usual ones (people, vehicles, animals). */

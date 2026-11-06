@@ -75,6 +75,9 @@ pub struct Config {
     /// File holding the general settings changed from the web interface.
     #[serde(skip)]
     pub managed_settings_file: Option<PathBuf>,
+    /// The configuration file itself (`None` when it did not come from a file).
+    #[serde(skip)]
+    pub config_file: Option<PathBuf>,
 }
 
 /// Name of the file, next to the configuration file, holding the general
@@ -801,6 +804,9 @@ pub enum WebhookEvent {
     /// A recording destination became unusable (share not mounted, not
     /// writable…) or usable again. Not limited by cameras nor objects.
     Storage,
+    /// A camera has sent no picture for a minute (offline), or is back
+    /// after that. Limited by cameras, not by objects.
+    Camera,
 }
 
 fn default_webhook_events() -> Vec<WebhookEvent> {
@@ -1109,6 +1115,10 @@ pub struct AiConfig {
     pub max_pictures: u32,
     /// Seconds between two analysed pictures of an event.
     pub interval_seconds: u64,
+    /// Keep every analysed picture, with what was found, in the default
+    /// destination (`.captures`), to replay the recognition on them later.
+    /// Deleted with the recordings (`retention_days`).
+    pub keep_pictures: bool,
 }
 
 impl Default for AiConfig {
@@ -1120,6 +1130,7 @@ impl Default for AiConfig {
             timeout_seconds: 10,
             max_pictures: 5,
             interval_seconds: 3,
+            keep_pictures: false,
         }
     }
 }
@@ -1635,6 +1646,7 @@ impl Config {
                 }));
         }
         config.managed_cameras_file = Some(managed_path);
+        config.config_file = Some(path.to_owned());
         let storage_path = path.with_file_name(MANAGED_STORAGE_FILE);
         if storage_path.is_file() {
             let managed: ManagedStorageFile =

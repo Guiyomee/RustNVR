@@ -34,6 +34,17 @@ function NoAuthBanner() {
 /** An update was installed while the server runs: the interface may already be the new one. */
 function RestartBanner() {
   const needed = useLive((s) => s.system?.restart_needed)
+  const restored = useLive((s) => s.system?.config_restored)
+  if (restored && !needed) {
+    return (
+      <div role="alert" className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-b border-accent/40 bg-accent/10 px-4 py-1.5 text-center text-xs text-accent">
+        <RefreshCw className="size-4 shrink-0" aria-hidden />
+        {t('Configuration restaurée : redémarrez RustNVR pour l’utiliser (', 'Configuration restored: restart RustNVR to use it (')}
+        <code className="font-mono">docker restart rustnvr</code>{t(', ou ', ', or ')}<code className="font-mono">systemctl restart rustnvr</code>
+        {t('). D’ici là, RustNVR garde la configuration précédente.', '). Until then, RustNVR keeps the previous configuration.')}
+      </div>
+    )
+  }
   if (!needed) return null
   return (
     <div role="alert" className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 border-b border-accent/40 bg-accent/10 px-4 py-1.5 text-center text-xs text-accent">

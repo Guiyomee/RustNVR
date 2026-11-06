@@ -2,8 +2,10 @@
 //! web interface; cameras, storage destinations, detection and MQTT settings
 //! can be changed at run time through the API.
 
+mod backups;
 mod detection;
 mod index;
+mod replay;
 mod updates;
 mod webhooks;
 
@@ -152,6 +154,21 @@ impl Storage {
                 // The outbox of a remote destination is local.
                 require_mount: d.require_mount && d.remote.is_none(),
             })
+    }
+
+    /// Where the analysed pictures are kept: the default destination when it
+    /// is `usable`, else the local recordings directory (also for a remote
+    /// destination, whose root is an outbox), with its retention days.
+    fn captures(&self, default_id: &str, usable: impl Fn(&str) -> bool) -> (PathBuf, Option<u32>) {
+        if let Some(d) = self
+            .destinations
+            .iter()
+            .find(|d| d.id == default_id && d.remote.is_none())
+            && usable(&d.id)
+        {
+            return (d.path.clone(), d.retention_days);
+        }
+        (self.local_dir.clone(), self.local_retention.retention_days)
     }
 
     /// Every destination with its retention policy, local first.
@@ -490,6 +507,8 @@ struct Shared {
     /// Webhooks in effect (`[[webhooks]]` or `webhooks.ui.toml`).
     webhooks: std::sync::RwLock<Vec<rustnvr_core::config::WebhookConfig>>,
     managed_webhooks_file: Option<PathBuf>,
+    /// The configuration file (backups).
+    config_file: Option<PathBuf>,
     mqtt: tokio::sync::Mutex<MqttRuntime>,
     /// General settings in effect (`[recording]`, `[motion]`, live view,
     /// low-space threshold), editable from the interface.
@@ -500,6 +519,9 @@ struct Shared {
     /// Destinations that cannot be used (name, problem), updated every
     /// minute.
     storage_problems: std::sync::Mutex<Vec<(String, String)>>,
+    /// Where analysed pictures are kept (`ai.keep_pictures`) and for how
+    /// many days; `None` until the first storage check.
+    captures_root: std::sync::Mutex<Option<(PathBuf, Option<u32>)>>,
     /// Database, thumbnails and outboxes of remote destinations.
     data_dir: PathBuf,
     /// One uploader per S3 / SFTP destination.
@@ -684,10 +706,12 @@ impl Nvr {
             update_lock: tokio::sync::Mutex::new(()),
             webhooks: std::sync::RwLock::new(config.webhooks.clone()),
             managed_webhooks_file: config.managed_webhooks_file.clone(),
+            config_file: config.config_file.clone(),
             general: std::sync::Mutex::new(detection::GeneralSettings::from_config(config)),
             managed_settings_file: config.managed_settings_file.clone(),
             low_space: std::sync::Mutex::new(Vec::new()),
             storage_problems: std::sync::Mutex::new(Vec::new()),
+            captures_root: std::sync::Mutex::new(None),
             data_dir: data_dir.clone(),
             uploaders: tokio::sync::Mutex::new(HashMap::new()),
             upload_status: std::sync::Mutex::new(HashMap::new()),
@@ -708,6 +732,10 @@ impl Nvr {
             tokio::spawn(run_disk_monitor(shared.clone(), cancel.child_token())),
             tokio::spawn(updates::run_checks(shared.clone(), cancel.child_token())),
             tokio::spawn(webhooks::run(shared.clone(), cancel.child_token())),
+            tokio::spawn(detection::run_presence_midnight(
+                shared.clone(),
+                cancel.child_token(),
+            )),
         ];
         if let Some(db) = &database {
             background.push(tokio::spawn(index::run_indexer(
@@ -1547,6 +1575,88 @@ impl NvrControl for Controller {
         Box::pin(async move { updates::set(&self.0, repository).await })
     }
 
+    fn captures(&self) -> BoxFuture<'_, Result<Vec<rustnvr_api::CaptureDay>, ControlError>> {
+        Box::pin(async move { replay::days(&self.0).await })
+    }
+
+    fn capture_pictures(
+        &self,
+        camera: String,
+        day: String,
+    ) -> BoxFuture<'_, Result<Vec<rustnvr_api::CapturePicture>, ControlError>> {
+        Box::pin(async move { replay::pictures(&self.0, camera, day).await })
+    }
+
+    fn capture_picture(
+        &self,
+        camera: String,
+        day: String,
+        file: String,
+    ) -> BoxFuture<'_, Result<Vec<u8>, ControlError>> {
+        Box::pin(async move { replay::picture(&self.0, camera, day, file).await })
+    }
+
+    fn delete_captures(
+        &self,
+        camera: String,
+        day: String,
+    ) -> BoxFuture<'_, Result<usize, ControlError>> {
+        Box::pin(async move { replay::delete(&self.0, camera, day).await })
+    }
+
+    fn replay(
+        &self,
+        camera: String,
+        day: String,
+        file: Option<String>,
+    ) -> BoxFuture<'_, Result<rustnvr_api::ReplayResult, ControlError>> {
+        Box::pin(async move { replay::replay(&self.0, camera, day, file).await })
+    }
+
+    fn presence(&self) -> BoxFuture<'_, Vec<(String, String, u64)>> {
+        Box::pin(async move {
+            detection::presence_counts(&self.0)
+                .await
+                .into_iter()
+                .map(|(c, l, n)| (c.to_string(), l, n))
+                .collect()
+        })
+    }
+
+    fn reset_presence(
+        &self,
+        camera: String,
+        line: String,
+    ) -> BoxFuture<'_, Result<(), ControlError>> {
+        Box::pin(async move {
+            let id = CameraId::new(&camera)
+                .map_err(|_| ControlError::NotFound(format!("caméra inconnue : {camera}")))?;
+            detection::reset_presence(&self.0, &id, &line).await
+        })
+    }
+
+    fn backup(&self, passphrase: String) -> BoxFuture<'_, Result<Vec<u8>, ControlError>> {
+        Box::pin(async move { backups::make(&self.0, passphrase).await })
+    }
+
+    fn backup_inspect(
+        &self,
+        data: Vec<u8>,
+        passphrase: String,
+    ) -> BoxFuture<'_, Result<rustnvr_api::BackupPreview, ControlError>> {
+        Box::pin(async move { backups::inspect(&self.0, data, passphrase).await })
+    }
+
+    fn backup_restore(
+        &self,
+        data: Vec<u8>,
+        passphrase: String,
+        files: Vec<String>,
+        motion: bool,
+    ) -> BoxFuture<'_, Result<rustnvr_api::BackupRestored, ControlError>> {
+        Box::pin(async move { backups::restore(&self.0, data, passphrase, files, motion).await })
+    }
+
     fn webhooks(&self) -> BoxFuture<'_, Vec<rustnvr_core::config::WebhookConfig>> {
         Box::pin(async move {
             self.0
@@ -1733,6 +1843,7 @@ async fn log_events(mut rx: tokio::sync::broadcast::Receiver<NvrEvent>, cancel: 
                 | NvrEvent::ObjectSnapshot { .. }
                 | NvrEvent::Crossing { .. }
                 | NvrEvent::StorageState { .. }
+                | NvrEvent::Presence { .. }
                 | NvrEvent::MotionSettingsChanged { .. },
             ) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -1920,6 +2031,32 @@ async fn run_disk_monitor(shared: Arc<Shared>, cancel: CancellationToken) {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = report;
         previous_problems = problems.clone();
+        // Kept pictures: where (the default destination if it answers), and
+        // pruned with the retention days of that destination.
+        let default = shared.general().default_destination;
+        let (root, days) = shared
+            .state
+            .lock()
+            .await
+            .storage
+            .captures(&default, |id| !problems.contains_key(id));
+        *shared
+            .captures_root
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((root.clone(), days));
+        if let Some(days) = days {
+            let now = unix_now_ms();
+            if let Ok(removed) =
+                tokio::task::spawn_blocking(move || crate::captures::prune(&root, days, now)).await
+                && removed > 0
+            {
+                info!(
+                    days_removed = removed,
+                    keep_days = days,
+                    "old analysed pictures deleted"
+                );
+            }
+        }
         // Space: only on the destinations that answer.
         let targets: Vec<_> = targets
             .into_iter()

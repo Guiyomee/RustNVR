@@ -51,6 +51,7 @@ fn crosses(l: &CrossingLine, from: [f32; 2], to: [f32; 2]) -> Option<bool> {
         b: to,
         direction: CrossingDirection::Both,
         objects: Vec::new(),
+        presence: false,
     };
     let (t1, t2) = (side(&step, l.a), side(&step, l.b));
     if (t1 > 0.0) == (t2 > 0.0) {
@@ -134,6 +135,7 @@ mod tests {
             b: [0.5, 0.8],
             direction,
             objects: Vec::new(),
+            presence: false,
         }
     }
 

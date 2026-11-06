@@ -156,6 +156,8 @@ pub(crate) struct LineCounts {
     today: u64,
     /// Every day of the period (`YYYY-MM-DD`, local time), oldest first.
     by_day: Vec<Count>,
+    /// Who is inside, for a line counting the presence.
+    present: Option<u64>,
 }
 
 /// Body of `GET /crossings`.
@@ -173,6 +175,7 @@ type PerLine = (u64, u64, BTreeMap<String, u64>);
 /// Counts `crossings` (camera, line, forward, time) per line.
 fn count_crossings(
     crossings: &[(String, String, bool, i64)],
+    presence: &[(String, String, u64)],
     days: u32,
     now_ms: i64,
     tz: &jiff::tz::TimeZone,
@@ -196,6 +199,12 @@ fn count_crossings(
         .unwrap_or_default();
     empty_days.insert(today.clone(), 0);
     let mut lines: BTreeMap<(String, String), PerLine> = BTreeMap::new();
+    // Lines counting the presence appear even without crossings in the period.
+    for (camera, line, _) in presence {
+        lines
+            .entry((camera.clone(), line.clone()))
+            .or_insert_with(|| (0, 0, empty_days.clone()));
+    }
     for (camera, line, forward, at_ms) in crossings {
         if *at_ms < from_ms || *at_ms > now_ms {
             continue;
@@ -218,6 +227,10 @@ fn count_crossings(
         lines: lines
             .into_iter()
             .map(|((camera, line), (forward, backward, by_day))| LineCounts {
+                present: presence
+                    .iter()
+                    .find(|(c, l, _)| *c == camera && *l == line)
+                    .map(|(_, _, n)| *n),
                 today: by_day.get(&today).copied().unwrap_or(0),
                 camera,
                 line,
@@ -251,12 +264,37 @@ pub(crate) async fn crossings(
         .crossings(now - i64::from(days) * DAY_MS, now + 1)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
+    let presence = match state.control.get() {
+        Some(c) => c.presence().await,
+        None => Vec::new(),
+    };
     Ok(Json(count_crossings(
         &list,
+        &presence,
         days,
         now,
         &jiff::tz::TimeZone::system(),
     )))
+}
+
+/// `POST /cameras/{id}/presence/reset` body.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PresenceReset {
+    line: String,
+}
+
+/// `POST /cameras/{id}/presence/reset`: the presence count of a line starts
+/// again from zero.
+pub(crate) async fn reset_presence(
+    State(state): State<Arc<ApiState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(input): Json<PresenceReset>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    crate::routes::control(&state)?
+        .reset_presence(id, input.line)
+        .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -274,8 +312,17 @@ mod tests {
             c("portail", true, 2 * DAY_MS),
             c("allée", true, 1_000),
         ];
-        let d = count_crossings(&list, 7, now, &tz);
-        assert_eq!(d.lines.len(), 2);
+        // « porte » counts the presence and was not crossed in the period.
+        let presence = vec![
+            ("jardin".to_owned(), "portail".to_owned(), 1),
+            ("jardin".to_owned(), "porte".to_owned(), 0),
+        ];
+        let d = count_crossings(&list, &presence, 7, now, &tz);
+        assert_eq!(d.lines.len(), 3);
+        let porte = d.lines.iter().find(|l| l.line == "porte").expect("porte");
+        assert_eq!((porte.total, porte.present), (0, Some(0)));
+        let allee = d.lines.iter().find(|l| l.line == "allée").expect("allée");
+        assert_eq!(allee.present, None);
         let portail = d.lines.iter().find(|l| l.line == "portail").expect("line");
         assert_eq!(
             (
@@ -286,6 +333,7 @@ mod tests {
             ),
             (3, 2, 1, 2)
         );
+        assert_eq!(portail.present, Some(1));
         assert_eq!(portail.by_day.len(), 8);
     }
 

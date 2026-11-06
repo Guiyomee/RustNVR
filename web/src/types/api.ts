@@ -21,6 +21,8 @@ export interface Capabilities {
   mqtt: boolean
   ai: boolean
   users: boolean
+  /** Backup and restore of the configuration (`/backup`). */
+  backup: boolean
 }
 
 export type CapabilityKey = Exclude<keyof Capabilities, 'api_version'>
@@ -53,6 +55,8 @@ export interface SystemInfo {
   storage_problems?: StorageProblem[]
   /** The executable was replaced on disk (update installed): restart the server. */
   restart_needed: boolean
+  /** A configuration backup was restored: restart the server to use it. */
+  config_restored?: boolean
   /** A newer version was published on the watched repository. */
   update_available: string | null
   /** Graphics cards of the machine (Linux). */
@@ -195,6 +199,8 @@ export interface CrossingLine {
   direction: 'both' | 'forward' | 'backward'
   /** Objects (optional AI) one of which must be seen at the line for a crossing to count; absent or empty: any motion. */
   objects?: string[]
+  /** Count who is inside: the arrow direction enters, the other leaves (needs both directions). */
+  presence?: boolean
 }
 
 /** A storage destination that cannot be used. */
@@ -235,6 +241,8 @@ export interface AiSettings {
   timeout_seconds: number
   max_pictures: number
   interval_seconds: number
+  /** Keep every analysed picture in the default destination, to replay the AI on them. */
+  keep_pictures?: boolean
 }
 
 /** GET /api/v1/ai. */
@@ -621,7 +629,7 @@ export interface Webhook {
   cameras: string[]
   /** Object labels; empty: every event. */
   objects: string[]
-  events: ('motion' | 'objects' | 'end' | 'crossing' | 'storage')[]
+  events: ('motion' | 'objects' | 'end' | 'crossing' | 'storage' | 'camera')[]
   /** The picture is sent (base64 in the JSON). */
   image: boolean
 }
@@ -661,6 +669,8 @@ export interface CrossingStats {
     backward: number
     today: number
     by_day: { key: string; count: number }[]
+    /** Who is inside, for a line counting the presence (`presence`). */
+    present?: number | null
   }[]
 }
 
@@ -715,4 +725,57 @@ export interface DiscoveryStreamsInput {
   server?: string | null
   username?: string | null
   password?: string | null
+}
+
+/** What restoring a backup would do (`POST /backup/inspect`). */
+export interface BackupPreview {
+  created_ms: number
+  /** Version of RustNVR that made it. */
+  rustnvr: string
+  files: { name: string; state: 'same' | 'changed' | 'new' | 'not_in_backup' }[]
+  /** Cameras once every file of the backup is restored. */
+  cameras: { id: string; name: string }[]
+  /** Cameras whose detection settings (zones, lines, masks) are in it. */
+  motion: string[]
+  /** Why the restored configuration would not load (empty when it would). */
+  problems: string[]
+}
+
+/** What a restore did (`POST /backup/restore`). */
+export interface BackupRestored {
+  files: string[]
+  motion: number
+  restart_needed: boolean
+}
+
+/** Kept pictures of one camera on one day (`GET /ai/captures`). */
+export interface CaptureDay {
+  camera: string
+  /** `YYYY-MM-DD` (UTC). */
+  day: string
+  count: number
+  bytes: number
+}
+
+/** A kept picture and what the recognition found in it then. */
+export interface CapturePicture {
+  file: string
+  at_ms: number
+  event: number | null
+  picture: number | null
+  line: string | null
+  provider: string
+  ms: number
+  found: DetectedObject[]
+  /** Labels that counted for the camera (objects, zones, line). */
+  kept: string[]
+}
+
+/** The recognition replayed on the kept pictures of a day (`POST /ai/replay`). */
+export interface ReplayResult {
+  provider: string
+  pictures: { before: CapturePicture; found: DetectedObject[]; kept: string[]; ms: number; changed: boolean }[]
+  changed: number
+  /** Pictures of the day left out (beyond 200). */
+  skipped: number
 }

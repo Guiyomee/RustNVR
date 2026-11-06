@@ -133,8 +133,8 @@ async fn client(state: Arc<ApiState>, mut socket: WebSocket) {
                     };
                     send(&mut socket, &WsMessage::Crossing { crossing }).await
                 }
-                // The state of the destinations comes with `system`.
-                Ok(NvrEvent::Snapshot { .. } | NvrEvent::ObjectSnapshot { .. } | NvrEvent::StorageState { .. }) => true,
+                // The state of the destinations comes with `system`; the presence counts with `GET /crossings`.
+                Ok(NvrEvent::Snapshot { .. } | NvrEvent::ObjectSnapshot { .. } | NvrEvent::StorageState { .. } | NvrEvent::Presence { .. }) => true,
                 // Missed events: resend the full state.
                 Err(RecvError::Lagged(_)) => send_snapshot(&state, &mut socket).await,
                 Err(RecvError::Closed) => return,

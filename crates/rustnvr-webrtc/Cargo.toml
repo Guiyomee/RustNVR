@@ -10,7 +10,7 @@ publish.workspace = true
 bytes.workspace = true
 rustnvr-core.workspace = true
 rustnvr-stream.workspace = true
-str0m = { version = "0.24.1", default-features = false, features = ["aws-lc-rs"] }
+str0m = { version = "0.25.0", default-features = false, features = ["aws-lc-rs"] }
 tokio = { workspace = true, features = ["net", "time", "macros"] }
 tokio-util.workspace = true
 tracing.workspace = true

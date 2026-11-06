@@ -18,6 +18,8 @@
 //! | `<p>/<camera>/event` | JSON of each event change | no |
 //! | `<p>/<camera>/crossing` | JSON of each crossing of a line (`line`, `direction`, `at_ms`, `today`, `object`) | no |
 //! | `<p>/<camera>/line/<line>/today` | crossings of the line since midnight | yes |
+//! | `<p>/<camera>/line/<line>/present` | who is inside (lines counting the presence) | yes |
+//! | `<p>/<camera>/line/<line>/presence/reset` | any payload (command): count from zero again | — |
 //! | `<p>/cameras_online` | number | yes |
 //! | `<p>/disk_used_percent` | number (local recordings disk) | yes |
 //! | `<p>/disk_low` | `ON` / `OFF` (a destination is short of space) | yes |
@@ -37,7 +39,7 @@ use rustls::pki_types::pem::PemObject as _;
 use rustls::{ClientConfig, RootCertStore};
 use rustnvr_core::config::MqttConfig;
 use rustnvr_core::{CameraId, DetectionEvent, EventBus, NvrEvent, Secret, StreamRole};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -82,6 +84,8 @@ pub struct CameraView {
     pub audio_enabled: bool,
     /// Object recognition is configured: a « person » sensor is announced.
     pub person_detection: bool,
+    /// Lines counting the presence: name, who is inside.
+    pub presence: Vec<(String, u64)>,
 }
 
 /// NVR-wide figures.
@@ -116,6 +120,9 @@ pub trait NvrView: Send + Sync + 'static {
         camera: CameraId,
         enabled: bool,
     ) -> BoxFuture<'_, Result<(), String>>;
+    /// Starts the presence count of the line of `camera` whose topic level
+    /// is `label` again from zero (command from MQTT).
+    fn reset_presence(&self, camera: CameraId, label: String) -> BoxFuture<'_, Result<(), String>>;
 }
 
 /// Resolved connection settings.
@@ -255,6 +262,7 @@ pub fn spawn_mqtt(
         view,
         status: status_tx,
         announced: HashSet::new(),
+        presence_labels: HashMap::new(),
         persons: HashSet::new(),
         dropped: 0,
     };
@@ -313,6 +321,18 @@ impl Topics {
     pub(crate) fn system(&self, what: &str) -> String {
         format!("{}/{what}", self.prefix)
     }
+    /// Camera and line (topic level) of a
+    /// `<p>/<camera>/line/<line>/presence/reset` command.
+    fn presence_reset(&self, topic: &str) -> Option<(CameraId, String)> {
+        let rest = topic.strip_prefix(&self.prefix)?.strip_prefix('/')?;
+        let rest = rest.strip_suffix("/presence/reset")?;
+        let (cam, label) = rest.split_once("/line/")?;
+        if label.is_empty() || label.contains('/') {
+            return None;
+        }
+        Some((CameraId::new(cam).ok()?, label.to_owned()))
+    }
+
     /// Camera and switch of a `<p>/<camera>/motion_detection/set` or
     /// `<p>/<camera>/audio/set` topic.
     fn command(&self, topic: &str) -> Option<(CameraId, Switch)> {
@@ -344,7 +364,7 @@ fn round3(v: f32) -> f64 {
 
 /// Object kind as a topic level (`traffic light` → `traffic_light`): never
 /// `/`, `+` nor `#`.
-fn topic_label(label: &str) -> String {
+pub fn topic_label(label: &str) -> String {
     let level: String = label
         .trim()
         .chars()
@@ -402,6 +422,8 @@ struct Client {
     announced: HashSet<CameraId>,
     /// Cameras whose « person » sensor is ON.
     persons: HashSet<CameraId>,
+    /// Topic levels of the presence lines announced, per camera.
+    presence_labels: HashMap<CameraId, Vec<String>>,
     /// Messages dropped because the queue was full (logged once per burst).
     dropped: u64,
 }
@@ -453,10 +475,64 @@ impl Client {
             let topic = self.topics.camera(&c.id, "person");
             self.publish(topic, true, on_off(on));
         }
+        self.publish_presence(c);
+    }
+
+    /// Announces the presence lines of `c` with their counts, and removes
+    /// those that no longer count.
+    fn publish_presence(&mut self, c: &CameraView) {
+        let labels: Vec<String> = c.presence.iter().map(|(l, _)| topic_label(l)).collect();
+        let before = self.presence_labels.remove(&c.id).unwrap_or_default();
+        let prefix = self.settings.discovery_prefix.clone();
+        for label in before.iter().filter(|l| !labels.contains(l)) {
+            if let Some(prefix) = &prefix {
+                for topic in discovery::presence_config_topics(
+                    prefix,
+                    &self.settings.client_id,
+                    &c.id,
+                    label,
+                ) {
+                    self.publish(topic, true, Vec::new());
+                }
+            }
+            let topic = self.topics.camera(&c.id, &format!("line/{label}/present"));
+            self.publish(topic, true, Vec::new());
+        }
+        for (line, present) in &c.presence {
+            if let Some(prefix) = &prefix {
+                for (topic, payload) in discovery::presence_configs(
+                    prefix,
+                    &self.settings.client_id,
+                    &self.topics,
+                    c,
+                    line,
+                ) {
+                    self.publish(topic, true, payload);
+                }
+            }
+            let topic = self
+                .topics
+                .camera(&c.id, &format!("line/{}/present", topic_label(line)));
+            self.publish(topic, true, present.to_string());
+        }
+        if !labels.is_empty() {
+            self.presence_labels.insert(c.id.clone(), labels);
+        }
     }
 
     /// Removes a deleted camera: empty retained messages clear the broker.
     fn forget_camera(&mut self, id: &CameraId) {
+        for label in self.presence_labels.remove(id).unwrap_or_default() {
+            if let Some(prefix) = self.settings.discovery_prefix.clone() {
+                for topic in
+                    discovery::presence_config_topics(&prefix, &self.settings.client_id, id, &label)
+                {
+                    self.publish(topic, true, Vec::new());
+                }
+            }
+            let topic = self.topics.camera(id, &format!("line/{label}/present"));
+            self.publish(topic, true, Vec::new());
+        }
         if let Some(prefix) = self.settings.discovery_prefix.clone() {
             for topic in discovery::camera_config_topics(&prefix, &self.settings.client_id, id) {
                 self.publish(topic, true, Vec::new());
@@ -527,6 +603,7 @@ impl Client {
                 self.publish(topic, true, on_off(c.recording));
                 let topic = self.topics.camera(&c.id, "audio");
                 self.publish(topic, true, on_off(c.audio_enabled));
+                self.publish_presence(c);
             }
         }
         self.announced = current;
@@ -563,7 +640,7 @@ impl Client {
         }
         self.sync_cameras(true).await;
         self.publish_system().await;
-        for command in ["motion_detection/set", "audio/set"] {
+        for command in ["motion_detection/set", "audio/set", "line/+/presence/reset"] {
             let topic = format!("{}/+/{command}", self.topics.prefix);
             if self.client.try_subscribe(topic, QoS::AtLeastOnce).is_err() {
                 tracing::warn!("MQTT: cannot subscribe to commands");
@@ -572,6 +649,15 @@ impl Client {
     }
 
     fn on_command(&self, topic: &str, payload: &[u8]) {
+        if let Some((camera, label)) = self.topics.presence_reset(topic) {
+            let view = self.view.clone();
+            tokio::spawn(async move {
+                if let Err(e) = view.reset_presence(camera.clone(), label.clone()).await {
+                    tracing::warn!(%camera, line = %label, error = %e, "MQTT: presence reset failed");
+                }
+            });
+            return;
+        }
         let Some((camera, switch)) = self.topics.command(topic) else {
             return;
         };
@@ -657,8 +743,20 @@ impl Client {
             NvrEvent::MotionSettingsChanged { camera, enabled } => {
                 let topic = self.topics.camera(&camera, "motion_detection");
                 self.publish(topic, true, on_off(enabled));
+                // Lines counting the presence may have changed.
+                self.sync_cameras(false).await;
             }
             NvrEvent::CamerasChanged => self.sync_cameras(false).await,
+            NvrEvent::Presence {
+                camera,
+                line,
+                present,
+            } => {
+                let topic = self
+                    .topics
+                    .camera(&camera, &format!("line/{}/present", topic_label(&line)));
+                self.publish(topic, true, present.to_string());
+            }
             NvrEvent::StorageState { .. } => self.publish_system().await,
             NvrEvent::StreamState { .. }
             | NvrEvent::SegmentFinished(_)
@@ -773,6 +871,18 @@ mod tests {
         let t = Topics {
             prefix: "home/nvr".into(),
         };
+        assert_eq!(
+            t.presence_reset("home/nvr/garage/line/porte/presence/reset"),
+            Some((CameraId::new("garage").expect("id"), "porte".to_owned()))
+        );
+        assert!(
+            t.presence_reset("home/nvr/garage/line//presence/reset")
+                .is_none()
+        );
+        assert!(
+            t.presence_reset("home/nvr/garage/motion_detection/set")
+                .is_none()
+        );
         let parse = |topic: &str| t.command(topic).map(|(c, s)| (c.to_string(), s));
         assert_eq!(
             parse("home/nvr/jardin/motion_detection/set"),

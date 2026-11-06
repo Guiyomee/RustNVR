@@ -44,6 +44,8 @@ pub struct CapabilitiesDto {
     pub ai: bool,
     /// User management.
     pub users: bool,
+    /// Backup and restore of the configuration (`/backup`).
+    pub backup: bool,
 }
 
 /// Process and host status.
@@ -96,6 +98,8 @@ pub struct SystemDto {
     /// The executable was replaced on disk since startup (an update was
     /// installed): restart the server to use it.
     pub restart_needed: bool,
+    /// A configuration backup was restored: restart the server to use it.
+    pub config_restored: bool,
     /// A newer version was published on the watched repository.
     pub update_available: Option<String>,
     /// Graphics cards of the machine (Linux), and whether RustNVR may use them.

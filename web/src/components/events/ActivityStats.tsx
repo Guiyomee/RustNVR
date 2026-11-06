@@ -1,6 +1,9 @@
-import { BarChart3 } from 'lucide-react'
+import { BarChart3, RotateCcw } from 'lucide-react'
 import { useState } from 'react'
-import { getCrossings, getEventStats } from '../../api/endpoints'
+import { describeError } from '../../api/client'
+import { getCrossings, getEventStats, resetPresence } from '../../api/endpoints'
+import { useReadOnly } from '../../auth/AuthGate'
+import { Button } from '../ui/Button'
 import { useAsync } from '../../hooks/useAsync'
 import { formatNumber } from '../../lib/format'
 import { objectLabel } from '../../lib/objects'
@@ -108,6 +111,18 @@ export function ActivityStats({ names }: { names: (id: string) => string }) {
   const stats = useAsync(() => getEventStats(days), [days])
   const crossings = useAsync(() => getCrossings(days), [days])
   const lines: CrossingStats['lines'] = crossings.data?.lines ?? []
+  const readOnly = useReadOnly()
+  const counting = lines.some((l) => l.present != null)
+  const [resetError, setResetError] = useState<string | null>(null)
+  const reset = async (camera: string, line: string) => {
+    setResetError(null)
+    try {
+      await resetPresence(camera, line)
+      crossings.reload()
+    } catch (e) {
+      setResetError(describeError(e))
+    }
+  }
   const s: EventStats | null = stats.data
   return (
     <Card className="mb-4">
@@ -157,6 +172,7 @@ export function ActivityStats({ names }: { names: (id: string) => string }) {
                     <th className="py-1 pr-4 text-right font-normal">{t('Sens de la flèche', 'Arrow direction')}</th>
                     <th className="py-1 pr-4 text-right font-normal">{t('Sens inverse', 'Opposite direction')}</th>
                     <th className="py-1 text-right font-normal">{t('Total ', 'Total ')}{days}{t(' j', ' d')}</th>
+                    {counting && <th className="py-1 pl-4 text-right font-normal">{t('Présents', 'Present')}</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line">
@@ -169,10 +185,22 @@ export function ActivityStats({ names }: { names: (id: string) => string }) {
                       <td className="py-1 pr-4 text-right">{formatNumber(l.forward)}</td>
                       <td className="py-1 pr-4 text-right">{formatNumber(l.backward)}</td>
                       <td className="py-1 text-right">{formatNumber(l.total)}</td>
+                      {counting && (
+                        <td className="py-1 pl-4 text-right">
+                          {l.present != null && (
+                            <span className="inline-flex items-center gap-2">
+                              <span className="font-semibold">{formatNumber(l.present)}</span>
+                              <Button size="sm" icon={<RotateCcw className="size-3.5" />} aria-label={t(`Remettre à zéro les présents de `, `Reset who is inside for `)} disabledReason={readOnly ? t('Lecture seule', 'Read only') : null} onClick={() => void reset(l.camera, l.line)} />
+                            </span>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
               </table>
+              {counting && <p className="mt-2 text-xs text-muted">{t('Présents : entrées − sorties depuis minuit ou la dernière remise à zéro (jamais moins de 0). Un passage manqué fausse le compte jusqu’à minuit : remettez à zéro quand il n’y a personne.', 'Present: entries − exits since midnight or the last reset (never below 0). A missed crossing makes the count wrong until midnight: reset it when nobody is inside.')}</p>}
+              {resetError && <p className="mt-1 text-xs text-err">{resetError}</p>}
             </figure>
           )}
           <details className="text-xs">

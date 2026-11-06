@@ -48,6 +48,10 @@ par des photos libres de droits ([crédits](web/public/demo/CREDITS.md)).
   complet, reprise différée.
 - Commandes `probe` (test de connexion), `check-config`, `recover`, `health`
   (le serveur en marche répond-il ? Contrôle de santé de l'image Docker).
+- Sauvegarde et restauration de la configuration (Paramètres → Sauvegarde) :
+  un fichier chiffré par une phrase secrète (caméras et leurs mots de passe,
+  stockage, MQTT, IA, webhooks, zones et lignes), restauré avec un aperçu,
+  fichier par fichier.
 - Ajout, modification et suppression de caméras depuis l'interface Web, sans
   redémarrage, avec test de connexion. Elles sont stockées dans
   `cameras.ui.toml` (à côté de `config.toml`, lisible par son seul propriétaire,

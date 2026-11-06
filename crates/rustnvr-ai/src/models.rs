@@ -58,12 +58,55 @@ pub const MODELS: &[ModelInfo] = &[
         sha256: "c5c2d13e59ae883e6af3b45daea64af4833a4951c92d116ec270d9ddbe998063",
         bytes: 35_858_002,
         license: "Apache-2.0",
-        hint: "Le plus précis : personne de nuit trouvée, chien reconnu, aucune fausse personne. Plus lent : ≈ 400 ms par image, ≈ 110 Mo.",
+        hint: "Le meilleur compromis : personne de nuit trouvée, chien reconnu, aucune fausse personne. ≈ 400 ms par image, ≈ 110 Mo.",
+    },
+    // The bigger ones: measured on 5 pictures, an i5-11600K (an older
+    // processor such as an i5-6500 takes about 1.5 times longer).
+    ModelInfo {
+        id: "yolox_m",
+        name: "YOLOX-m",
+        file: "yolox_m.onnx",
+        url: "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_m.onnx",
+        sha256: "21ff6cfdeb53b013bac2249599e55f00bff3cfdfdab37ed7a4620818c1d15b3f",
+        bytes: 101_259_744,
+        license: "Apache-2.0",
+        hint: "Plus juste que s (mAP 47,2 contre 40,5), plus sûr de lui sur les mêmes objets, mais 2,3 fois plus lent : ≈ 0,8 s par image (≈ 1,2 s sur un i5-6500), ≈ 240 Mo.",
+    },
+    ModelInfo {
+        id: "yolox_l",
+        name: "YOLOX-l",
+        file: "yolox_l.onnx",
+        url: "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_l.onnx",
+        sha256: "7860ae79de6c89a3c1eb72ae9a2756c0ccfbe04b7791bb5880afabd97855a411",
+        bytes: 216_746_733,
+        license: "Apache-2.0",
+        hint: "À peine plus juste que m (mAP 50,1) pour deux fois plus de calcul : ≈ 1,6 s par image (≈ 2,3 s sur un i5-6500), ≈ 440 Mo. Plutôt pour une machine puissante.",
+    },
+    ModelInfo {
+        id: "yolox_darknet",
+        name: "YOLOX-Darknet53",
+        file: "yolox_darknet.onnx",
+        url: "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_darknet.onnx",
+        sha256: "10ccc527877c6ee5596929c4b3eee5ad6a78038647260bc9abdfce9a0df55d05",
+        bytes: 254_814_364,
+        license: "Apache-2.0",
+        hint: "Plus lent que l et moins juste (mAP 48,0) : ≈ 2 s par image, ≈ 560 Mo. Gardé pour comparer ; l ou m font mieux.",
+    },
+    ModelInfo {
+        id: "yolox_x",
+        name: "YOLOX-x",
+        file: "yolox_x.onnx",
+        url: "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_x.onnx",
+        sha256: "c892d7aaf1c4746d8a4d675bec669a4db4f434b4ee1efb654bc9b353379c7c55",
+        bytes: 396_142_663,
+        license: "Apache-2.0",
+        hint: "Le plus juste (mAP 51,5) mais très lent sans carte graphique : ≈ 3,2 s par image (≈ 4,6 s sur un i5-6500), ≈ 800 Mo. Les analyses risquent de prendre du retard quand plusieurs caméras bougent.",
     },
 ];
 
-/// A download taking longer is abandoned.
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// A download taking longer is abandoned (YOLOX-x weighs 400 MB: 30 min
+/// is about 2 Mbit/s).
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// The model `id`, if offered.
 pub fn find(id: &str) -> Option<&'static ModelInfo> {

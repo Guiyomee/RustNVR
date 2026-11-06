@@ -47,6 +47,7 @@ const DEMO_CAPABILITIES: Capabilities = {
   mqtt: false,
   ai: false,
   users: false,
+  backup: false,
 }
 
 function isRecording(id: string, t: number, now: number): boolean {
