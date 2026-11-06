@@ -78,6 +78,17 @@ joint les caméras comme l'hôte et le direct WebRTC (UDP) fonctionne. En résea
 « bridge » (retirez `network_mode`, décommentez `ports`), le direct standard
 marche mais pas le WebRTC (adresses du conteneur non joignables).
 
+**Autre port.** En réseau de l'hôte, `ports` n'a aucun effet : RustNVR écoute
+sur `listen` de `/config/config.toml` (8080). Pour un autre port, sans toucher
+à ce fichier, ajoutez dans `environment` de la stack :
+
+```yaml
+      RUSTNVR_WEB_LISTEN: "0.0.0.0:8082"
+```
+
+Pratique pour faire tourner deux RustNVR sur la même machine (un essai à côté
+de l'installation habituelle). Le contrôle de santé suit le même port.
+
 Une caméra n'accepte souvent que quelques connexions RTSP : arrêtez l'autre
 RustNVR (ou Frigate) qui lit les mêmes caméras pendant l'essai si une caméra
 reste « hors ligne » (erreur 500 au SETUP).

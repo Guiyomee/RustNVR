@@ -28,6 +28,8 @@ services:
     environment:
       TZ: Europe/Paris
       RUSTNVR_WEB_PASSWORD: ${RUSTNVR_WEB_PASSWORD:?set RUSTNVR_WEB_PASSWORD in .env}
+      # Another port on the host network (`ports` has no effect there):
+      # RUSTNVR_WEB_LISTEN: "0.0.0.0:8082"
     volumes:
       - rustnvr-config:/config
       - rustnvr-data:/data

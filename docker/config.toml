@@ -10,6 +10,8 @@ recordings_dir = "/data/recordings"
 data_dir = "/data/rustnvr"
 
 [web]
+# Another port: RUSTNVR_WEB_LISTEN in the stack (e.g. "0.0.0.0:8082"), which
+# replaces this line without editing this file.
 listen = "0.0.0.0:8080"
 static_dir = "/usr/share/rustnvr/web"
 # Required to listen on the network: the password comes from the environment

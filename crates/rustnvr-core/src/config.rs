@@ -85,6 +85,11 @@ pub struct Config {
 /// configuration file.
 pub const MANAGED_SETTINGS_FILE: &str = "settings.ui.toml";
 
+/// Environment variable replacing `web.listen` (e.g. `0.0.0.0:8082`), so that
+/// a container on the host network can use another port without editing
+/// `config.toml`.
+pub const LISTEN_ENV: &str = "RUSTNVR_WEB_LISTEN";
+
 /// Contents of [`MANAGED_SETTINGS_FILE`].
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1634,6 +1639,14 @@ impl Config {
         };
         let text = read(path)?;
         let mut config: Config = parse_toml(&text, None)?;
+        // A container stack sets the listening address without editing
+        // config.toml; checked with the rest below.
+        if let Some(listen) = env(LISTEN_ENV)
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+        {
+            config.web.listen = listen;
+        }
         let managed_path = path.with_file_name(MANAGED_CAMERAS_FILE);
         if managed_path.is_file() {
             let managed: ManagedCamerasFile =
@@ -2195,5 +2208,37 @@ mod webhook_tests {
         assert!(!hook("https://discord.com/channels/123").is_discord());
         assert!(!hook("https://n8n.local/api/webhooks/123").is_discord());
         assert!(!hook("https://discord.com.evil.example/api/webhooks/1/a").is_discord());
+    }
+
+    #[test]
+    fn the_environment_can_change_the_listening_address() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[storage]
+recordings_dir = \"/tmp/rec\"
+[web]
+listen = \"0.0.0.0:8080\"
+username = \"admin\"
+password_env = \"PW\"
+",
+        )
+        .expect("write");
+        let env = |listen: Option<&'static str>| {
+            move |name: &str| match name {
+                "PW" => Some("secret".to_owned()),
+                LISTEN_ENV => listen.map(str::to_owned),
+                _ => None,
+            }
+        };
+        let c = Config::load_with_env(&config, env(None)).expect("valid");
+        assert_eq!(c.web.listen, "0.0.0.0:8080");
+        let c = Config::load_with_env(&config, env(Some(" 0.0.0.0:8082 "))).expect("valid");
+        assert_eq!(c.web.listen, "0.0.0.0:8082");
+        // Empty: config.toml wins; invalid: refused like in config.toml.
+        let c = Config::load_with_env(&config, env(Some(""))).expect("valid");
+        assert_eq!(c.web.listen, "0.0.0.0:8080");
+        assert!(Config::load_with_env(&config, env(Some("port-8082"))).is_err());
     }
 }

@@ -171,6 +171,7 @@ interval_seconds = 3
 [web]
 # Web interface and API (http://<listen>/). Loopback by default.
 enabled = true
+# The environment variable RUSTNVR_WEB_LISTEN, when set, replaces this value.
 listen = "127.0.0.1:8080"
 # Built interface (cd web && npm ci && npm run build).
 static_dir = "web/dist"
