@@ -20,6 +20,7 @@
 //! | `<p>/<camera>/line/<line>/today` | crossings of the line since midnight | yes |
 //! | `<p>/<camera>/line/<line>/present` | who is inside (lines counting the presence) | yes |
 //! | `<p>/<camera>/line/<line>/presence/reset` | any payload (command): count from zero again | — |
+//! | `<p>/<camera>/ptz/preset/set` | name of a PTZ preset (command): the motorised camera goes there | — |
 //! | `<p>/cameras_online` | number | yes |
 //! | `<p>/disk_used_percent` | number (local recordings disk) | yes |
 //! | `<p>/disk_low` | `ON` / `OFF` (a destination is short of space) | yes |
@@ -86,6 +87,8 @@ pub struct CameraView {
     pub person_detection: bool,
     /// Lines counting the presence: name, who is inside.
     pub presence: Vec<(String, u64)>,
+    /// Names of the PTZ presets of a motorised camera (empty: no selector).
+    pub ptz_presets: Vec<String>,
 }
 
 /// NVR-wide figures.
@@ -123,6 +126,8 @@ pub trait NvrView: Send + Sync + 'static {
     /// Starts the presence count of the line of `camera` whose topic level
     /// is `label` again from zero (command from MQTT).
     fn reset_presence(&self, camera: CameraId, label: String) -> BoxFuture<'_, Result<(), String>>;
+    /// Sends a motorised camera to its preset named `name` (command from MQTT).
+    fn ptz_goto(&self, camera: CameraId, name: String) -> BoxFuture<'_, Result<(), String>>;
 }
 
 /// Resolved connection settings.
@@ -263,6 +268,7 @@ pub fn spawn_mqtt(
         status: status_tx,
         announced: HashSet::new(),
         presence_labels: HashMap::new(),
+        ptz_announced: HashSet::new(),
         persons: HashSet::new(),
         dropped: 0,
     };
@@ -331,6 +337,16 @@ impl Topics {
             return None;
         }
         Some((CameraId::new(cam).ok()?, label.to_owned()))
+    }
+
+    /// Camera of a `<p>/<camera>/ptz/preset/set` command.
+    fn ptz_preset(&self, topic: &str) -> Option<CameraId> {
+        let rest = topic.strip_prefix(&self.prefix)?.strip_prefix('/')?;
+        let cam = rest.strip_suffix("/ptz/preset/set")?;
+        if cam.contains('/') {
+            return None;
+        }
+        CameraId::new(cam).ok()
     }
 
     /// Camera and switch of a `<p>/<camera>/motion_detection/set` or
@@ -424,6 +440,8 @@ struct Client {
     persons: HashSet<CameraId>,
     /// Topic levels of the presence lines announced, per camera.
     presence_labels: HashMap<CameraId, Vec<String>>,
+    /// Cameras whose PTZ preset selector is announced.
+    ptz_announced: HashSet<CameraId>,
     /// Messages dropped because the queue was full (logged once per burst).
     dropped: u64,
 }
@@ -476,6 +494,26 @@ impl Client {
             self.publish(topic, true, on_off(on));
         }
         self.publish_presence(c);
+        self.publish_ptz(c);
+    }
+
+    /// Announces the PTZ preset selector of `c` (its presets as options), or
+    /// removes it when the camera has none.
+    fn publish_ptz(&mut self, c: &CameraView) {
+        let Some(prefix) = self.settings.discovery_prefix.clone() else {
+            return;
+        };
+        if c.ptz_presets.is_empty() {
+            if self.ptz_announced.remove(&c.id) {
+                let topic = discovery::ptz_config_topic(&prefix, &self.settings.client_id, &c.id);
+                self.publish(topic, true, Vec::new());
+            }
+            return;
+        }
+        let (topic, payload) =
+            discovery::ptz_config(&prefix, &self.settings.client_id, &self.topics, c);
+        self.publish(topic, true, payload);
+        self.ptz_announced.insert(c.id.clone());
     }
 
     /// Announces the presence lines of `c` with their counts, and removes
@@ -522,6 +560,12 @@ impl Client {
 
     /// Removes a deleted camera: empty retained messages clear the broker.
     fn forget_camera(&mut self, id: &CameraId) {
+        if self.ptz_announced.remove(id)
+            && let Some(prefix) = self.settings.discovery_prefix.clone()
+        {
+            let topic = discovery::ptz_config_topic(&prefix, &self.settings.client_id, id);
+            self.publish(topic, true, Vec::new());
+        }
         for label in self.presence_labels.remove(id).unwrap_or_default() {
             if let Some(prefix) = self.settings.discovery_prefix.clone() {
                 for topic in
@@ -604,6 +648,7 @@ impl Client {
                 let topic = self.topics.camera(&c.id, "audio");
                 self.publish(topic, true, on_off(c.audio_enabled));
                 self.publish_presence(c);
+                self.publish_ptz(c);
             }
         }
         self.announced = current;
@@ -640,7 +685,12 @@ impl Client {
         }
         self.sync_cameras(true).await;
         self.publish_system().await;
-        for command in ["motion_detection/set", "audio/set", "line/+/presence/reset"] {
+        for command in [
+            "motion_detection/set",
+            "audio/set",
+            "line/+/presence/reset",
+            "ptz/preset/set",
+        ] {
             let topic = format!("{}/+/{command}", self.topics.prefix);
             if self.client.try_subscribe(topic, QoS::AtLeastOnce).is_err() {
                 tracing::warn!("MQTT: cannot subscribe to commands");
@@ -649,6 +699,16 @@ impl Client {
     }
 
     fn on_command(&self, topic: &str, payload: &[u8]) {
+        if let Some(camera) = self.topics.ptz_preset(topic) {
+            let name = String::from_utf8_lossy(payload).trim().to_owned();
+            let view = self.view.clone();
+            tokio::spawn(async move {
+                if let Err(e) = view.ptz_goto(camera.clone(), name.clone()).await {
+                    tracing::warn!(%camera, preset = %name, error = %e, "MQTT: PTZ preset failed");
+                }
+            });
+            return;
+        }
         if let Some((camera, label)) = self.topics.presence_reset(topic) {
             let view = self.view.clone();
             tokio::spawn(async move {
@@ -883,6 +943,13 @@ mod tests {
             t.presence_reset("home/nvr/garage/motion_detection/set")
                 .is_none()
         );
+        assert_eq!(
+            t.ptz_preset("home/nvr/garage/ptz/preset/set")
+                .map(|c| c.to_string()),
+            Some("garage".to_owned())
+        );
+        assert!(t.ptz_preset("home/nvr/a/b/ptz/preset/set").is_none());
+        assert!(t.ptz_preset("home/nvr/garage/audio/set").is_none());
         let parse = |topic: &str| t.command(topic).map(|(c, s)| (c.to_string(), s));
         assert_eq!(
             parse("home/nvr/jardin/motion_detection/set"),

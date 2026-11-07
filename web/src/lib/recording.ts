@@ -40,8 +40,10 @@ export async function setRecording(camera: Camera, record: boolean): Promise<Cam
     name: camera.name,
     enabled: camera.enabled,
     record,
-    main: stream(e.main_url),
-    sub: e.sub_url ? stream(e.sub_url) : null,
+    // Everything else as it is: the webcam, or the streams and the ONVIF port.
+    ...(e.usb
+      ? { main: null, sub: null, usb: e.usb, onvif_port: null }
+      : { main: stream(e.main_url), sub: e.sub_url ? stream(e.sub_url) : null, usb: null, onvif_port: e.onvif_port ?? null }),
     record_destinations: camera.record_destinations,
     record_mode: camera.record_mode,
     retention_days: camera.retention_days,

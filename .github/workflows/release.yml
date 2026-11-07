@@ -1,0 +1,123 @@
+# Ready-to-use archive (Linux x86-64, no Docker): built on Debian 12 so that
+# it runs on Debian 12 and 13 (glibc), installed and started in both before
+# being attached to the release (rustnvr-<version>-linux-x86_64.tar.gz and
+# its .sha256). packaging/install.sh and packaging/proxmox/rustnvr-lxc.sh
+# download it.
+#
+# On a pushed commit or by hand: built and tested only (nothing published).
+name: Release archive
+
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archive-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web interface
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - working-directory: web
+        run: npm ci --no-audit --no-fund && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 3
+
+  program:
+    name: Program (Debian 12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container: rust:1-bookworm
+    steps:
+      - uses: actions/checkout@v7
+      # aws-lc-sys (TLS) builds C code with CMake.
+      - run: apt-get update && apt-get install -y --no-install-recommends cmake clang
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p rustnvr-app
+      - run: target/release/rustnvr --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustnvr
+          path: target/release/rustnvr
+          retention-days: 3
+
+  archive:
+    name: Archive, installed on Debian 12 and 13
+    needs: [web, program]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: rustnvr
+          path: build
+      - name: Archive
+        id: archive
+        run: |
+          chmod +x build/rustnvr
+          if [ "${{ github.event_name }}" = release ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="$(build/rustnvr --version | awk '{print $2}')-test"
+          fi
+          RUSTNVR_BIN=build/rustnvr bash scripts/package-release.sh "$VERSION" dist
+          echo "name=rustnvr-$VERSION-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
+          ls -l dist
+      - name: Install and start on Debian 12 and 13
+        run: |
+          for debian in debian:12 debian:13; do
+            echo "::group::$debian"
+            docker run --rm -v "$PWD/dist:/dist:ro" "$debian" bash -euc '
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl ca-certificates ffmpeg >/dev/null
+              tar -xzf /dist/${{ steps.archive.outputs.name }} -C /tmp
+              RUSTNVR_WEB_PASSWORD=essai-ci-1234 bash /tmp/rustnvr-*/install.sh --archive /dist/${{ steps.archive.outputs.name }} --no-start
+              # No systemd in a container: started as the service would.
+              set -a; . /etc/rustnvr/rustnvr.env; set +a
+              runuser -u rustnvr -- /usr/local/bin/rustnvr run -c /etc/rustnvr/config.toml &
+              for i in $(seq 1 30); do
+                curl -fsk https://127.0.0.1:8080/api/v1/health && break
+                sleep 1
+              done
+              echo
+              runuser -u rustnvr -- env RUSTNVR_WEB_PASSWORD="$RUSTNVR_WEB_PASSWORD" /usr/local/bin/rustnvr health -c /etc/rustnvr/config.toml
+              curl -fsk https://127.0.0.1:8080/ | grep -q "<title>"
+              # An update keeps the configuration.
+              echo "# kept" >> /etc/rustnvr/config.toml
+              bash /usr/local/bin/rustnvr-update --archive /dist/${{ steps.archive.outputs.name }} --no-start
+              tail -n 1 /etc/rustnvr/config.toml | grep -q "# kept"
+              echo "OK on $(. /etc/os-release; echo "$PRETTY_NAME")"
+            '
+            echo "::endgroup::"
+          done
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber

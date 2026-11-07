@@ -38,6 +38,7 @@ Par caméra (appareil nommé comme la caméra) :
 | Personne | `binary_sensor` (`occupancy`) | personne reconnue pendant le mouvement (seulement avec l'IA optionnelle, [AI.md](AI.md)) |
 | Dernier mouvement | `camera` | image prise au début du dernier événement |
 | Dernière personne | `camera` | image où une personne a été reconnue, cadres bleus dessinés (seulement avec l'IA optionnelle) |
+| Position PTZ | `select` | caméras motorisées (port ONVIF réglé) : choisir une position enregistrée y envoie la caméra ; les options sont les noms des positions, lus au démarrage et après chaque ajout ou suppression depuis l'interface (une position créée dans l'appli du fabricant apparaît au prochain démarrage) |
 
 Pour RustNVR (appareil « RustNVR ») : « Caméras en ligne », « Espace disque
 faible » (problème) et « Disque des
@@ -71,6 +72,7 @@ retenus vides).
 | `<p>/<caméra>/line/<ligne>/today` | passages de la ligne depuis minuit | oui |
 | `<p>/<caméra>/line/<ligne>/present` | qui est à l'intérieur (lignes qui comptent les présences : entrées − sorties depuis minuit ou la remise à zéro) ; entité « Présents · ligne » | oui |
 | `<p>/<caméra>/line/<ligne>/presence/reset` | n'importe quel message (commande) : remet le compte à zéro ; bouton « Remettre à zéro · ligne » | — |
+| `<p>/<caméra>/ptz/preset/set` | nom d'une position enregistrée sur la caméra (commande) : la caméra motorisée y va ; sélecteur « Position PTZ » | — |
 | `<p>/<caméra>/event` | JSON à chaque début, mise à jour et fin d'événement | non |
 | `<p>/cameras_online` | nombre | oui |
 | `<p>/disk_used_percent` | nombre | oui |

@@ -1358,21 +1358,120 @@ pub struct CameraConfig {
     /// Disabled cameras are validated but not connected.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Main (full resolution) stream, recorded.
+    /// Main (full resolution) stream, recorded. Left out (empty) for a USB
+    /// camera.
+    #[serde(default)]
     pub main: StreamConfig,
     /// Optional low resolution stream, reserved for detection (not connected yet).
     #[serde(default)]
     pub sub: Option<StreamConfig>,
+    /// A USB webcam instead of an RTSP stream (`main` left out).
+    #[serde(default)]
+    pub usb: Option<UsbConfig>,
     /// Recording options for this camera.
     #[serde(default)]
     pub record: CameraRecordConfig,
+    /// ONVIF device service, for moving a motorised camera (PTZ).
+    #[serde(default)]
+    pub onvif: Option<OnvifConfig>,
     /// True for cameras stored in [`MANAGED_CAMERAS_FILE`] (editable from the
     /// web interface); false for cameras declared in the configuration file.
     #[serde(skip)]
     pub managed: bool,
 }
 
+/// ONVIF device service of a camera (`onvif = { port = 80 }`): pan, tilt,
+/// zoom and presets of a motorised camera.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnvifConfig {
+    /// Port of the device service, on the host of the main stream (80;
+    /// Reolink 8000, Tapo 2020…).
+    #[serde(default = "default_onvif_port")]
+    pub port: u16,
+    /// Whole address of the device service, when it is not
+    /// `http://<host>:<port>/onvif/device_service`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// ONVIF user, when not the one of the main stream.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Its password. Prefer `password_env`.
+    #[serde(default)]
+    pub password: Option<Secret>,
+    /// Environment variable holding its password.
+    #[serde(default)]
+    pub password_env: Option<String>,
+}
+
+fn default_onvif_port() -> u16 {
+    80
+}
+
+/// Where and as whom to reach the ONVIF service of a camera.
+#[derive(Debug, Clone)]
+pub struct OnvifTarget {
+    /// Device service (`http://192.168.1.20/onvif/device_service`).
+    pub device_url: String,
+    /// User name and password, if any.
+    pub credentials: Option<(String, Secret)>,
+}
+
 impl CameraConfig {
+    /// The ONVIF service of the camera (`None` when not configured): its
+    /// address on the host of the main stream, with the ONVIF credentials or
+    /// else those of the main stream.
+    pub fn onvif_target(
+        &self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<OnvifTarget>, String> {
+        let Some(onvif) = &self.onvif else {
+            return Ok(None);
+        };
+        let main = self.main.resolve_with(&env)?;
+        let device_url = match &onvif.url {
+            Some(u) => u.clone(),
+            None => {
+                let host = main.url().host_str().ok_or("main stream without host")?;
+                let host = if host.contains(':') && !host.starts_with('[') {
+                    format!("[{host}]")
+                } else {
+                    host.to_owned()
+                };
+                match onvif.port {
+                    80 => format!("http://{host}/onvif/device_service"),
+                    p => format!("http://{host}:{p}/onvif/device_service"),
+                }
+            }
+        };
+        let password = match (&onvif.password, &onvif.password_env) {
+            (Some(_), Some(_)) => {
+                return Err("`password` and `password_env` are mutually exclusive".into());
+            }
+            (Some(p), None) => Some(p.clone()),
+            (None, Some(var)) => {
+                Some(Secret::new(env(var).ok_or_else(|| {
+                    format!("environment variable {var:?} is not set")
+                })?))
+            }
+            (None, None) => None,
+        };
+        let credentials = match (&onvif.username, password) {
+            (Some(user), password) => Some((
+                user.clone(),
+                password.unwrap_or_else(|| Secret::new(String::new())),
+            )),
+            (None, Some(_)) => return Err("`password` without `username`".into()),
+            (None, None) => main
+                .credentials()
+                .map(|c| (c.username.clone(), c.password.clone())),
+        };
+        Ok(Some(OnvifTarget {
+            device_url,
+            credentials,
+        }))
+    }
+
     /// Problems of this camera alone (identifier uniqueness is checked by
     /// [`Config::validate_with`]). Environment variables are only required
     /// for enabled cameras, which are the ones that connect.
@@ -1381,6 +1480,22 @@ impl CameraConfig {
         let mut problems = Vec::new();
         if self.name.as_ref().is_some_and(|n| n.chars().count() > 128) {
             problems.push(format!("camera {id:?}: name longer than 128 characters"));
+        }
+        if let Some(usb) = &self.usb {
+            let prefix = format!("camera {id:?} usb");
+            problems.extend(usb.problems().into_iter().map(|p| format!("{prefix}: {p}")));
+            if !self.main.url.is_empty() || self.sub.is_some() || self.onvif.is_some() {
+                problems.push(format!(
+                    "{prefix}: a USB camera has no main, sub nor onvif (RTSP) settings"
+                ));
+            }
+            return problems;
+        }
+        if self.main.url.is_empty() {
+            problems.push(format!(
+                "camera {id:?}: main = {{ url = \"rtsp://…\" }} (or usb = {{ device = \"/dev/video0\" }}) is required"
+            ));
+            return problems;
         }
         let streams =
             std::iter::once(("main", &self.main)).chain(self.sub.as_ref().map(|s| ("sub", s)));
@@ -1404,6 +1519,30 @@ impl CameraConfig {
                 }
             };
             if let Err(e) = s.resolve_with(env_lookup) {
+                problems.push(format!("{prefix}: {e}"));
+            }
+        }
+        if let Some(onvif) = &self.onvif {
+            let prefix = format!("camera {id:?} onvif");
+            if onvif.port == 0 {
+                problems.push(format!("{prefix}: port must be between 1 and 65535"));
+            }
+            if let Some(u) = &onvif.url
+                && !(u.starts_with("http://") || u.starts_with("https://"))
+            {
+                problems.push(format!("{prefix}: url must start with http:// or https://"));
+            }
+            let env_lookup = |name: &str| {
+                if self.enabled {
+                    env(name)
+                } else {
+                    Some(String::new())
+                }
+            };
+            // The main stream's own problems are listed above.
+            if self.main.resolve_with(env_lookup).is_ok()
+                && let Err(e) = self.onvif_target(env_lookup)
+            {
                 problems.push(format!("{prefix}: {e}"));
             }
         }
@@ -1531,6 +1670,91 @@ impl std::fmt::Debug for StreamConfig {
             .field("connect_timeout_seconds", &self.connect_timeout_seconds)
             .field("stall_timeout_seconds", &self.stall_timeout_seconds)
             .finish()
+    }
+}
+
+/// The main stream of a USB camera: no URL (never connected in RTSP).
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            username: None,
+            password: None,
+            password_env: None,
+            transport: RtspTransport::default(),
+            connect_timeout_seconds: default_connect_timeout(),
+            stall_timeout_seconds: default_stall_timeout(),
+        }
+    }
+}
+
+/// A USB webcam (V4L2) read through FFmpeg (`usb = { device = "/dev/video0" }`
+/// instead of `main`). Its pictures are encoded to H.264 by FFmpeg, on the
+/// graphics card when one is in use for conversions (`live.hwaccel`), or
+/// copied when the webcam sends H.264 itself.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbConfig {
+    /// Video device: `/dev/video0`, or a name that does not change when
+    /// plugged elsewhere, `/dev/v4l/by-id/usb-…-video-index0`.
+    pub device: String,
+    /// Format asked to the webcam: `mjpeg`, `yuyv422`… or `h264` (copied,
+    /// nothing encoded); absent: the webcam's default.
+    #[serde(default)]
+    pub input_format: Option<String>,
+    /// Picture size asked to the webcam (both or neither).
+    #[serde(default)]
+    pub width: Option<u32>,
+    /// Picture size asked to the webcam (both or neither).
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// Pictures per second asked to the webcam.
+    #[serde(default)]
+    pub framerate: Option<u32>,
+    /// Bit rate of the H.264 encoded by RustNVR, in kbit/s.
+    #[serde(default = "default_usb_bitrate")]
+    pub bitrate_kbps: u32,
+}
+
+fn default_usb_bitrate() -> u32 {
+    2000
+}
+
+/// Formats a webcam may be asked for (FFmpeg's names, `-input_format`).
+pub const USB_INPUT_FORMATS: [&str; 6] = ["mjpeg", "yuyv422", "h264", "nv12", "yuv420p", "rgb24"];
+
+impl UsbConfig {
+    /// Problems of these settings.
+    pub fn problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if !self.device.starts_with("/dev/") || self.device.contains("..") {
+            problems.push("device must be a path under /dev (/dev/video0)".to_owned());
+        }
+        if let Some(f) = &self.input_format
+            && !USB_INPUT_FORMATS.contains(&f.as_str())
+        {
+            problems.push(format!(
+                "input_format must be one of {}",
+                USB_INPUT_FORMATS.join(", ")
+            ));
+        }
+        match (self.width, self.height) {
+            (Some(w), Some(h)) if (16..=7680).contains(&w) && (16..=4320).contains(&h) => {}
+            (None, None) => {}
+            _ => problems.push("width and height go together (16 to 7680 × 4320)".to_owned()),
+        }
+        if self.framerate.is_some_and(|f| !(1..=120).contains(&f)) {
+            problems.push("framerate must be between 1 and 120".to_owned());
+        }
+        if !(100..=50_000).contains(&self.bitrate_kbps) {
+            problems.push("bitrate_kbps must be between 100 and 50000".to_owned());
+        }
+        problems
+    }
+
+    /// Whether the webcam's own H.264 is recorded as is.
+    pub fn copies_h264(&self) -> bool {
+        self.input_format.as_deref() == Some("h264")
     }
 }
 
@@ -2047,6 +2271,125 @@ main = { url = \"rtsp://x/b\" }
         assert!(msg.contains("ai.min_score"), "{msg}");
         assert!(msg.contains("\"K\" is not set"), "{msg}");
         assert!(!msg.contains("SECRET"), "{msg}");
+    }
+
+    #[test]
+    fn usb_cameras_instead_of_rtsp() {
+        let ok = Config::from_toml_with_env(
+            r#"
+            [[cameras]]
+            id = "bureau"
+            usb = { device = "/dev/video0" }
+
+            [[cameras]]
+            id = "atelier"
+            usb = { device = "/dev/v4l/by-id/usb-046d_C920-video-index0", input_format = "h264", width = 1920, height = 1080, framerate = 30 }
+            "#,
+            |_| None,
+        )
+        .expect("valid");
+        let usb = ok.cameras[0].usb.as_ref().expect("usb");
+        assert_eq!(usb.bitrate_kbps, 2000, "default");
+        assert!(!usb.copies_h264());
+        assert!(ok.cameras[0].main.url.is_empty());
+        assert!(
+            ok.cameras[1]
+                .usb
+                .as_ref()
+                .is_some_and(UsbConfig::copies_h264)
+        );
+
+        let err = Config::from_toml_with_env(
+            r#"
+            [[cameras]]
+            id = "a"
+            usb = { device = "video0", input_format = "avi", width = 640, framerate = 500, bitrate_kbps = 10 }
+
+            [[cameras]]
+            id = "b"
+            main = { url = "rtsp://x/" }
+            usb = { device = "/dev/video1" }
+
+            [[cameras]]
+            id = "c"
+            "#,
+            |_| None,
+        )
+        .expect_err("invalid");
+        let msg = err.to_string();
+        for expected in [
+            "device must be a path under /dev",
+            "input_format must be one of",
+            "width and height go together",
+            "framerate must be between",
+            "bitrate_kbps must be between",
+            "a USB camera has no main, sub nor onvif",
+            "camera \"c\": main = { url",
+        ] {
+            assert!(msg.contains(expected), "{expected}: {msg}");
+        }
+    }
+
+    #[test]
+    fn onvif_service_of_a_motorised_camera() {
+        let ok = Config::from_toml_with_env(
+            r#"
+            [[cameras]]
+            id = "ptz"
+            main = { url = "rtsp://192.168.1.40:554/live", username = "admin", password_env = "P" }
+            onvif = {}
+
+            [[cameras]]
+            id = "tapo"
+            main = { url = "rtsp://[fd00::5]/stream1", username = "admin", password = "x" }
+            onvif = { port = 2020, username = "onvif", password = "y" }
+
+            [[cameras]]
+            id = "fixe"
+            main = { url = "rtsp://192.168.1.41/live" }
+            "#,
+            |v| (v == "P").then(|| "secret".to_owned()),
+        )
+        .expect("valid");
+        let target = |i: usize| {
+            ok.cameras[i]
+                .onvif_target(|v| (v == "P").then(|| "secret".to_owned()))
+                .expect("target")
+        };
+        // Port 80 by default, the main stream's credentials.
+        let t = target(0).expect("configured");
+        assert_eq!(t.device_url, "http://192.168.1.40/onvif/device_service");
+        let (user, password) = t.credentials.expect("credentials");
+        assert_eq!((user.as_str(), password.expose()), ("admin", "secret"));
+        // Its own port and user; IPv6 host in brackets.
+        let t = target(1).expect("configured");
+        assert_eq!(t.device_url, "http://[fd00::5]:2020/onvif/device_service");
+        assert_eq!(t.credentials.expect("credentials").0, "onvif");
+        assert!(target(2).is_none());
+
+        let err = Config::from_toml_with_env(
+            r#"
+            [[cameras]]
+            id = "a"
+            main = { url = "rtsp://x/" }
+            onvif = { port = 0, url = "ftp://x/" }
+
+            [[cameras]]
+            id = "b"
+            main = { url = "rtsp://x/" }
+            onvif = { password = "p" }
+            "#,
+            |_| None,
+        )
+        .expect_err("invalid");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("port must be between")
+                && msg.contains("http:// or https://")
+                && msg.contains("`password` without `username`"),
+            "{msg}"
+        );
+        assert!(!msg.contains("\"p\""), "{msg}");
     }
 
     #[test]

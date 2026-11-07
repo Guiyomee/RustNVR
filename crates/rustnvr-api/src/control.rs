@@ -48,8 +48,12 @@ pub struct CameraInput {
     /// Continuous recording of the main stream.
     #[serde(default = "yes")]
     pub record: bool,
-    /// Main stream (recorded).
-    pub main: StreamInput,
+    /// Main stream (recorded); absent for a USB camera.
+    #[serde(default)]
+    pub main: Option<StreamInput>,
+    /// A USB webcam instead of RTSP streams.
+    #[serde(default)]
+    pub usb: Option<rustnvr_core::config::UsbConfig>,
     /// Optional sub stream (live view).
     #[serde(default)]
     pub sub: Option<StreamInput>,
@@ -68,6 +72,9 @@ pub struct CameraInput {
     /// Record the sound; absent keeps the current choice (on for a new camera).
     #[serde(default)]
     pub record_audio: Option<bool>,
+    /// Port of the ONVIF service, for PTZ (`null`: none).
+    #[serde(default)]
+    pub onvif_port: Option<u16>,
 }
 
 /// A storage destination as entered in the interface. For `local`, only the
@@ -269,6 +276,54 @@ pub trait NvrControl: Send + Sync {
         files: Vec<String>,
         motion: bool,
     ) -> BoxFuture<'_, Result<BackupRestored, ControlError>>;
+    /// The presets of a motorised camera (ONVIF PTZ); fails when the camera
+    /// has no ONVIF service configured or announces no PTZ.
+    fn ptz_presets(&self, camera: String) -> BoxFuture<'_, Result<Vec<PtzPreset>, ControlError>>;
+    /// Moves a motorised camera, or changes its presets.
+    fn ptz_command(
+        &self,
+        camera: String,
+        command: PtzCommand,
+    ) -> BoxFuture<'_, Result<(), ControlError>>;
+}
+
+/// A position stored on a motorised camera.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PtzPreset {
+    /// Its token (`POST …/ptz/presets/{token}/goto`).
+    pub token: String,
+    /// Its name.
+    pub name: String,
+}
+
+/// Speeds of a continuous move, each from -1 to 1 (absent: 0).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PtzMove {
+    /// Left (< 0) or right (> 0).
+    #[serde(default)]
+    pub pan: f32,
+    /// Down (< 0) or up (> 0).
+    #[serde(default)]
+    pub tilt: f32,
+    /// Out (< 0) or in (> 0).
+    #[serde(default)]
+    pub zoom: f32,
+}
+
+/// What to do with a motorised camera.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PtzCommand {
+    /// Moves until [`PtzCommand::Stop`] (or a few seconds at most).
+    Move(PtzMove),
+    /// Stops moving.
+    Stop,
+    /// Goes to a preset (its token).
+    Goto(String),
+    /// Stores the current position as a new preset with this name.
+    SetPreset(String),
+    /// Deletes a preset (its token).
+    RemovePreset(String),
 }
 
 /// Object recognition settings and state (`GET /api/v1/ai`).
@@ -490,6 +545,9 @@ pub struct BackupFile {
     /// `same`, `changed`, `new` (only in the backup) or `not_in_backup`
     /// (kept as it is).
     pub state: &'static str,
+    /// Why restoring this file (alone, with the current others) would not
+    /// load, e.g. a model file missing here.
+    pub problem: Option<String>,
 }
 
 /// A camera of the configuration once a backup is restored.

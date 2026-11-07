@@ -79,6 +79,8 @@ export function demoCamera(spec: DemoCameraSpec, now: number, jitter: number): C
     motion: { enabled: !offline, running: !offline, active: false, error: null },
     record_audio: true,
     audio: null,
+    // The garage camera shows the PTZ controls (nothing is sent in demo mode).
+    ptz: spec.id === 'demo-garage',
     stream: stats(offline ? 0 : 9 * 3600 * spec.fps),
     recorder: {
       segments: 540,

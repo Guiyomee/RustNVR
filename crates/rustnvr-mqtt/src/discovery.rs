@@ -297,6 +297,44 @@ pub(crate) fn presence_config_topics(
     ]
 }
 
+/// Discovery topic of the PTZ preset selector of camera `cam`.
+pub(crate) fn ptz_config_topic(prefix: &str, client_id: &str, cam: &CameraId) -> String {
+    config_topic(prefix, "select", client_id, &format!("{cam}_ptz_preset"))
+}
+
+/// Discovery message of the PTZ preset selector of camera `c`: choosing a
+/// name sends the camera to that position (no state: the camera may move
+/// by other means).
+pub(crate) fn ptz_config(
+    prefix: &str,
+    client_id: &str,
+    topics: &Topics,
+    c: &CameraView,
+) -> (String, String) {
+    let node = node_id(client_id);
+    (
+        ptz_config_topic(prefix, client_id, &c.id),
+        json!({
+            "name": "Position PTZ",
+            "unique_id": format!("{node}_{}_ptz_preset", c.id),
+            "object_id": format!("{node}_{}_ptz_preset", c.id),
+            "icon": "mdi:pan",
+            "options": c.ptz_presets,
+            "command_topic": topics.camera(&c.id, "ptz/preset/set"),
+            "optimistic": true,
+            "device": {
+                "identifiers": [format!("{node}_{}", c.id)],
+                "name": c.name,
+                "manufacturer": "RustNVR",
+                "model": "Caméra",
+                "via_device": node,
+            },
+            "availability": [{ "topic": topics.availability() }],
+        })
+        .to_string(),
+    )
+}
+
 /// Discovery messages of the presence of `line` of camera `c`: who is inside
 /// (sensor) and a reset button.
 pub(crate) fn presence_configs(
@@ -369,7 +407,18 @@ mod tests {
             audio_enabled: true,
             person_detection: true,
             presence: vec![("Porte du garage".into(), 1)],
+            ptz_presets: vec!["Portail".into(), "Allée".into()],
         };
+        // PTZ presets: a selector whose options are their names.
+        let (topic, payload) = ptz_config("homeassistant", "rustnvr", &topics, &cam);
+        assert_eq!(
+            topic,
+            "homeassistant/select/rustnvr/jardin_ptz_preset/config"
+        );
+        assert_eq!(topic, ptz_config_topic("homeassistant", "rustnvr", &cam.id));
+        let select: Value = serde_json::from_str(&payload).expect("json");
+        assert_eq!(select["options"], json!(["Portail", "Allée"]));
+        assert_eq!(select["command_topic"], "rustnvr/jardin/ptz/preset/set");
         let configs = camera_configs("homeassistant", "rustnvr", &topics, &cam);
         assert_eq!(configs.len(), CAMERA_ENTITIES.len());
         let (topic, payload) = &configs[0];

@@ -20,6 +20,7 @@ rustnvr-ai.workspace = true
 rustnvr-api.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustnvr-core.workspace = true
+rustnvr-discovery.workspace = true
 rustnvr-motion.workspace = true
 rustnvr-mqtt.workspace = true
 rustnvr-storage.workspace = true

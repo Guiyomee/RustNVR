@@ -49,6 +49,15 @@ pub struct ProbeReport {
     pub video: Option<ProbedVideo>,
 }
 
+/// Plays the stream RustNVR would record from `target` (connection test
+/// preview); frames come from [`RtspSession::next_frame`] until it is dropped.
+pub async fn play(target: &RtspTarget, opts: &SessionOptions) -> Result<RtspSession, StreamError> {
+    let group = Arc::new(SessionGroup::default());
+    let described = session::describe(target, opts, group).await?;
+    let index = session::select_video_stream(&described)?;
+    RtspSession::start(described, index, None, opts, 0).await
+}
+
 /// Connects to `target`, lists its streams and, if `wait_for_key_frame`,
 /// plays the selected video stream until the first key frame (bounded by the
 /// stall timeout).

@@ -192,6 +192,12 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                         .iter()
                         .find(|c| c.id == id)
                         .with_context(|| format!("camera {id} not found in configuration"))?;
+                    if let Some(usb) = &cam.usb {
+                        anyhow::bail!(
+                            "camera {id} is a USB webcam ({}): nothing to probe in RTSP",
+                            usb.device
+                        );
+                    }
                     let target = cam.main.resolve().map_err(anyhow::Error::msg)?;
                     (target, SessionOptions::from_config(&cam.main))
                 }

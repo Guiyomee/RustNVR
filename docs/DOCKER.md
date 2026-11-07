@@ -100,6 +100,24 @@ par git), que `docker compose up -d` fusionne tout seul. Modèle :
 gardez `compose.yaml` comme fichier principal et ajoutez votre fichier dans
 « Additional paths ».
 
+**Webcam USB.** Donnez le périphérique au conteneur, avec le groupe `video` de
+l'hôte (son numéro : `getent group video`, souvent 44), dans
+`compose.override.yaml` :
+
+```yaml
+services:
+  rustnvr:
+    devices:
+      - /dev/video0:/dev/video0
+    group_add:
+      - "44"
+```
+
+Puis Caméras → Ajouter → « Webcam USB » : la liste montre les webcams que le
+conteneur voit, avec leurs formats. Un chemin `/dev/v4l/by-id/…` ne change pas
+quand la webcam est branchée ailleurs, mais il faut alors le monter aussi
+(`- /dev/v4l:/dev/v4l:ro`).
+
 ## 4. Données
 
 | Volume | Contenu |

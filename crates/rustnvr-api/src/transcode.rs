@@ -624,6 +624,7 @@ mod tests {
                 api: crate::hwaccel::HwApi::Vaapi,
                 device: Some("/dev/dri/renderD128".into()),
                 driver: None,
+                constant_qp: false,
                 card: "Intel".into(),
             }),
             ..LiveSettings::default()

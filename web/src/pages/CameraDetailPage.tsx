@@ -3,6 +3,7 @@ import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { CameraForm } from '../components/cameras/CameraForm'
 import { CameraPlayer } from '../components/cameras/CameraPlayer'
 import { MotionPanel, MotionStatus } from '../components/cameras/MotionPanel'
+import { PtzPanel } from '../components/cameras/PtzPanel'
 import { RecordingBadge } from '../components/cameras/RecordingBadge'
 import { Button } from '../components/ui/Button'
 import { Badge, Card, CardHeader, InfoList } from '../components/ui/Card'
@@ -129,6 +130,7 @@ export function CameraDetailPage({ id }: { id: string }) {
   const liveRef = useRef<HTMLDivElement>(null)
   const [liveStream, setLiveStream] = useState<LiveStream>('sub')
   const webrtc = useCapability('live_webrtc') === true
+  const ptz = useCapability('ptz') === true
   const [transport, setTransport] = useState<'mse' | 'webrtc'>('mse')
   const tabs = useMemo(
     () => [
@@ -282,12 +284,15 @@ export function CameraDetailPage({ id }: { id: string }) {
                 <CameraPlayer camera={camera} active large stream={camera.has_sub_stream ? liveStream : undefined} lowLatency={webrtc && transport === 'webrtc'} />
               </div>
             </div>
-            <Card>
-              <CardHeader title={t('Flux', 'Streams')} />
-              <div className="px-4 py-2">
-                <InfoList items={tech} />
-              </div>
-            </Card>
+            <div className="space-y-4">
+              {ptz && camera.ptz && <PtzPanel camera={camera} />}
+              <Card>
+                <CardHeader title={t('Flux', 'Streams')} />
+                <div className="px-4 py-2">
+                  <InfoList items={tech} />
+                </div>
+              </Card>
+            </div>
           </div>
         )}
         {tab === 'recordings' && <RecordingsTab camera={camera} />}

@@ -48,6 +48,7 @@ const DEMO_CAPABILITIES: Capabilities = {
   ai: false,
   users: false,
   backup: false,
+  ptz: true,
 }
 
 function isRecording(id: string, t: number, now: number): boolean {

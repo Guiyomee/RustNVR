@@ -51,6 +51,10 @@ pub struct HwEncoder {
     pub device: Option<String>,
     /// `LIBVA_DRIVER_NAME` that worked (VAAPI), `None` for the default.
     pub driver: Option<String>,
+    /// VAAPI driver offering constant QP only (Debian's free `iHD` on some
+    /// Intel cards: "supported modes: CQP"): live conversions at a constant
+    /// quality instead of a capped bit rate.
+    pub constant_qp: bool,
     /// Card name, for the interface and the log.
     pub card: String,
 }
@@ -152,9 +156,29 @@ pub(crate) fn encoder_args(hw: Option<&HwEncoder>, quality: u8, preset: &str) ->
     }
 }
 
+/// Constant quality of live conversions (libx264 CRF).
+const LIVE_QUALITY: u8 = 26;
+
 /// Live conversion: filters and encoder, low latency, bit rate capped at
-/// `rate` (`buf`: rate control buffer).
+/// `rate` (`buf`: rate control buffer), or at a constant quality on a VAAPI
+/// driver that offers nothing else.
 pub(crate) fn live_encoder_args(hw: Option<&HwEncoder>, rate: &str, buf: &str) -> Vec<String> {
+    if hw.is_some_and(|h| h.api == HwApi::Vaapi && h.constant_qp) {
+        return owned(&[
+            "-vf",
+            "format=nv12,hwupload",
+            "-c:v",
+            "h264_vaapi",
+            "-bf",
+            "0",
+            "-rc_mode",
+            "CQP",
+            "-qp",
+            &LIVE_QUALITY
+                .saturating_add(VAAPI_QUALITY_OFFSET)
+                .to_string(),
+        ]);
+    }
     match hw.map(|h| h.api) {
         None => owned(&[
             "-c:v",
@@ -166,7 +190,7 @@ pub(crate) fn live_encoder_args(hw: Option<&HwEncoder>, rate: &str, buf: &str) -
             "-pix_fmt",
             "yuv420p",
             "-crf",
-            "26",
+            &LIVE_QUALITY.to_string(),
             "-maxrate",
             rate,
             "-bufsize",
@@ -290,12 +314,14 @@ fn vaapi_drivers(vendor: &str) -> &'static [Option<&'static str>] {
 }
 
 /// Arguments of a test conversion: one second of a test pattern, encoded on
-/// the card with the live settings, written nowhere.
-fn test_args(api: HwApi, device: Option<&str>) -> Vec<String> {
+/// the card with the live settings (at a constant QP when `constant_qp`),
+/// written nowhere.
+fn test_args(api: HwApi, device: Option<&str>, constant_qp: bool) -> Vec<String> {
     let hw = HwEncoder {
         api,
         device: device.map(str::to_owned),
         driver: None,
+        constant_qp,
         card: String::new(),
     };
     let mut args = owned(&["-hide_banner", "-nostdin", "-loglevel", "error"]);
@@ -320,7 +346,40 @@ fn test_args(api: HwApi, device: Option<&str>) -> Vec<String> {
     args
 }
 
-/// Runs one test conversion; the last line FFmpeg wrote when it fails.
+/// Lines FFmpeg ends a failed run with, which never tell why.
+const GENERIC_FAILURES: &[&str] = &[
+    "Nothing was written into output file",
+    "Conversion failed",
+    "Error while filtering",
+    "Error sending frames to consumers",
+    "Task finished with error code",
+    "Terminating thread with return code",
+    "Error opening output file",
+    "Error opening output files",
+    "Error while opening encoder",
+];
+
+/// Why a failed FFmpeg run failed, from its error output: the first line that
+/// says why ("Driver does not support any RC mode…"), and the last one when
+/// it differs (the final summary).
+fn failure_reason(stderr: &str) -> Option<String> {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let last = *lines.last()?;
+    let cause = lines
+        .iter()
+        .find(|l| !GENERIC_FAILURES.iter().any(|g| l.contains(g)))
+        .copied();
+    Some(match cause {
+        Some(c) if c != last => format!("{c} (puis : {last})"),
+        _ => last.to_owned(),
+    })
+}
+
+/// Runs one test conversion; why FFmpeg failed when it does.
 async fn test(ffmpeg: &str, args: Vec<String>, driver: Option<&str>) -> Result<(), String> {
     let mut cmd = Command::new(ffmpeg);
     cmd.args(args)
@@ -349,11 +408,9 @@ async fn test(ffmpeg: &str, args: Vec<String>, driver: Option<&str>) -> Result<(
         )),
         Ok((Err(e), _)) => Err(e.to_string()),
         Ok((Ok(status), _)) if status.success() => Ok(()),
-        Ok((Ok(status), text)) => Err(text
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .map_or_else(|| format!("FFmpeg : {status}"), |l| l.trim().to_owned())),
+        Ok((Ok(status), text)) => {
+            Err(failure_reason(&text).unwrap_or_else(|| format!("FFmpeg : {status}")))
+        }
     }
 }
 
@@ -372,12 +429,13 @@ pub(crate) async fn detect(
     for candidate in candidates {
         match candidate {
             Candidate::Nvenc { card } => {
-                match test(ffmpeg, test_args(HwApi::Nvenc, None), None).await {
+                match test(ffmpeg, test_args(HwApi::Nvenc, None, false), None).await {
                     Ok(()) => {
                         return Ok(HwEncoder {
                             api: HwApi::Nvenc,
                             device: None,
                             driver: None,
+                            constant_qp: false,
                             card,
                         });
                     }
@@ -393,21 +451,34 @@ pub(crate) async fn detect(
                 vendor,
             } => {
                 for driver in vaapi_drivers(vendor) {
-                    match test(ffmpeg, test_args(HwApi::Vaapi, Some(&device)), *driver).await {
-                        Ok(()) => {
-                            return Ok(HwEncoder {
-                                api: HwApi::Vaapi,
-                                device: Some(device),
-                                driver: driver.map(str::to_owned),
-                                card,
-                            });
-                        }
-                        Err(e) => {
-                            let name = driver.unwrap_or("défaut");
-                            tracing::debug!(device, driver = name, error = %e, "VAAPI test conversion failed");
-                            failures.push(format!("{card} (VAAPI, pilote {name}) : {e}"));
+                    let name = driver.unwrap_or("défaut");
+                    // With a capped bit rate first; some drivers offer
+                    // constant QP only.
+                    let mut errors = Vec::new();
+                    for constant_qp in [false, true] {
+                        let args = test_args(HwApi::Vaapi, Some(&device), constant_qp);
+                        match test(ffmpeg, args, *driver).await {
+                            Ok(()) => {
+                                return Ok(HwEncoder {
+                                    api: HwApi::Vaapi,
+                                    device: Some(device),
+                                    driver: driver.map(str::to_owned),
+                                    constant_qp,
+                                    card,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::debug!(device, driver = name, constant_qp, error = %e, "VAAPI test conversion failed");
+                                errors.push(e);
+                            }
                         }
                     }
+                    let detail = match errors.as_slice() {
+                        [rate, qp] if rate != qp => format!("{rate} ; à QP constant : {qp}"),
+                        [first, ..] => first.clone(),
+                        [] => String::new(),
+                    };
+                    failures.push(format!("{card} (VAAPI, pilote {name}) : {detail}"));
                 }
             }
         }
@@ -424,6 +495,7 @@ mod tests {
             api: HwApi::Vaapi,
             device: Some("/dev/dri/renderD128".into()),
             driver: Some("iHD".into()),
+            constant_qp: false,
             card: "Intel".into(),
         }
     }
@@ -433,6 +505,7 @@ mod tests {
             api: HwApi::Nvenc,
             device: None,
             driver: None,
+            constant_qp: false,
             card: "NVIDIA".into(),
         }
     }
@@ -492,8 +565,54 @@ mod tests {
             "{live}"
         );
         // The test conversion uses the live settings.
-        let test = test_args(HwApi::Nvenc, None).join(" ");
+        let test = test_args(HwApi::Nvenc, None, false).join(" ");
         assert!(test.contains(&live), "{test}");
+    }
+
+    #[test]
+    fn a_driver_offering_constant_qp_only_gets_no_bit_rate() {
+        let rate = live_encoder_args(Some(&vaapi()), "2000k", "4000k").join(" ");
+        assert!(
+            rate.contains("-b:v 2000k -maxrate 2000k -bufsize 4000k"),
+            "{rate}"
+        );
+        let cqp = HwEncoder {
+            constant_qp: true,
+            ..vaapi()
+        };
+        let live = live_encoder_args(Some(&cqp), "2000k", "4000k").join(" ");
+        assert_eq!(
+            live,
+            "-vf format=nv12,hwupload -c:v h264_vaapi -bf 0 -rc_mode CQP -qp 30"
+        );
+        let test = test_args(HwApi::Vaapi, Some("/dev/dri/renderD128"), true).join(" ");
+        assert!(test.contains(&live), "{test}");
+        assert!(!test.contains("maxrate"), "{test}");
+        // Recordings converted for the browser are at constant QP already.
+        assert!(
+            !encoder_args(Some(&cqp), 23, "veryfast")
+                .join(" ")
+                .contains("-b:v")
+        );
+    }
+
+    #[test]
+    fn the_reason_of_a_failed_test_is_the_line_that_says_why() {
+        // Intel UHD 630, Debian's iHD driver (GitHub issue #2).
+        let stderr = "[h264_vaapi @ 0x55] Driver does not support any RC mode compatible with selected options (supported modes: CQP).\n\
+            [vost#0:0/h264_vaapi @ 0x56] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.\n\
+            Nothing was written into output file, because at least one of its streams received no packets.\n";
+        let reason = failure_reason(stderr).expect("reason");
+        assert!(
+            reason.starts_with("[h264_vaapi @ 0x55] Driver does not support any RC mode"),
+            "{reason}"
+        );
+        assert!(reason.contains("Nothing was written"), "{reason}");
+        assert_eq!(
+            failure_reason("Error parsing global options: Input/output error\n").as_deref(),
+            Some("Error parsing global options: Input/output error")
+        );
+        assert_eq!(failure_reason("\n  \n"), None);
     }
 
     #[test]

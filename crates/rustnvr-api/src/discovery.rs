@@ -197,6 +197,25 @@ pub(crate) struct StreamsResult {
     streams: Vec<FoundStream>,
     /// Why nothing was found.
     error: Option<String>,
+    /// Port of the ONVIF device service that answered (for PTZ).
+    onvif_port: Option<u16>,
+}
+
+/// Port of an `http://host[:port]/…` address (80 / 443 when not written).
+fn port_of(url: &str) -> Option<u16> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split('/').next()?;
+    let host_port = authority.rsplit('@').next()?;
+    // `[v6]:port` or `host:port`.
+    let after_host = match host_port.rfind(']') {
+        Some(end) => &host_port[end + 1..],
+        None => host_port,
+    };
+    match after_host.rsplit_once(':') {
+        Some((_, p)) => p.parse().ok(),
+        None if scheme.eq_ignore_ascii_case("https") => Some(443),
+        None => Some(80),
+    }
 }
 
 fn recordable(codec: Option<&str>) -> bool {
@@ -238,6 +257,7 @@ async fn guess_streams(input: &StreamsInput, port: u16) -> StreamsResult {
         model: None,
         streams: Vec::new(),
         error: None,
+        onvif_port: None,
     };
     for known in paths::ordered_for(input.server.as_deref()) {
         let main = format!("{base}{}", known.main);
@@ -308,7 +328,7 @@ pub(crate) async fn streams(
     )
     .await
     {
-        Ok((_, info, found)) if !found.is_empty() => {
+        Ok((device_url, info, found)) if !found.is_empty() => {
             let streams = found
                 .into_iter()
                 .map(|s| FoundStream {
@@ -326,6 +346,7 @@ pub(crate) async fn streams(
                 model: info.model,
                 streams,
                 error: None,
+                onvif_port: port_of(&device_url),
             }));
         }
         Err(OnvifError::Unauthorized) => {
@@ -335,6 +356,7 @@ pub(crate) async fn streams(
                 model: None,
                 streams: Vec::new(),
                 error: Some(OnvifError::Unauthorized.to_string()),
+                onvif_port: None,
             }));
         }
         Ok(_) => tracing::debug!(address = %ip, "ONVIF camera without RTSP profile"),
@@ -349,6 +371,23 @@ pub(crate) async fn streams(
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn port_of_the_onvif_service() {
+        assert_eq!(
+            port_of("http://192.168.1.20/onvif/device_service"),
+            Some(80)
+        );
+        assert_eq!(
+            port_of("http://192.168.1.20:8000/onvif/device_service"),
+            Some(8000)
+        );
+        assert_eq!(port_of("https://cam.local/onvif"), Some(443));
+        assert_eq!(port_of("http://[fd00::5]:2020/onvif"), Some(2020));
+        assert_eq!(port_of("http://[fd00::5]/onvif"), Some(80));
+        assert_eq!(port_of("http://u:p@10.0.0.2:8899/x"), Some(8899));
+        assert_eq!(port_of("pas une adresse"), None);
+    }
 
     #[test]
     fn merges_onvif_answers_and_rtsp_servers() {

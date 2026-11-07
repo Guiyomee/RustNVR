@@ -842,6 +842,11 @@ impl NvrView for MqttBridge {
                             .filter(|(cam, _, _)| *cam == c.id)
                             .map(|(_, line, n)| (line.clone(), *n))
                             .collect(),
+                        ptz_presets: if c.onvif.is_some() {
+                            shared.ptz.preset_names(c.id.as_str())
+                        } else {
+                            Vec::new()
+                        },
                     }
                 })
                 .collect()
@@ -935,6 +940,15 @@ impl NvrView for MqttBridge {
                 .map(|(_, l)| l)
                 .ok_or_else(|| format!("aucune ligne de présence {label:?}"))?;
             reset_presence(&shared, &camera, &line)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn ptz_goto(&self, camera: CameraId, name: String) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let shared = self.0.upgrade().ok_or("NVR arrêté")?;
+            super::ptz::goto_name(&shared, camera.as_str(), &name)
                 .await
                 .map_err(|e| e.to_string())
         })

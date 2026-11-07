@@ -211,3 +211,20 @@ record = { enabled = true, mode = "continuous", destinations = ["local"] }
 # record = { enabled = true, destinations = ["local"], retention_days = 7, max_size_gb = 200 }
 # The sound (AAC cameras) is recorded with the video by default; to leave it out:
 # record = { enabled = true, audio = false }
+# Motorised camera (pan, tilt, zoom, presets) driven in ONVIF PTZ from the live
+# view and Home Assistant: port of its ONVIF service on the host of the main
+# stream (80 by default; Reolink 8000, Tapo 2020), with the credentials of the
+# main stream unless username / password_env are given here.
+# onvif = { port = 80 }
+# onvif = { port = 2020, username = "onvif", password_env = "RUSTNVR_GARAGE_ONVIF_PASSWORD" }
+# onvif = { url = "http://192.168.1.21:8899/onvif/device_service" }
+
+# A USB webcam (V4L2) instead of an RTSP camera: no main / sub / onvif. FFmpeg
+# reads it and encodes H.264 (on the graphics card used for conversions, else
+# libx264), or copies the webcam's own H.264 with input_format = "h264".
+# Under Docker, add the device (devices: - /dev/video0:/dev/video0) and the
+# video group of the host (group_add). The web interface lists the webcams.
+# [[cameras]]
+# id = "bureau"
+# usb = { device = "/dev/video0" }
+# usb = { device = "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920-video-index0", input_format = "mjpeg", width = 1280, height = 720, framerate = 15, bitrate_kbps = 2000 }

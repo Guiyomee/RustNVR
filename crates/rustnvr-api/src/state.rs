@@ -79,6 +79,9 @@ pub struct CameraSource {
     pub record_audio: bool,
     /// Privacy masks (`[x1, y1, x2, y2]`, picture fractions).
     pub privacy_masks: Vec<[f32; 4]>,
+    /// An ONVIF service is configured: pan, tilt, zoom and presets may be
+    /// offered (whether the camera has them is known on the first use).
+    pub ptz: bool,
 }
 
 /// A recording destination known to the API (the local disk or a mounted share).
@@ -133,6 +136,10 @@ pub struct CameraEditInfo {
     pub has_password: bool,
     /// Transport.
     pub transport: RtspTransport,
+    /// Port of the ONVIF service (PTZ), when set.
+    pub onvif_port: Option<u16>,
+    /// USB webcam settings (`main_url` is then empty).
+    pub usb: Option<rustnvr_core::config::UsbConfig>,
 }
 
 #[derive(Default)]
@@ -201,6 +208,8 @@ pub struct ApiState {
     hw: RwLock<(crate::dto::HwAccelDto, Option<crate::hwaccel::HwEncoder>)>,
     /// One test conversion at a time.
     hw_test: tokio::sync::Mutex<()>,
+    /// Cameras tested a moment ago, for their live preview (by token).
+    pub(crate) previews: crate::preview::Previews,
 }
 
 impl ApiState {
@@ -257,6 +266,7 @@ impl ApiState {
             default_destination: RwLock::new(LOCAL_DESTINATION.to_owned()),
             hw: RwLock::new((crate::dto::HwAccelDto::default(), None)),
             hw_test: tokio::sync::Mutex::new(()),
+            previews: crate::preview::Previews::default(),
         })
     }
 
@@ -289,6 +299,22 @@ impl ApiState {
     /// State of the conversions on the graphics card.
     pub(crate) fn hwaccel_dto(&self) -> crate::dto::HwAccelDto {
         self.hw.read().unwrap_or_else(|e| e.into_inner()).0.clone()
+    }
+
+    /// The graphics card H.264 conversions run on (`None`: the processor),
+    /// once its test conversions are over (they take a few seconds at
+    /// startup; 60 s at most are waited).
+    pub async fn hw_encoder(&self) -> Option<crate::hwaccel::HwEncoder> {
+        for _ in 0..240 {
+            {
+                let hw = self.hw.read().unwrap_or_else(|e| e.into_inner());
+                if hw.0.state != "testing" {
+                    return hw.1.clone();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        None
     }
 
     /// Applies `live.hwaccel`: with `auto`, a test conversion on each usable
@@ -333,6 +359,7 @@ impl ApiState {
                     api = hw.api.as_str(),
                     device = hw.device.as_deref().unwrap_or("-"),
                     driver = hw.driver.as_deref().unwrap_or("default"),
+                    constant_qp = hw.constant_qp,
                     "H.264 conversions on the graphics card"
                 );
                 set(
@@ -342,6 +369,7 @@ impl ApiState {
                         card: Some(hw.card.clone()),
                         device: hw.device.clone(),
                         driver: hw.driver.clone(),
+                        constant_qp: hw.constant_qp,
                         ..auto
                     },
                     Some(hw),
@@ -614,6 +642,8 @@ impl ApiState {
                     RtspTransport::Tcp => "tcp",
                     RtspTransport::Udp => "udp",
                 },
+                onvif_port: e.onvif_port,
+                usb: e.usb.clone(),
             }),
             record_destinations: c.record_destinations.clone(),
             record_mode: c.record_mode.as_str(),
@@ -634,6 +664,7 @@ impl ApiState {
             },
             record_audio: c.record_audio,
             privacy_masks: c.privacy_masks.clone(),
+            ptz: c.ptz,
             audio: None,
             // Totals over all destinations.
             recorder: (!c.recorders.is_empty()).then(|| {

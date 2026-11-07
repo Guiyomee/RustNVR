@@ -104,6 +104,8 @@ async fn capabilities(State(state): State<Arc<ApiState>>) -> Json<CapabilitiesDt
             .is_some(),
         users: state.database.get().is_some(),
         backup: state.control.get().is_some(),
+        ptz: state.control.get().is_some(),
+        usb_cameras: cfg!(target_os = "linux") && state.control.get().is_some(),
     })
 }
 
@@ -193,11 +195,20 @@ struct ProbeInput {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn run_probe(
+    state: &ApiState,
     target: RtspTarget,
     mut opts: SessionOptions,
 ) -> Result<Json<ProbeDto>, ApiError> {
     opts.connect_timeout = PROBE_TIMEOUT;
     opts.stall_timeout = PROBE_TIMEOUT;
+    // Video only for the preview (as for the recording when sound is off).
+    let preview_target = (
+        target.clone(),
+        SessionOptions {
+            audio: false,
+            ..opts.clone()
+        },
+    );
     let report = probe(&target, &opts, true).await.map_err(|e| {
         let message = match e.status_code() {
             Some(401) => "la caméra refuse l'identifiant ou le mot de passe (401)".to_owned(),
@@ -206,7 +217,12 @@ async fn run_probe(
         };
         ApiError::new(StatusCode::BAD_GATEWAY, "probe_failed", message)
     })?;
+    let preview = (report.video.is_some() && state.ffmpeg_ok())
+        .then(|| state.previews.register(preview_target.0, preview_target.1))
+        .flatten()
+        .map(|token| format!("/api/v1/cameras/preview/{token}"));
     Ok(Json(ProbeDto {
+        preview,
         streams: report
             .streams
             .into_iter()
@@ -228,14 +244,17 @@ async fn run_probe(
     }))
 }
 
-async fn probe_url(Json(input): Json<ProbeInput>) -> Result<Json<ProbeDto>, ApiError> {
+async fn probe_url(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<ProbeInput>,
+) -> Result<Json<ProbeDto>, ApiError> {
     let target = RtspTarget::parse(&input.url, input.username.as_deref(), input.password)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     let opts = SessionOptions {
         transport: input.transport,
         ..SessionOptions::default()
     };
-    run_probe(target, opts).await
+    run_probe(&state, target, opts).await
 }
 
 async fn probe_camera(
@@ -246,7 +265,7 @@ async fn probe_camera(
         .target(id.clone())
         .await
         .ok_or_else(|| ApiError::not_found(format!("no camera {id:?}")))?;
-    run_probe(target, opts).await
+    run_probe(&state, target, opts).await
 }
 
 async fn camera(
@@ -478,6 +497,7 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route("/system", get(system))
         .route("/cameras", get(cameras).post(create_camera))
         .route("/cameras/probe", post(probe_url))
+        .route("/cameras/preview/{token}", get(crate::preview::preview))
         .route("/discovery/scan", post(crate::discovery::scan_network))
         .route("/discovery/streams", post(crate::discovery::streams))
         .route(
@@ -521,6 +541,19 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route(
             "/cameras/{id}/presence/reset",
             post(crate::stats::reset_presence),
+        )
+        .route("/devices/video", get(crate::devices::list))
+        .route("/cameras/{id}/ptz", get(crate::ptz::presets))
+        .route("/cameras/{id}/ptz/move", post(crate::ptz::move_camera))
+        .route("/cameras/{id}/ptz/stop", post(crate::ptz::stop))
+        .route("/cameras/{id}/ptz/presets", post(crate::ptz::create_preset))
+        .route(
+            "/cameras/{id}/ptz/presets/{token}",
+            axum::routing::delete(crate::ptz::delete_preset),
+        )
+        .route(
+            "/cameras/{id}/ptz/presets/{token}/goto",
+            post(crate::ptz::goto_preset),
         )
         .route("/mqtt", get(detection::mqtt).put(detection::set_mqtt))
         .route("/ai", get(detection::ai).put(detection::set_ai))

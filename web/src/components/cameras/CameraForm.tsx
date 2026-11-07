@@ -1,19 +1,28 @@
-import { Check, Copy, Eye, EyeOff, PlugZap } from 'lucide-react'
+import { Check, Copy, Eye, EyeOff, PlugZap, RefreshCw } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { describeError } from '../../api/client'
 import { useReadOnly } from '../../auth/AuthGate'
-import { createCamera, getDestinations, getSettings, probeCamera, probeStream, updateCamera } from '../../api/endpoints'
+import { createCamera, getDestinations, getSettings, getVideoDevices, probeCamera, probeStream, updateCamera } from '../../api/endpoints'
 import { useAsync } from '../../hooks/useAsync'
 import { useCapability, useData, useIsDemo } from '../../data/DataContext'
 import { formatResolution } from '../../lib/format'
 import type { Camera, CameraInput, ProbeResult, RecordMode, Transport } from '../../types/api'
 import { Button } from '../ui/Button'
 import { Modal } from '../ui/Modal'
+import { Segmented } from '../ui/Tabs'
 import { t } from '../../lib/i18n'
 
 interface FormState {
   name: string
   id: string
+  /** Network camera (RTSP) or USB webcam. */
+  source: 'rtsp' | 'usb'
+  /** Webcam: device, format (empty: its default), size `WxH` (empty: its default), pictures per second, bit rate. */
+  usbDevice: string
+  usbFormat: string
+  usbSize: string
+  usbFps: string
+  usbKbps: string
   url: string
   username: string
   password: string
@@ -29,6 +38,8 @@ interface FormState {
   /** Per-camera retention; empty: none. */
   days: string
   gb: string
+  /** Port of the ONVIF service (PTZ); empty: none. */
+  onvif: string
 }
 
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
@@ -66,18 +77,40 @@ export function validate(f: FormState, existingIds: string[], editing: boolean):
     else if (existingIds.includes(f.id)) e.id = t('Cet identifiant est déjà utilisé.', 'This identifier is already used.')
     else if (f.id === 'probe') e.id = t('Cet identifiant est réservé.', 'This identifier is reserved.')
   }
-  const u = validateUrl(f.url, t('L’URL du flux principal', 'The main stream URL'))
-  if (u) e.url = u
-  if (f.subUrl.trim()) {
-    const s = validateUrl(f.subUrl, t('L’URL du sous-flux', 'The sub stream URL'))
-    if (s) e.subUrl = s
+  const whole = (v: string, min: number, max: number) => !v.trim() || (Number.isInteger(Number(v)) && Number(v) >= min && Number(v) <= max)
+  if (f.source === 'usb') {
+    if (!f.usbDevice.trim().startsWith('/dev/')) e.usbDevice = t('Choisissez la webcam (chemin sous /dev, par exemple /dev/video0).', 'Choose the webcam (path under /dev, e.g. /dev/video0).')
+    if (f.usbSize && !/^\d+x\d+$/.test(f.usbSize)) e.usbSize = t('Taille au format 1280x720, ou vide.', 'Size as 1280x720, or empty.')
+    if (!whole(f.usbFps, 1, 120)) e.usbFps = t('De 1 à 120 images par seconde, ou vide.', '1 to 120 pictures per second, or empty.')
+    if (!f.usbKbps.trim() || !whole(f.usbKbps, 100, 50000)) e.usbKbps = t('Débit de 100 à 50 000 kbit/s.', 'Bit rate from 100 to 50,000 kbit/s.')
+  } else {
+    const u = validateUrl(f.url, t('L’URL du flux principal', 'The main stream URL'))
+    if (u) e.url = u
+    if (f.subUrl.trim()) {
+      const s = validateUrl(f.subUrl, t('L’URL du sous-flux', 'The sub stream URL'))
+      if (s) e.subUrl = s
+    }
+    if (f.password && !f.username.trim()) e.username = t("Un identifiant est requis lorsqu'un mot de passe est saisi.", "A username is required when a password is entered.")
   }
-  if (f.password && !f.username.trim()) e.username = t("Un identifiant est requis lorsqu'un mot de passe est saisi.", "A username is required when a password is entered.")
   if (f.record && f.destinations.length === 0) e.destinations = t("Choisissez au moins un lieu d'enregistrement.", "Choose at least one recording place.")
   const positive = (v: string) => !v.trim() || (Number.isInteger(Number(v)) && Number(v) > 0)
   if (!positive(f.days) || Number(f.days) > 3650) e.days = t('Nombre de jours entre 1 et 3650, ou vide.', 'Number of days between 1 and 3650, or empty.')
   if (!positive(f.gb)) e.gb = t('Nombre entier de Go, ou vide.', 'Whole number of GB, or empty.')
+  if (f.source === 'rtsp' && !whole(f.onvif, 1, 65535)) e.onvif = t('Port entre 1 et 65535, ou vide.', 'Port between 1 and 65535, or empty.')
   return e
+}
+
+/** The webcam settings of the form. */
+function usbOf(f: FormState): NonNullable<CameraInput['usb']> {
+  const [w, h] = f.usbSize ? f.usbSize.split('x').map(Number) : [null, null]
+  return {
+    device: f.usbDevice.trim(),
+    input_format: f.usbFormat || null,
+    width: w ?? null,
+    height: h ?? null,
+    framerate: f.usbFps.trim() ? Number(f.usbFps) : null,
+    bitrate_kbps: Number(f.usbKbps),
+  }
 }
 
 /** TOML basic strings accept JSON escapes. */
@@ -98,10 +131,21 @@ export function toToml(f: FormState): string {
   }
   const lines = ['[[cameras]]', `id = ${str(f.id)}`, `name = ${str(f.name.trim())}`]
   if (!f.enabled) lines.push('enabled = false')
-  lines.push(`main = ${stream(f.url)}`)
-  if (f.subUrl.trim()) lines.push(`sub = ${stream(f.subUrl)}`)
+  if (f.source === 'usb') {
+    const u = usbOf(f)
+    const parts = [`device = ${str(u.device)}`]
+    if (u.input_format) parts.push(`input_format = ${str(u.input_format)}`)
+    if (u.width && u.height) parts.push(`width = ${u.width}, height = ${u.height}`)
+    if (u.framerate) parts.push(`framerate = ${u.framerate}`)
+    if (u.bitrate_kbps !== 2000) parts.push(`bitrate_kbps = ${u.bitrate_kbps}`)
+    lines.push(`usb = { ${parts.join(', ')} }`)
+  } else {
+    lines.push(`main = ${stream(f.url)}`)
+    if (f.subUrl.trim()) lines.push(`sub = ${stream(f.subUrl)}`)
+  }
   const keep = [f.days.trim() && `, retention_days = ${f.days.trim()}`, f.gb.trim() && `, max_size_gb = ${f.gb.trim()}`, !f.audio && ", audio = false"].filter(Boolean).join('')
   lines.push(`record = { enabled = ${f.record}, mode = "${f.mode}", destinations = [${f.destinations.map(str).join(', ')}]${keep} }`)
+  if (f.source === 'rtsp' && f.onvif.trim()) lines.push(`onvif = { port = ${Number(f.onvif)} }`)
   return lines.join('\n')
 }
 
@@ -114,8 +158,14 @@ function toInput(f: FormState, editing: boolean): CameraInput {
     name: f.name.trim(),
     enabled: f.enabled,
     record: f.record,
-    main: { url: f.url.trim(), username, password, transport: f.transport },
-    sub: f.subUrl.trim() ? { url: f.subUrl.trim(), username, password, transport: f.transport } : null,
+    ...(f.source === 'usb'
+      ? { main: null, sub: null, usb: usbOf(f), onvif_port: null }
+      : {
+          main: { url: f.url.trim(), username, password, transport: f.transport },
+          sub: f.subUrl.trim() ? { url: f.subUrl.trim(), username, password, transport: f.transport } : null,
+          usb: null,
+          onvif_port: f.onvif.trim() ? Number(f.onvif) : null,
+        }),
     record_destinations: f.destinations,
     record_mode: f.mode,
     retention_days: f.days.trim() ? Number(f.days) : null,
@@ -146,15 +196,48 @@ const inputCls = (err?: string) =>
   `h-9 w-full rounded-md border bg-bg-2 px-3 text-sm outline-none focus:border-accent disabled:opacity-60 ${err ? 'border-err' : 'border-line'}`
 
 /** New cameras do not record unless asked to. */
-const empty: FormState = { name: '', id: '', url: '', username: '', password: '', transport: 'tcp', subUrl: '', enabled: true, record: false, destinations: ['local'], mode: 'continuous', audio: true, days: '', gb: '' }
+const empty: FormState = {
+  name: '',
+  id: '',
+  source: 'rtsp',
+  usbDevice: '',
+  usbFormat: '',
+  usbSize: '',
+  usbFps: '',
+  usbKbps: '2000',
+  url: '',
+  username: '',
+  password: '',
+  transport: 'tcp',
+  subUrl: '',
+  enabled: true,
+  record: false,
+  destinations: ['local'],
+  mode: 'continuous',
+  audio: true,
+  days: '',
+  gb: '',
+  onvif: '',
+}
 
 function fromCamera(c: Camera): FormState {
+  const usb = c.edit?.usb
   return {
     ...empty,
     name: c.name,
     id: c.id,
     enabled: c.enabled,
     record: c.recording_enabled,
+    ...(usb
+      ? {
+          source: 'usb' as const,
+          usbDevice: usb.device,
+          usbFormat: usb.input_format ?? '',
+          usbSize: usb.width && usb.height ? `${usb.width}x${usb.height}` : '',
+          usbFps: usb.framerate?.toString() ?? '',
+          usbKbps: (usb.bitrate_kbps ?? 2000).toString(),
+        }
+      : {}),
     url: c.edit?.main_url ?? '',
     subUrl: c.edit?.sub_url ?? '',
     username: c.edit?.username ?? '',
@@ -164,6 +247,7 @@ function fromCamera(c: Camera): FormState {
     audio: c.record_audio,
     days: c.retention_days?.toString() ?? '',
     gb: c.max_size_gb?.toString() ?? '',
+    onvif: c.edit?.onvif_port?.toString() ?? '',
   }
 }
 
@@ -200,6 +284,101 @@ function DestinationChoice({ value, onChange, error }: { value: string[]; onChan
   )
 }
 
+/** The webcam of a USB camera: chosen among the devices of the server, with what they can send. */
+function UsbFields({ f, set, shown }: { f: FormState; set: <K extends keyof FormState>(k: K, v: FormState[K]) => void; shown: (k: keyof FormState) => string | undefined }) {
+  const demo = useIsDemo()
+  const list = useAsync(() => (demo ? Promise.resolve({ devices: [] }) : getVideoDevices()), [demo])
+  const devices = (list.data?.devices ?? []).filter((d) => d.formats.length > 0 || d.error)
+  const chosen = devices.find((d) => d.by_id === f.usbDevice || d.path === f.usbDevice)
+  const format = chosen?.formats.find((x) => x.format === f.usbFormat)
+  const sizes = (format ?? chosen?.formats[0])?.sizes.filter((s) => /^\d+x\d+$/.test(s)) ?? []
+  const copy = f.usbFormat === 'h264'
+  return (
+    <>
+      <div className="sm:col-span-2">
+        <Field
+          label={t('Webcam', 'Webcam')}
+          htmlFor="cam-usb"
+          error={shown('usbDevice')}
+          hint={
+            list.loading
+              ? t('Recherche des webcams du serveur… (FFmpeg lit leurs formats)', 'Looking for the webcams of the server… (FFmpeg reads their formats)')
+              : list.error
+                ? t(`Liste indisponible : ${describeError(list.error)}. Saisissez le chemin.`, `List unavailable: ${describeError(list.error)}. Type the path.`)
+                : devices.length === 0
+                  ? t('Aucune webcam vue par le serveur. Sous Docker, ajoutez le périphérique (devices: /dev/video0) ; dans un LXC, passez-le au conteneur. Le chemin peut aussi être saisi.', 'No webcam seen by the server. Under Docker, add the device (devices: /dev/video0); in an LXC, pass it to the container. The path can also be typed.')
+                  : t('Le chemin /dev/v4l/by-id ne change pas si la webcam est branchée sur un autre port.', 'The /dev/v4l/by-id path does not change if the webcam is plugged into another port.')
+          }
+        >
+          <div className="flex gap-2">
+            {devices.length > 0 ? (
+              <select
+                id="cam-usb"
+                className={inputCls(shown('usbDevice'))}
+                value={f.usbDevice}
+                onChange={(e) => {
+                  set('usbDevice', e.target.value)
+                  set('usbFormat', '')
+                  set('usbSize', '')
+                }}
+              >
+                <option value="">{t('— choisir —', '— choose —')}</option>
+                {devices.map((d) => (
+                  <option key={d.path} value={d.by_id ?? d.path}>
+                    {(d.name ?? d.path) + ` (${d.path})` + (d.error ? t(` — ${d.error}`, ` — ${d.error}`) : '')}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input id="cam-usb" className={inputCls(shown('usbDevice'))} value={f.usbDevice} onChange={(e) => set('usbDevice', e.target.value)} placeholder="/dev/video0" autoComplete="off" spellCheck={false} />
+            )}
+            <Button icon={<RefreshCw className="size-4" />} disabledReason={demo ? t('Indisponible en mode démo.', 'Not available in demo mode.') : list.loading ? t('Recherche en cours…', 'Searching…') : null} onClick={list.reload}>
+              {t('Relire', 'Reload')}
+            </Button>
+          </div>
+        </Field>
+      </div>
+      <Field
+        label={t('Format demandé à la webcam', 'Format asked to the webcam')}
+        htmlFor="cam-usb-format"
+        hint={copy ? t('H.264 de la webcam enregistré tel quel : rien n’est encodé, presque aucun processeur.', 'The webcam’s H.264 recorded as is: nothing is encoded, almost no processor.') : t('MJPEG : images nettes jusqu’en 1080p. RustNVR encode en H.264, sur la carte graphique si elle sert aux conversions.', 'MJPEG: sharp pictures up to 1080p. RustNVR encodes to H.264, on the graphics card if it is used for conversions.')}
+      >
+        <select id="cam-usb-format" className={inputCls()} value={f.usbFormat} onChange={(e) => (set('usbFormat', e.target.value), set('usbSize', ''))}>
+          <option value="">{t('Celui de la webcam (par défaut)', 'The webcam’s own (default)')}</option>
+          {(chosen?.formats ?? []).map((x) => (
+            <option key={x.format} value={x.format}>
+              {x.format === 'h264' ? t(`${x.description} — copié sans encodage`, `${x.description} — copied without encoding`) : x.description}
+            </option>
+          ))}
+          {!chosen && f.usbFormat && <option value={f.usbFormat}>{f.usbFormat}</option>}
+        </select>
+      </Field>
+      <Field label={t('Taille de l’image', 'Picture size')} htmlFor="cam-usb-size" error={shown('usbSize')}>
+        {sizes.length > 0 ? (
+          <select id="cam-usb-size" className={inputCls(shown('usbSize'))} value={f.usbSize} onChange={(e) => set('usbSize', e.target.value)}>
+            <option value="">{t('Celle de la webcam (par défaut)', 'The webcam’s own (default)')}</option>
+            {sizes.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input id="cam-usb-size" className={inputCls(shown('usbSize'))} value={f.usbSize} onChange={(e) => set('usbSize', e.target.value)} placeholder="1280x720" autoComplete="off" />
+        )}
+      </Field>
+      <Field label={t('Images par seconde', 'Pictures per second')} htmlFor="cam-usb-fps" error={shown('usbFps')} hint={t('Vide : celles de la webcam. 10 à 15 suffisent souvent et économisent le processeur.', 'Empty: the webcam’s. 10 to 15 are often enough and save processor.')}>
+        <input id="cam-usb-fps" className={inputCls(shown('usbFps'))} inputMode="numeric" value={f.usbFps} onChange={(e) => set('usbFps', e.target.value)} placeholder="15" />
+      </Field>
+      {!copy && (
+        <Field label={t('Débit maximal (kbit/s)', 'Maximum bit rate (kbit/s)')} htmlFor="cam-usb-kbps" error={shown('usbKbps')} hint={t('2000 conviennent au 720p ; 4000 au 1080p.', '2000 suit 720p; 4000 suits 1080p.')}>
+          <input id="cam-usb-kbps" className={inputCls(shown('usbKbps'))} inputMode="numeric" value={f.usbKbps} onChange={(e) => set('usbKbps', e.target.value)} />
+        </Field>
+      )}
+    </>
+  )
+}
+
 type ProbeState = { kind: 'idle' } | { kind: 'running' } | { kind: 'ok'; result: ProbeResult } | { kind: 'error'; message: string }
 
 function ProbeOutcome({ state }: { state: ProbeState }) {
@@ -218,7 +397,32 @@ function ProbeOutcome({ state }: { state: ProbeState }) {
         <p className="text-warn">{t("La caméra répond mais n'annonce aucun flux H.264/H.265 enregistrable.", "The camera answers but announces no H.264/H.265 stream that can be recorded.")}</p>
       )}
       <p className="mt-1 text-xs text-muted">{t('Flux annoncés : ', 'Announced streams: ')}{result.streams.map((s) => `${s.media}/${s.encoding}`).join(', ') || 'aucun'}</p>
+      {result.preview && <LivePreview src={result.preview} />}
     </div>
+  )
+}
+
+/** The camera live for a minute (motion JPEG), right after a successful test. */
+function LivePreview({ src }: { src: string }) {
+  const [state, setState] = useState<'loading' | 'playing' | 'ended'>('loading')
+  return (
+    <figure className="mt-2">
+      <div className="relative aspect-video overflow-hidden rounded-md bg-black">
+        <img
+          src={src}
+          alt={t('Aperçu en direct de la caméra', 'Live preview of the camera')}
+          className="size-full object-contain"
+          onLoad={() => setState('playing')}
+          onError={() => setState('ended')}
+        />
+        {state === 'loading' && <span className="absolute inset-0 grid place-items-center text-xs text-muted">{t('Ouverture du direct…', 'Opening the live view…')}</span>}
+      </div>
+      <figcaption className="mt-1 text-xs text-muted">
+        {state === 'ended'
+          ? t('Aperçu terminé : refaites le test pour le revoir.', 'Preview over: test again to see it again.')
+          : t('Aperçu en direct, 4 images par seconde pendant 1 minute (refaites le test pour le relancer).', 'Live preview, 4 pictures per second for 1 minute (test again to restart it).')}
+      </figcaption>
+    </figure>
   )
 }
 
@@ -229,6 +433,8 @@ export interface CameraPreset {
   subUrl: string
   username: string
   password: string
+  /** ONVIF port that answered, empty when unknown. */
+  onvif?: string
 }
 
 /** `base`, or `base-2`, `base-3`… when taken. */
@@ -243,6 +449,7 @@ function freeId(base: string, existingIds: string[]): string {
 
 export function CameraForm({ open, onClose, camera, existingIds, preset = null }: { open: boolean; onClose: () => void; camera: Camera | null; existingIds: string[]; preset?: CameraPreset | null }) {
   const canManage = useCapability('camera_management') === true
+  const usbCameras = useCapability('usb_cameras') === true
   const viewerReason = useReadOnly()
   const demo = useIsDemo()
   const { source } = useData()
@@ -261,7 +468,7 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
 
   useEffect(() => {
     if (!open) return
-    setF(camera ? fromCamera(camera) : preset ? { ...empty, ...preset, id: freeId(slugify(preset.name), existingIds) } : empty)
+    setF(camera ? fromCamera(camera) : preset ? { ...empty, ...preset, onvif: preset.onvif ?? '', id: freeId(slugify(preset.name), existingIds) } : empty)
     setIdTouched(editing)
     setSubmitted(false)
     setShowPassword(false)
@@ -399,6 +606,24 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
             autoComplete="off"
           />
         </Field>
+        {(usbCameras || f.source === 'usb') && (
+          <div className="flex flex-wrap items-center gap-3 text-sm sm:col-span-2">
+            <span className="text-xs font-medium text-muted">{t('Source', 'Source')}</span>
+            <Segmented
+              label={t('Source de la caméra', 'Camera source')}
+              options={[
+                { value: 'rtsp', label: t('Caméra réseau (RTSP)', 'Network camera (RTSP)') },
+                { value: 'usb', label: t('Webcam USB', 'USB webcam') },
+              ]}
+              value={f.source}
+              onChange={(v) => set('source', v)}
+            />
+          </div>
+        )}
+        {f.source === 'usb' ? (
+          <UsbFields f={f} set={set} shown={shown} />
+        ) : (
+          <>
         <div className="sm:col-span-2">
           <Field
             label={t('URL RTSP du flux principal', 'RTSP URL of the main stream')}
@@ -441,6 +666,16 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
         <Field label={t('URL du sous-flux (facultatif)', 'Sub stream URL (optional)')} htmlFor="cam-sub" error={shown('subUrl')} hint={t('Basse résolution, utilisé pour le direct ; mêmes identifiants que le flux principal.', 'Low resolution, used for the live view; same credentials as the main stream.')}>
           <input id="cam-sub" className={inputCls(shown('subUrl'))} value={f.subUrl} onChange={(e) => set('subUrl', e.target.value)} placeholder="rtsp://192.168.1.20:554/Streaming/Channels/102" autoComplete="off" spellCheck={false} />
         </Field>
+        <Field
+          label={t('Port ONVIF, pour les caméras motorisées (facultatif)', 'ONVIF port, for motorised cameras (optional)')}
+          htmlFor="cam-onvif"
+          error={shown('onvif')}
+          hint={t('Active le pilotage PTZ (flèches, zoom, positions) dans le direct, avec les identifiants du flux principal. Souvent 80 ; Reolink 8000, Tapo 2020. Vide : pas de PTZ.', 'Enables PTZ control (arrows, zoom, positions) in the live view, with the credentials of the main stream. Often 80; Reolink 8000, Tapo 2020. Empty: no PTZ.')}
+        >
+          <input id="cam-onvif" className={inputCls(shown('onvif'))} inputMode="numeric" value={f.onvif} onChange={(e) => set('onvif', e.target.value)} placeholder={t('aucun', 'none')} autoComplete="off" />
+        </Field>
+          </>
+        )}
         <div className="flex flex-col gap-2 sm:col-span-2">
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" className="size-4 accent-accent" checked={f.enabled} onChange={(e) => set('enabled', e.target.checked)} />
@@ -466,7 +701,7 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
               </label>
             </fieldset>
           )}
-          {f.record && (
+          {f.record && f.source === 'rtsp' && (
             <label className="ml-6 flex items-start gap-2 text-sm">
               <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={f.audio} onChange={(e) => set('audio', e.target.checked)} />
               <span>
@@ -491,7 +726,15 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
           <Button
             icon={<PlugZap className="size-4" />}
             onClick={() => void runProbe()}
-            disabledReason={demo ? t('Indisponible en mode démo.', 'Not available in demo mode.') : probe.kind === 'running' ? t('Test en cours…', 'Testing…') : null}
+            disabledReason={
+              demo
+                ? t('Indisponible en mode démo.', 'Not available in demo mode.')
+                : f.source === 'usb'
+                  ? t('Le test concerne les caméras RTSP : une webcam s’essaie en l’enregistrant (son état s’affiche dans la liste des caméras).', 'The test is for RTSP cameras: a webcam is tried by saving it (its state shows in the camera list).')
+                  : probe.kind === 'running'
+                    ? t('Test en cours…', 'Testing…')
+                    : null
+            }
           >
             {t('Tester la connexion', 'Test the connection')}
           </Button>

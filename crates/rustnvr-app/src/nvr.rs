@@ -5,8 +5,10 @@
 mod backups;
 mod detection;
 mod index;
+mod ptz;
 mod replay;
 mod updates;
+mod usb;
 mod webhooks;
 
 use crate::{camera_store, storage_store};
@@ -20,7 +22,7 @@ use rustnvr_api::{
     StreamInput, StreamSource,
 };
 use rustnvr_core::config::{
-    CameraConfig, CameraRecordConfig, Config, DestinationConfig, LOCAL_DESTINATION,
+    CameraConfig, CameraRecordConfig, Config, DestinationConfig, LOCAL_DESTINATION, OnvifConfig,
     ReconnectConfig, RecordMode, RecordingConfig, RemoteConfig, RetentionConfig, StreamConfig,
 };
 use rustnvr_core::{CameraId, EventBus, MotionSettings, NvrEvent, RtspTarget, StreamRole};
@@ -219,6 +221,9 @@ struct Engine {
     /// Where detections go; `None` when detection is unavailable (no
     /// database or no FFmpeg) and after shutdown.
     motion_tx: std::sync::Mutex<Option<mpsc::Sender<MotionUpdate>>>,
+    /// The API once started (shared with [`Shared`]): USB cameras encode
+    /// on the graphics card it found.
+    api: Arc<OnceLock<Arc<ApiState>>>,
 }
 
 impl Engine {
@@ -381,14 +386,30 @@ impl Engine {
             }
             None => None,
         };
-        let stream = self.supervise(
-            &cam.id,
-            StreamRole::Main,
-            &cam.main,
-            fanout,
-            &cancel,
-            audio_requested,
-        )?;
+        let stream = match &cam.usb {
+            // A webcam: FFmpeg reads it and writes H.264.
+            Some(usb) => rustnvr_stream::spawn_device_supervisor(
+                rustnvr_stream::DeviceConfig {
+                    camera: cam.id.clone(),
+                    label: usb.device.clone(),
+                    ffmpeg: self.motion_options().ffmpeg,
+                    command: usb::command_source(self.api.clone(), usb.clone()),
+                    stall_timeout: cam.main.stall_timeout(),
+                    backoff: BackoffConfig::from(&self.reconnect),
+                },
+                fanout,
+                self.events.clone(),
+                cancel.child_token(),
+            ),
+            None => self.supervise(
+                &cam.id,
+                StreamRole::Main,
+                &cam.main,
+                fanout,
+                &cancel,
+                audio_requested,
+            )?,
+        };
         let mut rt = CameraRuntime {
             id: cam.id.clone(),
             cancel,
@@ -436,9 +457,12 @@ impl State {
                     enabled: cam.enabled,
                     recording_enabled: cam.record.enabled,
                     has_sub_stream: cam.sub.is_some(),
-                    endpoint: main_target
-                        .as_ref()
-                        .map_or_else(|| "?".to_owned(), RtspTarget::redacted),
+                    endpoint: match &cam.usb {
+                        Some(usb) => format!("usb:{}", usb.device),
+                        None => main_target
+                            .as_ref()
+                            .map_or_else(|| "?".to_owned(), RtspTarget::redacted),
+                    },
                     stream: runtime.map(|r| stream_source(&r.stream)),
                     recorders: runtime.map_or_else(Vec::new, |r| {
                         r.recorders.iter().map(|h| h.metrics().clone()).collect()
@@ -457,6 +481,7 @@ impl State {
                         .get(&cam.id)
                         .map(|m| m.mask_rects())
                         .unwrap_or_default(),
+                    ptz: cam.onvif.is_some(),
                     motion: runtime.and_then(|r| r.motion.as_ref().map(|m| m.status.clone())),
                     live: runtime.map(|r| r.live.clone()),
                     sub_stream: runtime.and_then(|r| r.sub.as_ref().map(|(h, _)| stream_source(h))),
@@ -473,6 +498,8 @@ impl State {
                         username: cam.main.username.clone(),
                         has_password: cam.main.password.as_ref().is_some_and(|p| !p.is_empty()),
                         transport: cam.main.transport,
+                        onvif_port: cam.onvif.as_ref().map(|o| o.port),
+                        usb: cam.usb.clone(),
                     }),
                 }
             })
@@ -484,7 +511,7 @@ impl State {
 struct Shared {
     engine: Engine,
     state: tokio::sync::Mutex<State>,
-    api: OnceLock<Arc<ApiState>>,
+    api: Arc<OnceLock<Arc<ApiState>>>,
     managed_cameras_file: Option<PathBuf>,
     managed_storage_file: Option<PathBuf>,
     managed_mqtt_file: Option<PathBuf>,
@@ -528,6 +555,8 @@ struct Shared {
     uploaders: tokio::sync::Mutex<HashMap<String, UploaderHandle>>,
     /// Their states, for the API.
     upload_status: std::sync::Mutex<HashMap<String, watch::Receiver<UploadStatus>>>,
+    /// ONVIF PTZ sessions of motorised cameras, opened on first use.
+    ptz: ptz::Sessions,
 }
 
 impl Shared {
@@ -671,6 +700,7 @@ impl Nvr {
             motion: std::sync::RwLock::new(MotionOptions::new(&config.motion, &config.live.ffmpeg)),
             motion_tx: std::sync::Mutex::new(detection_ready.then_some(motion_tx)),
             triggers: std::sync::Mutex::new(HashMap::new()),
+            api: Arc::new(OnceLock::new()),
         };
         let mut running = HashMap::new();
         for cam in config.cameras.iter().filter(|c| c.enabled) {
@@ -683,6 +713,7 @@ impl Nvr {
         let detecting = running.values().filter(|r| r.motion.is_some()).count();
         info!(cameras = running.len(), disabled, motion_detection = detecting, destinations = storage.destinations.len() + 1, recordings = %root.display(), "NVR started");
 
+        let api = engine.api.clone();
         let shared = Arc::new(Shared {
             engine,
             state: tokio::sync::Mutex::new(State {
@@ -691,7 +722,7 @@ impl Nvr {
                 storage,
                 motion: motion_settings,
             }),
-            api: OnceLock::new(),
+            api,
             managed_cameras_file: config.managed_cameras_file.clone(),
             managed_storage_file: config.managed_storage_file.clone(),
             managed_mqtt_file: config.managed_mqtt_file.clone(),
@@ -715,6 +746,7 @@ impl Nvr {
             data_dir: data_dir.clone(),
             uploaders: tokio::sync::Mutex::new(HashMap::new()),
             upload_status: std::sync::Mutex::new(HashMap::new()),
+            ptz: ptz::Sessions::default(),
             mqtt: tokio::sync::Mutex::new(MqttRuntime {
                 managed: config
                     .managed_mqtt_file
@@ -736,6 +768,7 @@ impl Nvr {
                 shared.clone(),
                 cancel.child_token(),
             )),
+            tokio::spawn(ptz::read_all(shared.clone())),
         ];
         if let Some(db) = &database {
             background.push(tokio::spawn(index::run_indexer(
@@ -1006,17 +1039,33 @@ fn config_from_input(
             "point de stockage inconnu : {unknown:?}"
         )));
     }
-    let main = stream_from_input(input.main, previous.map(|p| &p.main));
-    let sub = input
-        .sub
-        .filter(|s| !s.url.trim().is_empty())
-        .map(|s| stream_from_input(s, previous.and_then(|p| p.sub.as_ref())));
+    // A USB webcam, or RTSP streams.
+    let usb = input.usb.map(|mut u| {
+        u.device = u.device.trim().to_owned();
+        u
+    });
+    let (main, sub) = match (&usb, input.main) {
+        (Some(_), _) => (StreamConfig::default(), None),
+        (None, Some(main)) => (
+            stream_from_input(main, previous.map(|p| &p.main)),
+            input
+                .sub
+                .filter(|s| !s.url.trim().is_empty())
+                .map(|s| stream_from_input(s, previous.and_then(|p| p.sub.as_ref()))),
+        ),
+        (None, None) => {
+            return Err(ControlError::Invalid(
+                "il faut l'adresse RTSP du flux principal, ou une webcam USB".into(),
+            ));
+        }
+    };
     let cam = CameraConfig {
         id,
         name: Some(name),
         enabled: input.enabled,
         main,
         sub,
+        usb: usb.clone(),
         record: CameraRecordConfig {
             enabled: input.record,
             mode: input.record_mode,
@@ -1027,6 +1076,21 @@ fn config_from_input(
                 .record_audio
                 .unwrap_or_else(|| previous.is_none_or(|p| p.record.audio)),
         },
+        // The port from the interface; an address or a user set by hand in
+        // the file is kept. Not for a webcam.
+        onvif: input.onvif_port.filter(|_| usb.is_none()).map(|port| {
+            let mut onvif = previous
+                .and_then(|p| p.onvif.clone())
+                .unwrap_or(OnvifConfig {
+                    port,
+                    url: None,
+                    username: None,
+                    password: None,
+                    password_env: None,
+                });
+            onvif.port = port;
+            onvif
+        }),
         managed: true,
     };
     let mut problems = cam.problems(|_| None);
@@ -1205,7 +1269,15 @@ impl NvrControl for Controller {
                     }
                 }
             }
-            info!(camera = %id, endpoint = %cam.main.resolve_with(|_| None).map(|t| t.redacted()).unwrap_or_default(), "camera added from the web interface");
+            let endpoint = match &cam.usb {
+                Some(usb) => format!("usb:{}", usb.device),
+                None => cam
+                    .main
+                    .resolve_with(|_| None)
+                    .map(|t| t.redacted())
+                    .unwrap_or_default(),
+            };
+            info!(camera = %id, %endpoint, "camera added from the web interface");
             self.0.publish(&state);
             Ok(())
         })
@@ -1301,6 +1373,10 @@ impl NvrControl for Controller {
         Box::pin(async move {
             let state = self.0.state.lock().await;
             let cam = state.configs.iter().find(|c| c.id.as_str() == raw_id)?;
+            // Nothing to probe in RTSP on a webcam.
+            if cam.usb.is_some() {
+                return None;
+            }
             let target = cam.main.resolve().ok()?;
             Some((target, SessionOptions::from_config(&cam.main)))
         })
@@ -1655,6 +1731,21 @@ impl NvrControl for Controller {
         motion: bool,
     ) -> BoxFuture<'_, Result<rustnvr_api::BackupRestored, ControlError>> {
         Box::pin(async move { backups::restore(&self.0, data, passphrase, files, motion).await })
+    }
+
+    fn ptz_presets(
+        &self,
+        camera: String,
+    ) -> BoxFuture<'_, Result<Vec<rustnvr_api::control::PtzPreset>, ControlError>> {
+        Box::pin(async move { ptz::presets(&self.0, &camera).await })
+    }
+
+    fn ptz_command(
+        &self,
+        camera: String,
+        command: rustnvr_api::control::PtzCommand,
+    ) -> BoxFuture<'_, Result<(), ControlError>> {
+        Box::pin(async move { ptz::command(&self.0, &camera, command).await })
     }
 
     fn webhooks(&self) -> BoxFuture<'_, Vec<rustnvr_core::config::WebhookConfig>> {

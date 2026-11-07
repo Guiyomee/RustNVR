@@ -12,6 +12,9 @@ et enregistrés **sans décodage ni réencodage** dans des segments MP4 fragment
 > et/ou NAS, S3, SFTP avec rétention ; détection de mouvement sans IA avec zones et
 > événements ; MQTT avec découverte Home Assistant. Docker : image prête
 > `ghcr.io/guiyomee/rustnvr` (Linux x86-64), voir [docs/DOCKER.md](docs/DOCKER.md).
+> Sans Docker : archive précompilée et `install.sh` (Debian, Ubuntu), ou
+> conteneur LXC Proxmox VE en une commande, voir
+> [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
 Documents : **[Docker](docs/DOCKER.md)** · **[Installation (systemd)](docs/INSTALLATION.md)** ·
 **[Home Assistant](docs/HOME_ASSISTANT.md)** · [MQTT](docs/MQTT.md) · [IA](docs/AI.md) ·
@@ -58,6 +61,16 @@ par des photos libres de droits ([crédits](web/public/demo/CREDITS.md)).
   car il contient les mots de passe des caméras) ; les caméras de `config.toml`
   restent modifiables uniquement dans ce fichier. Une caméra ajoutée depuis
   l'interface n'enregistre pas par défaut.
+- Caméras motorisées (ONVIF PTZ) : flèches et zoom à maintenir, vitesse et
+  positions enregistrées (rappel, ajout, suppression) dans le direct, réservés
+  aux administrateurs ; sélecteur « Position PTZ » dans Home Assistant. Il
+  suffit de régler le port ONVIF de la caméra (⚠ vérifié contre une caméra
+  ONVIF simulée seulement).
+- Webcams USB (V4L2) sans programme en plus : choisies dans la liste des
+  webcams du serveur, encodées en H.264 par FFmpeg (sur la carte graphique si
+  elle sert aux conversions) ou copiées quand elles envoient du H.264 ;
+  enregistrées, vues en direct et analysées comme une caméra RTSP (vérifié
+  avec une webcam sous Docker ; ⚠ pas encore dans un LXC ; pas de son).
 - Points de stockage : chaque caméra enregistre sur le disque local et/ou sur
   un partage NAS (SMB/CIFS, NFS) monté dans le système, écrit directement.
   Contrôle que le partage est bien monté (sinon le disque système se

@@ -9,10 +9,11 @@ publish.workspace = true
 [dependencies]
 bytes.workspace = true
 futures.workspace = true
+h264-reader = "0.8"
 retina.workspace = true
 rustnvr-core.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt", "process", "io-util"] }
 tokio-util.workspace = true
 tracing.workspace = true
 

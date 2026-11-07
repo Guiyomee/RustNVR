@@ -18,6 +18,9 @@ import type {
   LogEntry,
   LogLevel,
   CameraInput,
+  PtzMove,
+  PtzPreset,
+  VideoDevice,
   Capabilities,
   CrossingStats,
   Destination,
@@ -214,3 +217,19 @@ export const replayCaptures = (camera: string, day: string, file?: string) =>
   apiSend<ReplayResult>('POST', '/ai/replay', file ? { camera, day, file } : { camera, day }, file ? 60_000 : 300_000)
 export const getCapturePictures = (camera: string, day: string) =>
   apiGet<CapturePicture[]>(`/ai/captures/${encodeURIComponent(camera)}/${encodeURIComponent(day)}`)
+
+// Motorised cameras (ONVIF PTZ, capabilities.ptz and camera.ptz). Moves and
+// presets are administrator writes; a move lasts until stop (10 s at most).
+const ptzPath = (camera: string) => `/cameras/${encodeURIComponent(camera)}/ptz`
+export const getPtz = (camera: string) => apiGet<{ presets: PtzPreset[] }>(ptzPath(camera))
+export const ptzMove = (camera: string, move: PtzMove) => apiSend<null>('POST', `${ptzPath(camera)}/move`, move)
+export const ptzStop = (camera: string) => apiSend<null>('POST', `${ptzPath(camera)}/stop`, {})
+export const ptzGoto = (camera: string, token: string) =>
+  apiSend<null>('POST', `${ptzPath(camera)}/presets/${encodeURIComponent(token)}/goto`, {})
+export const ptzSavePreset = (camera: string, name: string) => apiSend<null>('POST', `${ptzPath(camera)}/presets`, { name })
+export const ptzDeletePreset = (camera: string, token: string) =>
+  apiSend<null>('DELETE', `${ptzPath(camera)}/presets/${encodeURIComponent(token)}`)
+
+// Video devices of the machine (USB webcams), for the camera form
+// (capabilities.usb_cameras). FFmpeg reads their formats: a few seconds.
+export const getVideoDevices = () => apiGet<{ devices: VideoDevice[] }>('/devices/video', 30_000)

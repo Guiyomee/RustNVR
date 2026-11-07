@@ -24,6 +24,10 @@ pub enum OnvifError {
         "la caméra refuse l'identifiant ou le mot de passe ONVIF (sur certaines caméras, il faut créer un utilisateur ONVIF dans leur interface)"
     )]
     Unauthorized,
+    /// ONVIF answers, but announces no PTZ service (or no profile with a
+    /// PTZ configuration).
+    #[error("la caméra n'annonce pas de commande PTZ en ONVIF")]
+    NoPtz,
     /// Anything else.
     #[error("{0}")]
     Other(String),
@@ -63,7 +67,7 @@ pub struct Client {
     clock_offset: i64,
 }
 
-const NAMESPACES: &str = r#"xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema""#;
+const NAMESPACES: &str = r#"xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl""#;
 
 fn now_seconds() -> i64 {
     jiff::Timestamp::now().as_second()
@@ -126,7 +130,7 @@ impl Client {
     }
 
     /// Posts `body` to `url`; the SOAP `Body`.
-    async fn call(
+    pub(crate) async fn call(
         &self,
         url: &str,
         body: &str,

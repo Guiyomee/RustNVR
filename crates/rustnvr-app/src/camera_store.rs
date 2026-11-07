@@ -30,9 +30,28 @@ struct StoredCamera<'a> {
     name: Option<&'a str>,
     enabled: bool,
     record: StoredRecord<'a>,
-    main: StoredStream<'a>,
+    /// Absent for a USB camera.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    main: Option<StoredStream<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sub: Option<StoredStream<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usb: Option<&'a rustnvr_core::config::UsbConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    onvif: Option<StoredOnvif<'a>>,
+}
+
+#[derive(Serialize)]
+struct StoredOnvif<'a> {
+    port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password_env: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -93,8 +112,16 @@ pub fn save<'a>(
                     max_size_gb: c.record.max_size_gb,
                     audio: c.record.audio,
                 },
-                main: stream(&c.main),
+                main: c.usb.is_none().then(|| stream(&c.main)),
                 sub: c.sub.as_ref().map(stream),
+                usb: c.usb.as_ref(),
+                onvif: c.onvif.as_ref().map(|o| StoredOnvif {
+                    port: o.port,
+                    url: o.url.as_deref(),
+                    username: o.username.as_deref(),
+                    password: o.password.as_ref().map(|p| p.expose()),
+                    password_env: o.password_env.as_deref(),
+                }),
             })
             .collect(),
     };
@@ -134,7 +161,8 @@ mod tests {
         .expect("write");
         let text = "[[cameras]]\nid = \"jardin\"\nname = \"Jardin \\\"nord\\\"\"\nrecord = { enabled = false }\n\
                     main = { url = \"rtsp://10.0.0.2/main\", username = \"admin\", password = \"p@ss w=rd\" }\n\
-                    sub = { url = \"rtsp://10.0.0.2/sub\", transport = \"udp\" }\n";
+                    sub = { url = \"rtsp://10.0.0.2/sub\", transport = \"udp\" }\n\
+                    onvif = { port = 8000, username = \"ptz\", password = \"p&z\" }\n";
         let mut parsed = Config::from_toml_with_env(text, |_| None).expect("valid");
         parsed.cameras[0].managed = true;
         let managed = dir.path().join(MANAGED_CAMERAS_FILE);
@@ -157,6 +185,16 @@ mod tests {
             cam.sub.as_ref().map(|s| s.transport),
             Some(RtspTransport::Udp)
         );
+        let onvif = cam
+            .onvif_target(|_| None)
+            .expect("onvif")
+            .expect("configured");
+        assert_eq!(
+            onvif.device_url,
+            "http://10.0.0.2:8000/onvif/device_service"
+        );
+        let (user, password) = onvif.credentials.expect("credentials");
+        assert_eq!((user.as_str(), password.expose()), ("ptz", "p&z"));
         assert!(
             std::fs::read_to_string(&managed)
                 .expect("read")

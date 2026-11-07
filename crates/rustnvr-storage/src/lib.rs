@@ -778,6 +778,20 @@ mod tests {
         CameraId::new(id).expect("id")
     }
 
+    /// The checksum of each migration is kept in the databases: built from
+    /// CRLF files (a Windows checkout), the program refuses every existing
+    /// database. See .gitattributes.
+    #[test]
+    fn migrations_are_built_with_lf_line_endings() {
+        for m in sqlx::migrate!("./migrations").iter() {
+            assert!(
+                !m.sql.as_str().contains('\r'),
+                "migration {} has CRLF line endings: rebuild from an LF checkout",
+                m.version
+            );
+        }
+    }
+
     #[tokio::test]
     async fn events_round_trip_and_retention() {
         let dir = tempfile::tempdir().expect("tmp");

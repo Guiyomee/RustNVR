@@ -136,7 +136,9 @@ function RestoreBackup({ blocked }: { blocked: string | null }) {
       const p = await inspectBackup(encoded, pass)
       setData(encoded)
       setPreview(p)
-      setChosen(p.files.filter((f) => f.state === 'changed' || f.state === 'new').map((f) => f.name))
+      // Not ticked by default: a file that would not load here, and
+      // config.toml (its paths and port belong to the installation).
+      setChosen(p.files.filter((f) => (f.state === 'changed' || f.state === 'new') && !f.problem && f.name !== 'config.toml').map((f) => f.name))
       setMotion(p.motion.length > 0)
     } catch (e) {
       setError(describeError(e))
@@ -159,9 +161,7 @@ function RestoreBackup({ blocked }: { blocked: string | null }) {
   const analyseReason = blocked ?? (!file ? t('Choisissez un fichier .rnvrbak.', 'Choose a .rnvrbak file.') : !pass ? t('Phrase secrète de la sauvegarde manquante.', 'Passphrase of the backup missing.') : busy ? t('Lecture en cours…', 'Reading…') : null)
   const restoreReason =
     blocked ??
-    (preview && preview.problems.length > 0
-      ? t('La configuration restaurée ne se chargerait pas (voir ci-dessus).', 'The restored configuration would not load (see above).')
-      : chosen.length === 0 && !motion
+    (chosen.length === 0 && !motion
         ? t('Rien de coché.', 'Nothing ticked.')
         : busy
           ? t('Restauration en cours…', 'Restoring…')
@@ -227,6 +227,12 @@ function RestoreBackup({ blocked }: { blocked: string | null }) {
                     <span>{FILE_LABELS[f.name] ?? f.name}</span>
                     <span className={`text-xs ${state.tone}`}>· {state.text}</span>
                   </label>
+                  {restorable && f.name === 'config.toml' && (
+                    <p className="ml-6 text-xs text-warn">
+                      {t('Propre à chaque installation (dossiers, port, HTTPS) : à ne restaurer que sur la même installation, pas d’un Docker vers un LXC par exemple.', 'Specific to each installation (folders, port, HTTPS): restore it only on the same installation, not from Docker to an LXC for instance.')}
+                    </p>
+                  )}
+                  {f.problem && <p className="ml-6 whitespace-pre-line text-xs text-err">{f.problem}</p>}
                 </li>
               )
             })}
@@ -245,8 +251,9 @@ function RestoreBackup({ blocked }: { blocked: string | null }) {
               {preview.cameras.map((c) => c.name).join(', ')}
             </p>
           )}
-          {preview.problems.length > 0 && (
+          {preview.problems.length > 0 && !preview.files.some((f) => f.problem) && (
             <ul className="space-y-1 text-xs text-err">
+              <li>{t('En restaurant tous les fichiers ensemble :', 'Restoring every file together:')}</li>
               {preview.problems.map((p) => (
                 <li key={p}>{p}</li>
               ))}

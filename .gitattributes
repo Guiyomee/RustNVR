@@ -1,6 +1,10 @@
 # Scripts run in Linux containers keep LF line endings.
 *.sh text eol=lf
 Dockerfile text eol=lf
+# Database migrations: their checksum is stored in every database, so a
+# build from CRLF files (a Windows checkout) would refuse existing databases
+# ("migration 1 was previously applied but has been modified").
+*.sql text eol=lf
 # Pictures embedded in the program: never converted.
 *.jpg binary
 *.png binary

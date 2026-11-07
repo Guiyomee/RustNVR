@@ -1,4 +1,4 @@
-//! RTSP ingestion for RustNVR.
+//! Stream ingestion for RustNVR (RTSP cameras, and USB webcams through FFmpeg).
 //!
 //! * [`session`]: one RTSP session (DESCRIBE/SETUP/PLAY with timeouts) built
 //!   on [Retina](https://crates.io/crates/retina), producing
@@ -8,10 +8,12 @@
 //! * [`fanout`]: bounded, non-blocking distribution of frames to consumers;
 //! * [`live`]: on-demand access to the frames for live viewers;
 //! * [`probe`](mod@probe): connection test used by the CLI (and later the API).
+//! * [`device`]: a camera read through FFmpeg instead of RTSP (USB webcams).
 //!
 //! Retina types do not leave this crate.
 
 pub mod backoff;
+pub mod device;
 pub mod error;
 pub mod fanout;
 pub mod live;
@@ -21,6 +23,9 @@ pub mod session;
 pub mod supervisor;
 
 pub use backoff::{Backoff, BackoffConfig};
+pub use device::{
+    CommandSource, DeviceCommand, DeviceConfig, annexb_output_args, spawn_device_supervisor,
+};
 pub use error::StreamError;
 pub use fanout::{FrameFanout, SubscriberStats};
 pub use live::LiveTap;

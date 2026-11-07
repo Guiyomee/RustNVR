@@ -83,8 +83,16 @@ Ce que le serveur sait réellement faire. L'interface s'en sert pour afficher
 { "api_version": 1, "live_video": true, "live_transcode": true, "live_webrtc": true, "snapshots": true, "events": true,
   "motion_detection": true, "camera_management": true, "camera_probe": true,
   "recordings": true, "export": true, "protect": true, "retention": true, "settings_write": true,
-  "mqtt": true, "ai": false, "users": true, "backup": true }
+  "mqtt": true, "ai": false, "users": true, "backup": true, "ptz": true,
+  "usb_cameras": true }
 ```
+
+`usb_cameras` : des webcams USB (V4L2) peuvent être ajoutées comme caméras
+(`usb` dans `POST /cameras`, liste dans `GET /devices/video`) ; Linux
+seulement.
+
+`ptz` : pilotage des caméras motorisées (`/cameras/{id}/ptz`, voir plus bas),
+pour les caméras dont `ptz` vaut `true`.
 
 `export` : FFmpeg fonctionne (export d'un extrait, voir plus bas).
 
@@ -108,7 +116,8 @@ détection de mouvement est possible (base de données et FFmpeg).
              "driver": "i915", "device": "/dev/dri/renderD128", "status": "usable",
              "busy_percent": 12.5 }],
   "hwaccel": { "mode": "auto", "state": "active", "card": "Intel HD Graphics 530",
-               "device": "/dev/dri/renderD128", "driver": "i965", "detail": null } }
+               "device": "/dev/dri/renderD128", "driver": "i965", "constant_qp": false,
+               "detail": null } }
 ```
 
 `hwaccel` : conversions H.264 (direct, relecture, exports) sur la carte
@@ -118,8 +127,13 @@ changement du réglage : **NVENC** (`h264_nvenc`) si une carte NVIDIA est
 joignable (`usable` dans `gpus`, `/dev/nvidiactl`, ou `/dev/dxg` sous WSL),
 puis **VAAPI** (`h264_vaapi`) sur chaque carte Intel ou AMD `usable`, avec le
 pilote par défaut puis, pour Intel, `iHD` et `i965` nommés ; la première qui
-réussit est utilisée. `api` : `nvenc` ou `vaapi` ; `device` : nœud VAAPI
-(`null` pour NVENC). `state` : `off` (réglage), `testing`, `active`, `no_card`
+réussit est utilisée. Pour VAAPI, chaque pilote est essayé avec un débit
+plafonné, puis à QP constant (`-rc_mode CQP`) : certains pilotes n'offrent que
+ce mode (`iHD` libre de Debian sur une Intel UHD 630, par exemple) ;
+`constant_qp: true` dit alors que le direct est à qualité constante (QP 30),
+sans plafond de débit. `detail` donne la ligne de FFmpeg qui dit pourquoi un
+essai a échoué, pas seulement son message final. `api` : `nvenc` ou `vaapi` ;
+`device` : nœud VAAPI (`null` pour NVENC). `state` : `off` (réglage), `testing`, `active`, `no_card`
 (aucune carte NVIDIA/Intel/AMD utilisable : processeur) ou `failed` (`detail` :
 les erreurs des essais ; processeur). Décodage par la carte quand elle sait
 (CUDA, VAAPI ; sinon par le processeur, automatiquement), filtres (taille,
@@ -194,8 +208,13 @@ erreur du décodeur.
 
 `managed` vaut `true` pour une caméra ajoutée depuis l'interface (stockée dans
 `cameras.ui.toml`) ; `edit` donne alors ses réglages modifiables
-(`main_url`, `sub_url`, `username`, `has_password`, `transport`), **jamais le
-mot de passe**. Pour les caméras de `config.toml`, `edit` est `null`.
+(`main_url`, `sub_url`, `username`, `has_password`, `transport`,
+`onvif_port`), **jamais le mot de passe**. Pour les caméras de `config.toml`,
+`edit` est `null`.
+
+`ptz` : un service ONVIF est réglé pour la caméra (`onvif` dans la
+configuration) ; l'interface propose alors le pilotage PTZ. Que la caméra
+soit vraiment motorisée ne se sait qu'en l'interrogeant (`GET …/ptz`).
 
 ### `POST /api/v1/cameras` · `PUT /api/v1/cameras/{id}` · `DELETE /api/v1/cameras/{id}`
 
@@ -226,8 +245,48 @@ d'un autre site ne peut pas les déclencher sans contrôle CORS préalable).
   pour la caméra. Renvoyé aussi dans `GET /cameras`.
 - `PUT` remplace les réglages et redémarre la caméra (`id` dans l'URL) ;
   `password` absent ou `null` **conserve** le mot de passe enregistré.
+- `onvif_port` : port du service ONVIF de la caméra, pour le pilotage PTZ
+  (`null` ou absent : aucun). Il est joint sur l'adresse du flux principal,
+  avec ses identifiants ; une adresse ou un utilisateur ONVIF réglés à la main
+  dans `cameras.ui.toml` sont gardés.
+- **Webcam USB** : `"main": null, "sub": null, "usb": { "device":
+  "/dev/video0", "input_format": "mjpeg", "width": 1280, "height": 720,
+  "framerate": 15, "bitrate_kbps": 2000 }` (seul `device` est obligatoire ;
+  `input_format` : `mjpeg`, `yuyv422`, `h264`, `nv12`, `yuv420p`, `rgb24`,
+  absent : celui de la webcam). FFmpeg lit la webcam et encode en H.264 (sur
+  la carte graphique retenue pour les conversions, sinon libx264 « veryfast »,
+  une image clé toutes les 2 s, débit plafonné à `bitrate_kbps`) ; avec
+  `input_format: "h264"`, le H.264 de la webcam est copié sans encodage. Les
+  images entrent ensuite dans le même chemin que celles d'une caméra RTSP
+  (enregistrement, direct, détection, captures). Pas de son, pas de sous-flux,
+  pas d'ONVIF (`onvif_port` ignoré) ; le test de connexion RTSP ne s'y
+  applique pas. Dans `GET /cameras` : `endpoint` vaut `usb:/dev/video0` et
+  `edit.usb` reprend ces réglages (`main_url` vide). Sans `main` ni `usb` :
+  400.
 - `DELETE` arrête et retire la caméra (204) ; ses enregistrements restent sur
   le disque.
+
+### `GET /api/v1/devices/video`
+
+Les périphériques vidéo de la machine (`/dev/videoN`), pour choisir une
+webcam dans le formulaire (capacité `usb_cameras`) :
+
+```json
+{ "devices": [{ "path": "/dev/video0",
+                "by_id": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920-video-index0",
+                "name": "HD Pro Webcam C920",
+                "formats": [{ "format": "mjpeg", "compressed": true,
+                              "description": "Motion-JPEG",
+                              "sizes": ["640x480", "1280x720", "1920x1080"] }],
+                "error": null }] }
+```
+
+`name` vient de `/sys/class/video4linux`, `by_id` (chemin qui ne change pas
+quand la webcam est branchée ailleurs) de `/dev/v4l/by-id`, `formats` de
+`ffmpeg -f v4l2 -list_formats all` (5 s au plus par périphérique). Une webcam
+a souvent un second nœud sans images : `formats` y est vide. `error` : par
+exemple « Permission denied » quand le compte de RustNVR n'est pas dans le
+groupe `video`.
 - Les caméras de `config.toml` sont en lecture seule : 409 `read_only`.
 - Persistance : `cameras.ui.toml` à côté de `config.toml`, écrit de façon
   atomique, permissions 0600 (il contient les mots de passe des caméras).
@@ -283,7 +342,9 @@ privée ; de /22 à /30 seulement, sinon 400) lance en même temps, ≈ 3 s :
 ```
 
 Adresses sans identifiants, la plus grande image d'abord ; `recordable` :
-H.264 ou H.265. Le mot de passe ne sert qu'à cette requête.
+H.264 ou H.265. Le mot de passe ne sert qu'à cette requête. `onvif_port` :
+port du service ONVIF qui a répondu (`null` sans ONVIF), repris par le
+formulaire pour le pilotage PTZ.
 
 ### `POST /api/v1/cameras/probe` · `POST /api/v1/cameras/{id}/probe`
 
@@ -295,11 +356,22 @@ Test de connexion (DESCRIBE, puis attente de la première image clé, 10 s par
 { "streams": [ { "media": "video", "encoding": "h264", "clock_rate": 90000 } ],
   "selected": 0,
   "video": { "codec": "h264", "rfc6381_codec": "avc1.42C01F", "width": 640, "height": 360,
-             "time_to_key_frame_ms": 86 } }
+             "time_to_key_frame_ms": 86 },
+  "preview": "/api/v1/cameras/preview/9485b146293da91afc9d38b4c104fedf" }
 ```
 
 Échec : 502 `probe_failed` avec un message lisible (« la caméra refuse
 l'identifiant ou le mot de passe (401) », « chemin RTSP inconnu (404) »…).
+
+`preview` (quand une image est arrivée et que FFmpeg fonctionne) : adresse
+d'un **aperçu en direct**, à usage unique, valable 2 minutes. `GET` dessus
+rouvre la caméra avec le client RTSP de l'enregistrement (sans le son) et
+renvoie un MJPEG `multipart/x-mixed-replace;boundary=ffmpeg` (4 images par
+seconde, 640 px de large au plus, H.264 et H.265 convertis par FFmpeg) pendant
+**1 minute** au plus ; une balise `<img>` l'affiche telle quelle. L'adresse et
+les identifiants restent sur le serveur (seul le jeton circule). Jeton
+inconnu, déjà utilisé ou expiré : 404 ; la connexion à la caméra s'arrête
+quand le navigateur ferme l'image.
 
 ### `GET /api/v1/cameras/{id}/recordings?from={ms}&to={ms}`
 
@@ -558,6 +630,35 @@ Dans `GET /cameras` : `record_audio` (réglage) et `audio` (son reçu de la
 caméra, par exemple `"mp4a.40.2 16000 Hz"`, ou `null` hors ligne ou sans son
 AAC).
 
+### `GET /api/v1/cameras/{id}/ptz` · `POST …/ptz/move` · `POST …/ptz/stop` · presets
+
+Pilotage d'une caméra motorisée en **ONVIF PTZ** (capacité `ptz`, caméras
+avec `ptz: true`). RustNVR trouve le service PTZ annoncé par
+`GetCapabilities` et le premier profil média qui a une configuration PTZ, avec
+les identifiants ONVIF (ceux du flux principal par défaut) ; la session est
+gardée, et rouverte si la caméra ne répond plus ou si ses réglages changent.
+Lire est permis à tous les comptes ; bouger et changer les positions sont des
+écritures, **réservées aux administrateurs**.
+
+- `GET …/ptz` → `{ "presets": [{ "token": "1", "name": "Portail" }] }` :
+  les positions enregistrées sur la caméra (`GetPresets`). 400 si aucun
+  port ONVIF n'est réglé, si la caméra ne répond pas en ONVIF, refuse les
+  identifiants ou n'annonce pas de PTZ (le message le dit) ; 404 caméra
+  inconnue.
+- `POST …/ptz/move` `{ "pan": 0.5, "tilt": 0, "zoom": 0 }` : déplacement
+  continu (`ContinuousMove`), vitesses de -1 à 1 (pan : droite > 0 ; tilt :
+  haut > 0 ; zoom : avant > 0 ; absentes : 0 ; au-delà : ramenées à ±1),
+  jusqu'à `stop`, ou **10 s au plus** (`Timeout` envoyé à la caméra, au cas où
+  l'arrêt ne viendrait jamais). 204.
+- `POST …/ptz/stop` : arrêt (pan, tilt et zoom). 204.
+- `POST …/ptz/presets` `{ "name": "Terrasse" }` : la position actuelle,
+  enregistrée sous ce nom (1 à 64 caractères). 204.
+- `POST …/ptz/presets/{token}/goto` : aller à une position. 204.
+- `DELETE …/ptz/presets/{token}` : supprimer une position. 204.
+
+Les noms des positions sont aussi proposés à Home Assistant (sélecteur MQTT,
+voir `docs/MQTT.md`), lus au démarrage et après chaque changement.
+
 ### `GET /api/v1/webhooks` · `PUT /api/v1/webhooks` · `POST /api/v1/webhooks/test`
 
 Adresses appelées (HTTP POST, JSON) sur les événements de détection.
@@ -630,10 +731,16 @@ lignes, masques). Ni enregistrements, ni événements, ni comptes.
   phrase par Argon2id, ChaCha20-Poly1305). 400 si la phrase est trop courte.
 - `POST /backup/inspect` `{ "data": "<fichier en base64>", "passphrase" }` :
   `{ "created_ms", "rustnvr", "files": [{ "name", "state": "same" | "changed"
-  | "new" | "not_in_backup" }], "cameras": [{ "id", "name" }], "motion":
-  ["jardin"], "problems": [] }`. `cameras` : les caméras une fois tout
-  restauré ; `problems` : pourquoi la configuration restaurée ne se
-  chargerait pas (elle est chargée à l'essai dans un dossier temporaire).
+  | "new" | "not_in_backup", "problem": null }], "cameras": [{ "id", "name"
+  }], "motion": ["jardin"], "problems": [] }`. `cameras` : les caméras une
+  fois tout restauré ; `problems` : pourquoi la configuration ne se
+  chargerait pas si tout était restauré (elle est chargée à l'essai dans un
+  dossier temporaire) ; `files[].problem` : pourquoi elle ne se chargerait
+  pas en restaurant ce seul fichier. Sauvegarde d'une autre installation :
+  dans `ai.ui.toml`, un modèle `.onnx` introuvable mais présent sous le même
+  nom dans `<data_dir>/models` est pris là (Docker `/data/…` → LXC
+  `/var/lib/rustnvr/…`). `config.toml` est propre à chaque installation
+  (dossiers, port) : l'interface ne le coche pas d'office.
   400 : phrase incorrecte, fichier abîmé ou pas une sauvegarde.
 - `POST /backup/restore` `{ "data", "passphrase", "files": ["webhooks.ui.toml"],
   "motion": true }` : écrit les fichiers choisis (de façon atomique, 0600)

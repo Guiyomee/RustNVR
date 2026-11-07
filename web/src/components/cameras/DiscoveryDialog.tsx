@@ -31,6 +31,7 @@ function DevicePanel({ device, onChoose }: { device: FoundDevice; onChoose: (p: 
   const [main, setMain] = useState('')
   const [sub, setSub] = useState('')
   const [name, setName] = useState('')
+  const [onvifPort, setOnvifPort] = useState('')
 
   const find = async () => {
     setBusy(true)
@@ -39,6 +40,7 @@ function DevicePanel({ device, onChoose }: { device: FoundDevice; onChoose: (p: 
     try {
       const r = await discoverStreams({ address: device.address, xaddr: device.xaddr, rtsp_port: device.rtsp_port, server: device.server, username: username.trim() || null, password: password || null })
       setResult(r)
+      setOnvifPort(r.onvif_port ? String(r.onvif_port) : '')
       const recordable = r.streams.filter((s) => s.recordable)
       const first = recordable[0]
       const last = recordable[recordable.length - 1]
@@ -116,7 +118,7 @@ function DevicePanel({ device, onChoose }: { device: FoundDevice; onChoose: (p: 
                   ))}
               </fieldset>
               <div className="flex justify-end">
-                <Button variant="primary" disabledReason={!main ? t('Choisissez un flux principal H.264 ou H.265.', 'Choose an H.264 or H.265 main stream.') : !name.trim() ? t('Donnez un nom à la caméra.', 'Give the camera a name.') : null} onClick={() => onChoose({ name: name.trim(), url: main, subUrl: sub, username: username.trim(), password })}>
+                <Button variant="primary" disabledReason={!main ? t('Choisissez un flux principal H.264 ou H.265.', 'Choose an H.264 or H.265 main stream.') : !name.trim() ? t('Donnez un nom à la caméra.', 'Give the camera a name.') : null} onClick={() => onChoose({ name: name.trim(), url: main, subUrl: sub, username: username.trim(), password, onvif: onvifPort })}>
                   {t('Continuer vers l’ajout', 'Continue to adding it')}
                 </Button>
               </div>

@@ -23,6 +23,10 @@ export interface Capabilities {
   users: boolean
   /** Backup and restore of the configuration (`/backup`). */
   backup: boolean
+  /** Pan, tilt, zoom and presets of motorised cameras (`/cameras/{id}/ptz`), for cameras with `ptz`. */
+  ptz?: boolean
+  /** USB webcams (V4L2) can be added as cameras (`usb` in the camera input, `/devices/video` lists them). */
+  usb_cameras?: boolean
 }
 
 export type CapabilityKey = Exclude<keyof Capabilities, 'api_version'>
@@ -77,6 +81,8 @@ export interface HwAccel {
   device: string | null
   /** VAAPI driver chosen by name (`iHD`, `i965`), null for the default one. */
   driver: string | null
+  /** The VAAPI driver offers constant QP only: live at a constant quality, no bit rate cap. */
+  constant_qp?: boolean
   /** Why the test failed, or the last conversion redone on the processor. */
   detail: string | null
 }
@@ -154,6 +160,8 @@ export interface Camera {
   audio: string | null
   /** Privacy masks `[x1, y1, x2, y2]` (picture fractions), blacked out on the live view and playback. */
   privacy_masks?: number[][]
+  /** An ONVIF service is configured: pan, tilt, zoom and presets offered (GET /cameras/{id}/ptz tells whether the camera has them). */
+  ptz?: boolean
 }
 
 /** Motion detection state of a camera. */
@@ -339,6 +347,10 @@ export interface CameraEdit {
   username: string | null
   has_password: boolean
   transport: Transport
+  /** Port of the ONVIF service (PTZ), null when not set. */
+  onvif_port?: number | null
+  /** USB webcam settings (`main_url` empty), null for an RTSP camera. */
+  usb?: UsbSettings | null
 }
 
 export interface StreamInput {
@@ -355,8 +367,11 @@ export interface CameraInput {
   name: string
   enabled: boolean
   record: boolean
-  main: StreamInput
+  /** RTSP main stream; null for a USB webcam. */
+  main: StreamInput | null
   sub: StreamInput | null
+  /** A USB webcam instead of RTSP streams. */
+  usb?: UsbSettings | null
   /** `local` and/or destination ids. */
   record_destinations: string[]
   record_mode: RecordMode
@@ -364,6 +379,45 @@ export interface CameraInput {
   max_size_gb: number | null
   /** Absent keeps the current choice (on for a new camera). */
   record_audio?: boolean
+  /** Port of the ONVIF service, for PTZ (null: none). */
+  onvif_port?: number | null
+}
+
+/** A USB webcam (V4L2) read by FFmpeg (`usb` of a camera). */
+export interface UsbSettings {
+  /** `/dev/video0` or `/dev/v4l/by-id/…`. */
+  device: string
+  /** `mjpeg`, `yuyv422`… or `h264` (copied, nothing encoded); null: the webcam's default. */
+  input_format?: string | null
+  width?: number | null
+  height?: number | null
+  framerate?: number | null
+  /** Bit rate of the H.264 encoded by RustNVR (kbit/s, 2000 by default). */
+  bitrate_kbps?: number
+}
+
+/** `GET /api/v1/devices/video`: a video device of the machine. */
+export interface VideoDevice {
+  path: string
+  /** Same device under `/dev/v4l/by-id` (does not change when plugged elsewhere). */
+  by_id: string | null
+  name: string | null
+  /** Empty for the extra nodes of a webcam (no pictures). */
+  formats: { format: string; compressed: boolean; description: string; sizes: string[] }[]
+  error: string | null
+}
+
+/** A position stored on a motorised camera. */
+export interface PtzPreset {
+  token: string
+  name: string
+}
+
+/** Speeds of a continuous move, each from -1 to 1. */
+export interface PtzMove {
+  pan?: number
+  tilt?: number
+  zoom?: number
 }
 
 export interface Destination {
@@ -436,6 +490,8 @@ export interface ProbeResult {
   streams: { media: string; encoding: string; clock_rate: number }[]
   selected: number | null
   video: { codec: string; rfc6381_codec: string; width: number; height: number; time_to_key_frame_ms: number } | null
+  /** Live preview of the camera (motion JPEG for an <img>, single use, 2 minutes), when video came. */
+  preview?: string | null
 }
 
 export interface Disk {
@@ -716,6 +772,8 @@ export interface DiscoveryStreams {
   model: string | null
   streams: FoundStream[]
   error: string | null
+  /** Port of the ONVIF device service that answered (PTZ). */
+  onvif_port?: number | null
 }
 
 export interface DiscoveryStreamsInput {
@@ -732,7 +790,7 @@ export interface BackupPreview {
   created_ms: number
   /** Version of RustNVR that made it. */
   rustnvr: string
-  files: { name: string; state: 'same' | 'changed' | 'new' | 'not_in_backup' }[]
+  files: { name: string; state: 'same' | 'changed' | 'new' | 'not_in_backup'; problem?: string | null }[]
   /** Cameras once every file of the backup is restored. */
   cameras: { id: string; name: string }[]
   /** Cameras whose detection settings (zones, lines, masks) are in it. */

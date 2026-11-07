@@ -190,8 +190,9 @@ pub struct Preview {
     pub created_ms: i64,
     /// Version that made it.
     pub rustnvr: String,
-    /// Each file, in the order of [`FILES`].
-    pub files: Vec<(String, FileState)>,
+    /// Each file, in the order of [`FILES`], with why restoring it alone
+    /// would not load.
+    pub files: Vec<(String, FileState, Option<String>)>,
     /// Cameras of the configuration once everything is restored (id, name).
     pub cameras: Vec<(String, String)>,
     /// Cameras whose detection settings are in the backup.
@@ -200,10 +201,12 @@ pub struct Preview {
     pub problems: Vec<String>,
 }
 
-/// Compares `backup` with the configuration `config_file` and checks that
-/// the result of restoring every file would load. Blocking.
-pub fn preview(config_file: &Path, backup: &Backup) -> Preview {
-    let mut files = Vec::new();
+/// Compares `backup` with the configuration `config_file` and checks, file
+/// by file and all together, that the result would load (paths adapted with
+/// [`adapt`] to the models of `models_dir`). Blocking.
+pub fn preview(config_file: &Path, backup: &Backup, models_dir: &Path) -> Preview {
+    let backup = &adapt(backup, models_dir);
+    let mut states = Vec::new();
     for name in FILES {
         let current = std::fs::read_to_string(path_of(config_file, name)).ok();
         let state = match (backup.files.get(name), current) {
@@ -213,8 +216,48 @@ pub fn preview(config_file: &Path, backup: &Backup) -> Preview {
             (None, Some(_)) => FileState::NotInBackup,
             (None, None) => continue,
         };
-        files.push((name.to_owned(), state));
+        states.push((name.to_owned(), state));
     }
+    // The selection offered: every file that differs, but config.toml (its
+    // folders and port belong to the installation). The files depend on each
+    // other (cameras on the destinations of storage.ui.toml…), so they are
+    // checked together: a file is blamed for the problems that go away
+    // without it, config.toml for those it brings.
+    let restorable = |s: &FileState| matches!(s, FileState::Changed | FileState::New);
+    let offered: Vec<String> = states
+        .iter()
+        .filter(|(n, s)| restorable(s) && n != CONFIG_FILE)
+        .map(|(n, _)| n.clone())
+        .collect();
+    let offered_problems = problem_lines(check(config_file, backup, &offered).err());
+    let files = states
+        .into_iter()
+        .map(|(name, state)| {
+            let own: Vec<String> = if !restorable(&state) {
+                Vec::new()
+            } else if name == CONFIG_FILE {
+                let mut with = offered.clone();
+                with.push(name.clone());
+                problem_lines(check(config_file, backup, &with).err())
+                    .into_iter()
+                    .filter(|p| !offered_problems.contains(p))
+                    .collect()
+            } else if offered_problems.is_empty() {
+                Vec::new()
+            } else {
+                let without: Vec<String> =
+                    offered.iter().filter(|n| **n != name).cloned().collect();
+                let left = problem_lines(check(config_file, backup, &without).err());
+                offered_problems
+                    .iter()
+                    .filter(|p| !left.contains(p))
+                    .cloned()
+                    .collect()
+            };
+            let problem = (!own.is_empty()).then(|| explain(&own.join("\n"), models_dir));
+            (name, state, problem)
+        })
+        .collect();
     let chosen: Vec<String> = backup.files.keys().cloned().collect();
     let (cameras, problems) = match check(config_file, backup, &chosen) {
         Ok(c) => (
@@ -236,6 +279,41 @@ pub fn preview(config_file: &Path, backup: &Backup) -> Preview {
         cameras,
         motion: backup.motion.keys().cloned().collect(),
         problems,
+    }
+}
+
+/// The problems of a configuration error, one per line (the list of
+/// `invalid configuration:` or the whole message).
+fn problem_lines(error: Option<String>) -> Vec<String> {
+    let Some(error) = error else {
+        return Vec::new();
+    };
+    let items: Vec<String> = error
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- "))
+        .map(str::to_owned)
+        .collect();
+    if items.is_empty() { vec![error] } else { items }
+}
+
+/// `problems` with what to do about a model not downloaded here.
+fn explain(problems: &str, models_dir: &Path) -> String {
+    let missing: Vec<String> = problems
+        .split("no model file at ")
+        .skip(1)
+        .filter_map(|rest| {
+            let path = rest.split_whitespace().next()?;
+            let name = Path::new(path).file_name()?.to_string_lossy().into_owned();
+            (!models_dir.join(&name).is_file()).then_some(name)
+        })
+        .collect();
+    if missing.is_empty() {
+        problems.to_owned()
+    } else {
+        format!(
+            "{problems}\nModèle à télécharger d'abord ici (Paramètres → IA) : {}, puis analysez de nouveau.",
+            missing.join(", ")
+        )
     }
 }
 
@@ -290,6 +368,33 @@ fn write_private(path: &Path, text: &str) -> io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// `backup` with the paths of another installation made to fit this one: a
+/// model file of `ai.ui.toml` (`…/models/yolox_s.onnx`) that is not here but
+/// is in `models_dir` (a Docker backup restored in a systemd installation,
+/// for instance) points to the one of `models_dir`.
+pub fn adapt(backup: &Backup, models_dir: &Path) -> Backup {
+    let mut out = backup.clone();
+    if let Some(text) = out.files.get_mut(MANAGED_AI_FILE) {
+        let quoted: Vec<String> = text
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| s.ends_with(".onnx"))
+            .map(str::to_owned)
+            .collect();
+        for old in quoted {
+            let Some(name) = Path::new(&old).file_name() else {
+                continue;
+            };
+            let here = models_dir.join(name);
+            if !Path::new(&old).exists() && here.is_file() {
+                *text = text.replace(&format!("\"{old}\""), &format!("\"{}\"", here.display()));
+            }
+        }
+    }
+    out
+}
+
 /// Writes back the files `chosen` of `backup`, once the resulting
 /// configuration is known to load; the configuration in use changes at the
 /// next start. Returns the names written. Blocking.
@@ -297,7 +402,9 @@ pub fn restore(
     config_file: &Path,
     backup: &Backup,
     chosen: &[String],
+    models_dir: &Path,
 ) -> Result<Vec<String>, String> {
+    let backup = &adapt(backup, models_dir);
     if let Some(bad) = chosen.iter().find(|c| !FILES.contains(&c.as_str())) {
         return Err(format!("fichier inconnu : {bad}"));
     }
@@ -375,20 +482,26 @@ mod tests {
             "[mqtt]\nhost = \"broker\"\n",
         )
         .expect("mqtt");
-        let p = preview(&config, &backup);
+        let models = dir.path().join("models");
+        let p = preview(&config, &backup, &models);
         assert_eq!(
             p.files,
             [
-                (CONFIG_FILE.to_owned(), FileState::Changed),
-                (MANAGED_MQTT_FILE.to_owned(), FileState::NotInBackup),
-                (MANAGED_WEBHOOKS_FILE.to_owned(), FileState::New),
+                (CONFIG_FILE.to_owned(), FileState::Changed, None),
+                (MANAGED_MQTT_FILE.to_owned(), FileState::NotInBackup, None),
+                (MANAGED_WEBHOOKS_FILE.to_owned(), FileState::New, None),
             ]
         );
         assert!(p.problems.is_empty(), "{:?}", p.problems);
         assert_eq!(p.cameras, [("jardin".to_owned(), "Jardin".to_owned())]);
         // Only the webhooks: the renamed camera stays.
-        let written =
-            restore(&config, &backup, &[MANAGED_WEBHOOKS_FILE.to_owned()]).expect("restore");
+        let written = restore(
+            &config,
+            &backup,
+            &[MANAGED_WEBHOOKS_FILE.to_owned()],
+            &models,
+        )
+        .expect("restore");
         assert_eq!(written, [MANAGED_WEBHOOKS_FILE]);
         assert!(
             std::fs::read_to_string(&config)
@@ -398,7 +511,7 @@ mod tests {
         assert!(dir.path().join(MANAGED_WEBHOOKS_FILE).is_file());
         assert!(dir.path().join(MANAGED_MQTT_FILE).is_file(), "kept");
         // Nothing else outside of the known files, no scratch folder left.
-        assert!(restore(&config, &backup, &["../evil".to_owned()]).is_err());
+        assert!(restore(&config, &backup, &["../evil".to_owned()], &models).is_err());
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .expect("list")
             .filter_map(|e| e.ok())
@@ -411,12 +524,108 @@ mod tests {
         broken
             .files
             .insert(CONFIG_FILE.to_owned(), "[storage\n".to_owned());
-        assert!(!preview(&config, &broken).problems.is_empty());
-        assert!(restore(&config, &broken, &[CONFIG_FILE.to_owned()]).is_err());
+        assert!(!preview(&config, &broken, &models).problems.is_empty());
+        assert!(restore(&config, &broken, &[CONFIG_FILE.to_owned()], &models).is_err());
         assert!(
             std::fs::read_to_string(&config)
                 .expect("read")
                 .contains("Cour")
         );
+    }
+
+    #[test]
+    fn a_backup_of_another_installation_is_adapted_and_checked_file_by_file() {
+        let (dir, config) = setup();
+        let models = dir.path().join("models");
+        std::fs::create_dir(&models).expect("models");
+        // A Docker backup: the model was in /data/rustnvr/models.
+        let ai = "[ai]
+provider = { type = \"onnx\", model = \"/data/rustnvr/models/yolox_l.onnx\" }
+";
+        let mut backup = collect(&config, BTreeMap::new(), 1).expect("collect");
+        backup
+            .files
+            .insert(MANAGED_AI_FILE.to_owned(), ai.to_owned());
+        // Not downloaded here yet: that file alone does not load, the
+        // others are fine and can be restored.
+        let p = preview(&config, &backup, &models);
+        let ai_state = p.files.iter().find(|f| f.0 == MANAGED_AI_FILE).expect("ai");
+        assert_eq!(ai_state.1, FileState::New);
+        assert!(
+            ai_state
+                .2
+                .as_deref()
+                .is_some_and(|e| e.contains("yolox_l.onnx")),
+            "{ai_state:?}"
+        );
+        assert!(restore(&config, &backup, &[MANAGED_AI_FILE.to_owned()], &models).is_err());
+        assert!(
+            restore(
+                &config,
+                &backup,
+                &[MANAGED_WEBHOOKS_FILE.to_owned()],
+                &models
+            )
+            .is_ok()
+        );
+        // Downloaded here: the path is made to point to it.
+        std::fs::write(models.join("yolox_l.onnx"), b"model").expect("model");
+        let here = models.join("yolox_l.onnx").display().to_string();
+        let adapted = adapt(&backup, &models);
+        assert!(adapted.files[MANAGED_AI_FILE].contains(&here));
+        assert!(!adapted.files[MANAGED_AI_FILE].contains("/data/rustnvr"));
+        let written = restore(&config, &backup, &[MANAGED_AI_FILE.to_owned()], &models)
+            .expect("restored once the model is here");
+        assert_eq!(written, [MANAGED_AI_FILE]);
+        let saved = std::fs::read_to_string(dir.path().join(MANAGED_AI_FILE)).expect("saved");
+        assert!(saved.contains(&here), "{saved}");
+    }
+
+    #[test]
+    fn files_that_need_each_other_are_checked_together() {
+        let (_dir, config) = setup();
+        let models = config.with_file_name("models");
+        // Cameras recording to a destination of storage.ui.toml, and a model
+        // not downloaded here.
+        let mut backup = collect(&config, BTreeMap::new(), 1).expect("collect");
+        for (name, text) in [
+            (
+                MANAGED_STORAGE_FILE,
+                "[[destinations]]\nid = \"nas\"\npath = \"/mnt/nas/rustnvr\"\n",
+            ),
+            (
+                MANAGED_CAMERAS_FILE,
+                "[[cameras]]\nid = \"rue\"\nmain = { url = \"rtsp://10.0.0.3/live\" }\nrecord = { destinations = [\"nas\"] }\n",
+            ),
+            (
+                MANAGED_AI_FILE,
+                "[ai]\nprovider = { type = \"onnx\", model = \"/data/rustnvr/models/yolox_l.onnx\" }\n",
+            ),
+        ] {
+            backup.files.insert(name.to_owned(), text.to_owned());
+        }
+        let p = preview(&config, &backup, &models);
+        let problem = |name: &str| {
+            p.files
+                .iter()
+                .find(|f| f.0 == name)
+                .and_then(|f| f.2.clone())
+        };
+        // Restored with the storage, the cameras load: nothing to say.
+        assert_eq!(problem(MANAGED_CAMERAS_FILE), None);
+        assert_eq!(problem(MANAGED_STORAGE_FILE), None);
+        let ai = problem(MANAGED_AI_FILE).expect("model missing");
+        assert!(
+            ai.contains("yolox_l.onnx") && ai.contains("Paramètres → IA"),
+            "{ai}"
+        );
+        assert!(!ai.contains("rue"), "{ai}");
+        let both = [
+            MANAGED_STORAGE_FILE.to_owned(),
+            MANAGED_CAMERAS_FILE.to_owned(),
+        ];
+        // The cameras without their destination are still refused.
+        assert!(restore(&config, &backup, &both[1..], &models).is_err());
+        assert!(restore(&config, &backup, &both, &models).is_ok());
     }
 }

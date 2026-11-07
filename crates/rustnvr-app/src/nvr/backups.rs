@@ -64,8 +64,9 @@ fn preview_dto(p: backup::Preview) -> BackupPreview {
         files: p
             .files
             .into_iter()
-            .map(|(name, state)| BackupFile {
+            .map(|(name, state, problem)| BackupFile {
                 name,
+                problem,
                 state: match state {
                     FileState::Same => "same",
                     FileState::Changed => "changed",
@@ -95,9 +96,10 @@ pub(super) async fn inspect(
     passphrase: String,
 ) -> Result<BackupPreview, ControlError> {
     let config = config_file(shared)?;
+    let models = shared.data_dir.join("models");
     tokio::task::spawn_blocking(move || {
         let b = opened(&data, &passphrase)?;
-        Ok(preview_dto(backup::preview(&config, &b)))
+        Ok(preview_dto(backup::preview(&config, &b, &models)))
     })
     .await
     .map_err(blocking_failed)?
@@ -113,6 +115,7 @@ pub(super) async fn restore(
     motion: bool,
 ) -> Result<BackupRestored, ControlError> {
     let config = config_file(shared)?;
+    let models = shared.data_dir.join("models");
     if motion && shared.database.is_none() {
         return Err(ControlError::Invalid(
             "pas de base de données : les réglages de détection ne peuvent pas être restaurés"
@@ -121,7 +124,8 @@ pub(super) async fn restore(
     }
     let (written, settings) = tokio::task::spawn_blocking(move || {
         let b = opened(&data, &passphrase)?;
-        let written = backup::restore(&config, &b, &files).map_err(ControlError::Invalid)?;
+        let written =
+            backup::restore(&config, &b, &files, &models).map_err(ControlError::Invalid)?;
         Ok::<_, ControlError>((written, b.motion))
     })
     .await

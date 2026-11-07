@@ -65,7 +65,10 @@ function write(s: GeneralSettings, key: string, v: number): GeneralSettings {
 
 /** Where the H.264 conversions run now. */
 function HwStatus({ hw }: { hw: HwAccel }) {
-  const how = hw.api === 'nvenc' ? 'NVENC' : ['VAAPI', hw.device, hw.driver].filter(Boolean).join(', ')
+  const how =
+    hw.api === 'nvenc'
+      ? 'NVENC'
+      : ['VAAPI', hw.device, hw.driver, hw.constant_qp && t('qualité constante, sans plafond de débit', 'constant quality, no bit rate cap')].filter(Boolean).join(', ')
   const [tone, text] = ((): [string, string] => {
     switch (hw.state) {
       case 'active':

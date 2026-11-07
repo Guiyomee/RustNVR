@@ -46,6 +46,12 @@ pub struct CapabilitiesDto {
     pub users: bool,
     /// Backup and restore of the configuration (`/backup`).
     pub backup: bool,
+    /// Pan, tilt, zoom and presets of motorised cameras (ONVIF PTZ,
+    /// `/cameras/{id}/ptz`), for the cameras with `ptz: true`.
+    pub ptz: bool,
+    /// USB webcams (V4L2) can be added as cameras (`usb` in the camera
+    /// input, `/devices/video` lists them): Linux only.
+    pub usb_cameras: bool,
 }
 
 /// Process and host status.
@@ -125,6 +131,9 @@ pub struct HwAccelDto {
     pub device: Option<String>,
     /// VAAPI driver chosen by name (`iHD`, `i965`), `None` for the default.
     pub driver: Option<String>,
+    /// The VAAPI driver offers constant QP only: live conversions at a
+    /// constant quality, without a bit rate cap.
+    pub constant_qp: bool,
     /// Why the test failed, or the last conversion redone on the processor.
     pub detail: Option<String>,
 }
@@ -138,6 +147,7 @@ impl Default for HwAccelDto {
             card: None,
             device: None,
             driver: None,
+            constant_qp: false,
             detail: None,
         }
     }
@@ -309,6 +319,9 @@ pub struct CameraDto {
     /// Privacy masks (`[x1, y1, x2, y2]`, picture fractions), blacked out by
     /// the interface on the live view and playback.
     pub privacy_masks: Vec<[f32; 4]>,
+    /// An ONVIF service is configured: the interface offers pan, tilt, zoom
+    /// and presets (`GET /cameras/{id}/ptz` says whether the camera has them).
+    pub ptz: bool,
 }
 
 /// Motion detection state of a camera.
@@ -384,6 +397,10 @@ pub struct CameraEditDto {
     pub has_password: bool,
     /// `tcp` or `udp`.
     pub transport: &'static str,
+    /// Port of the ONVIF service (PTZ), `null` when not set.
+    pub onvif_port: Option<u16>,
+    /// USB webcam settings (`main_url` empty), `null` for an RTSP camera.
+    pub usb: Option<rustnvr_core::config::UsbConfig>,
 }
 
 /// Result of a connection test.
@@ -395,6 +412,9 @@ pub struct ProbeDto {
     pub selected: Option<usize>,
     /// First key frame, when video was received.
     pub video: Option<ProbedVideoDto>,
+    /// Address of a live preview of the camera (motion JPEG, single use,
+    /// for 2 minutes), when video was received and FFmpeg works.
+    pub preview: Option<String>,
 }
 
 /// One announced stream.

@@ -33,7 +33,9 @@ ReadWritePaths=/etc/rustnvr /var/lib/rustnvr
 # An SFTP private key under /home needs ProtectHome=read-only instead.
 ProtectHome=yes
 PrivateTmp=yes
-# Hardware video acceleration (VAAPI, /dev/dri) would need PrivateDevices=no.
+# Hardware video acceleration (VAAPI, /dev/dri) and USB webcams (/dev/video*)
+# need PrivateDevices=no: packaging/install.sh adds it (rustnvr.service.d/
+# devices.conf) when the machine has one.
 PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
