@@ -119,13 +119,14 @@ impl PlaybackConverter {
         let mut output = convert(settings.hw.as_ref()).await?;
         if !output.status.success() && settings.hw.is_some() {
             let detail = String::from_utf8_lossy(&output.stderr);
-            state.note_hw_failure("relecture", detail.lines().last().unwrap_or_default());
+            let reason = crate::hwaccel::failure_reason(&detail).unwrap_or_default();
+            state.note_hw_failure("relecture", &reason);
             output = convert(None).await?;
         }
         if !output.status.success() {
             let _ = tokio::fs::remove_file(&partial).await;
             let detail = String::from_utf8_lossy(&output.stderr);
-            let last = detail.lines().last().unwrap_or_default().to_owned();
+            let last = crate::hwaccel::failure_reason(&detail).unwrap_or_default();
             tracing::warn!(recording = key, error = %last, "conversion to H.264 failed");
             return Err(ApiError::internal(format!("conversion failed: {last}")));
         }

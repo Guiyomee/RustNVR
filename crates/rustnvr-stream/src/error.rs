@@ -50,6 +50,10 @@ pub enum StreamError {
     /// No frame was received for the stall timeout.
     #[error("no video frame for {0:?}")]
     Stalled(Duration),
+    /// The RTSP client failed on the camera's packets (a Retina bug or an
+    /// unexpected packet sequence); the session is started again.
+    #[error("RTSP client failure on the camera's packets: {0}")]
+    ClientFailure(String),
 }
 
 impl StreamError {

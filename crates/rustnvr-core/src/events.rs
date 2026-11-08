@@ -33,7 +33,8 @@ pub enum StreamState {
         width: u32,
         /// Height in pixels.
         height: u32,
-        /// Audio received with the video (`mp4a.40.2 16000 Hz`), if any.
+        /// Audio received with the video (`mp4a.40.2 16000 Hz`, or
+        /// `opus 48000 Hz` for G.711 converted), if any.
         audio: Option<String>,
         /// When the first frame of the session was received.
         since: SystemTime,

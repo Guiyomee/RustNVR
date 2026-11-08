@@ -2,13 +2,13 @@ import { Check, Copy, Eye, EyeOff, PlugZap, RefreshCw } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { describeError } from '../../api/client'
 import { useReadOnly } from '../../auth/AuthGate'
-import { createCamera, getDestinations, getSettings, getVideoDevices, probeCamera, probeStream, updateCamera } from '../../api/endpoints'
+import { createCamera, getDestinations, getSettings, getVideoDevices, probeCamera, probeStream, updateCamera, usbPreview } from '../../api/endpoints'
 import { useAsync } from '../../hooks/useAsync'
 import { useCapability, useData, useIsDemo } from '../../data/DataContext'
 import { formatResolution } from '../../lib/format'
 import type { Camera, CameraInput, ProbeResult, RecordMode, Transport } from '../../types/api'
 import { Button } from '../ui/Button'
-import { Modal } from '../ui/Modal'
+import { ConfirmDialog, Modal } from '../ui/Modal'
 import { Segmented } from '../ui/Tabs'
 import { t } from '../../lib/i18n'
 
@@ -379,12 +379,19 @@ function UsbFields({ f, set, shown }: { f: FormState; set: <K extends keyof Form
   )
 }
 
-type ProbeState = { kind: 'idle' } | { kind: 'running' } | { kind: 'ok'; result: ProbeResult } | { kind: 'error'; message: string }
+type ProbeState = { kind: 'idle' } | { kind: 'running' } | { kind: 'ok'; result: ProbeResult } | { kind: 'usb'; preview: string } | { kind: 'error'; message: string }
 
 function ProbeOutcome({ state }: { state: ProbeState }) {
   if (state.kind === 'idle') return null
   if (state.kind === 'running') return <p className="text-sm text-muted">{t("Connexion à la caméra… (jusqu'à 30 s)", "Connecting to the camera… (up to 30 s)")}</p>
   if (state.kind === 'error') return <p className="rounded-md border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{t('Échec : ', 'Failed: ')}{state.message}</p>
+  if (state.kind === 'usb')
+    return (
+      <div className="rounded-md border border-line px-3 py-2 text-sm">
+        <p className="text-muted">{t('Image de la webcam avec ces réglages (une image noire ou figée : un autre format ou une autre taille).', 'Picture of the webcam with these settings (a black or still picture: another format or size).')}</p>
+        <LivePreview src={state.preview} />
+      </div>
+    )
   const { result } = state
   const v = result.video
   return (
@@ -396,9 +403,28 @@ function ProbeOutcome({ state }: { state: ProbeState }) {
       ) : (
         <p className="text-warn">{t("La caméra répond mais n'annonce aucun flux H.264/H.265 enregistrable.", "The camera answers but announces no H.264/H.265 stream that can be recorded.")}</p>
       )}
+      {v && <AudioNote streams={result.streams} />}
       <p className="mt-1 text-xs text-muted">{t('Flux annoncés : ', 'Announced streams: ')}{result.streams.map((s) => `${s.media}/${s.encoding}`).join(', ') || 'aucun'}</p>
       {result.preview && <LivePreview src={result.preview} />}
     </div>
+  )
+}
+
+/** What happens to the camera's sound: AAC is recorded as is, G.711 converted to Opus. */
+function AudioNote({ streams }: { streams: ProbeResult['streams'] }) {
+  const audio = streams.filter((s) => s.media === 'audio')
+  const kinds = audio.map((s) => s.encoding.toLowerCase())
+  if (audio.length === 0) return <p className="mt-1 text-xs text-muted">{t('Pas de son annoncé : vidéo seule.', 'No sound announced: video only.')}</p>
+  if (kinds.includes('mpeg4-generic')) return <p className="mt-1 text-xs text-muted">{t('Son AAC : enregistré avec la vidéo.', 'AAC sound: recorded with the video.')}</p>
+  if (kinds.includes('pcmu') || kinds.includes('pcma')) {
+    const name = kinds.includes('pcmu') ? 'G.711 µ-law (PCMU)' : 'G.711 A-law (PCMA)'
+    return <p className="mt-1 text-xs text-muted">{t(`Son ${name} : converti en Opus et enregistré avec la vidéo.`, `${name} sound: converted to Opus and recorded with the video.`)}</p>
+  }
+  const name = audio.map((s) => s.encoding.toUpperCase()).join(', ')
+  return (
+    <p className="mt-1 text-xs text-warn">
+      {t(`Son ${name} : pas enregistré (RustNVR enregistre le son AAC et G.711). La vidéo est enregistrée normalement ; pour le son, choisissez AAC ou G.711 dans les réglages audio de la caméra.`, `${name} sound: not recorded (RustNVR records AAC and G.711 sound). The video is recorded normally; for the sound, choose AAC or G.711 in the audio settings of the camera.`)}
+    </p>
   )
 }
 
@@ -457,6 +483,9 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
   // Cameras of config.toml can only be changed in that file.
   const readOnly = editing && !camera.managed
   const [f, setF] = useState<FormState>(empty)
+  // The form as opened: closing asks first once something was changed.
+  const [initial, setInitial] = useState<FormState>(empty)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
   const [idTouched, setIdTouched] = useState(false)
   const [submitted, setSubmitted] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
@@ -468,7 +497,10 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
 
   useEffect(() => {
     if (!open) return
-    setF(camera ? fromCamera(camera) : preset ? { ...empty, ...preset, onvif: preset.onvif ?? '', id: freeId(slugify(preset.name), existingIds) } : empty)
+    const start = camera ? fromCamera(camera) : preset ? { ...empty, ...preset, onvif: preset.onvif ?? '', id: freeId(slugify(preset.name), existingIds) } : empty
+    setF(start)
+    setInitial(start)
+    setConfirmDiscard(false)
     setIdTouched(editing)
     setSubmitted(false)
     setShowPassword(false)
@@ -489,7 +521,11 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
       ([s, list]) => {
         // A removed default falls back to the local disk, as on the server.
         const d = list.some((x) => x.id === s.default_destination) ? s.default_destination : 'local'
-        if (alive) setF((prev) => (prev.destinations.length === 1 && prev.destinations[0] === 'local' ? { ...prev, destinations: [d] } : prev))
+        const withDefault = (prev: FormState) => (prev.destinations.length === 1 && prev.destinations[0] === 'local' ? { ...prev, destinations: [d] } : prev)
+        if (alive) {
+          setF(withDefault)
+          setInitial(withDefault)
+        }
       },
       () => undefined,
     )
@@ -514,11 +550,27 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
   const close = () => {
     // Do not keep the password in memory once the dialog is closed.
     setF(empty)
+    setInitial(empty)
+    setConfirmDiscard(false)
     onClose()
   }
+  const dirty = JSON.stringify(f) !== JSON.stringify(initial)
+  // Escape, the cross and Annuler: what was typed is not lost by mistake.
+  const requestClose = () => (dirty && !saving ? setConfirmDiscard(true) : close())
 
   const runProbe = async () => {
     setSubmitted(true)
+    if (f.source === 'usb') {
+      if (errors.usbDevice || errors.usbSize || errors.usbFps) return
+      setProbe({ kind: 'running' })
+      try {
+        const { preview } = await usbPreview(usbOf(f))
+        setProbe({ kind: 'usb', preview })
+      } catch (e) {
+        setProbe({ kind: 'error', message: describeError(e) })
+      }
+      return
+    }
     if (errors.url) return
     setProbe({ kind: 'running' })
     try {
@@ -561,14 +613,16 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
       : null
 
   return (
+    <>
     <Modal
       open={open}
+      guarded
       wide
       title={editing ? t(`Modifier ${camera.name}`, `Edit ${camera.name}`) : t('Ajouter une caméra', 'Add a camera')}
-      onClose={close}
+      onClose={requestClose}
       footer={
         <>
-          <Button onClick={close}>{t('Annuler', 'Cancel')}</Button>
+          <Button onClick={requestClose}>{t('Annuler', 'Cancel')}</Button>
           <Button
             onClick={() => {
               setSubmitted(true)
@@ -706,7 +760,7 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
               <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={f.audio} onChange={(e) => set('audio', e.target.checked)} />
               <span>
                 {t('Enregistrer le son', 'Record sound')}
-                <span className="block text-xs text-muted">{t('Si la caméra envoie du son AAC (la plupart des modèles récents). Modifiable aussi depuis Home Assistant.', 'If the camera sends AAC sound (most recent models). Can also be changed from Home Assistant.')}</span>
+                <span className="block text-xs text-muted">{t('Si la caméra envoie du son : AAC tel quel, G.711 converti en Opus. Modifiable aussi depuis Home Assistant.', 'If the camera sends sound: AAC as is, G.711 converted to Opus. Can also be changed from Home Assistant.')}</span>
               </span>
             </label>
           )}
@@ -729,16 +783,18 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
             disabledReason={
               demo
                 ? t('Indisponible en mode démo.', 'Not available in demo mode.')
-                : f.source === 'usb'
-                  ? t('Le test concerne les caméras RTSP : une webcam s’essaie en l’enregistrant (son état s’affiche dans la liste des caméras).', 'The test is for RTSP cameras: a webcam is tried by saving it (its state shows in the camera list).')
-                  : probe.kind === 'running'
-                    ? t('Test en cours…', 'Testing…')
-                    : null
+                : probe.kind === 'running'
+                  ? t('Test en cours…', 'Testing…')
+                  : null
             }
           >
-            {t('Tester la connexion', 'Test the connection')}
+            {f.source === 'usb' ? t('Voir l’image', 'Show the picture') : t('Tester la connexion', 'Test the connection')}
           </Button>
-          <span className="text-xs text-muted">{t("Vérifie l'URL, les identifiants et le codec avant d'enregistrer.", "Checks the URL, the credentials and the codec before saving.")}</span>
+          <span className="text-xs text-muted">
+            {f.source === 'usb'
+              ? t('Ouvre la webcam avec ces réglages pendant une minute, sans rien enregistrer.', 'Opens the webcam with these settings for a minute, without recording anything.')
+              : t("Vérifie l'URL, les identifiants et le codec avant d'enregistrer.", "Checks the URL, the credentials and the codec before saving.")}
+          </span>
         </div>
         <div className="sm:col-span-2">
           <ProbeOutcome state={probe} />
@@ -770,5 +826,15 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
         </div>
       )}
     </Modal>
+    <ConfirmDialog
+      open={open && confirmDiscard}
+      title={t('Abandonner la saisie ?', 'Discard the changes?')}
+      message={t('Les réglages de cette caméra ne sont pas enregistrés : ils seront perdus.', 'The settings of this camera are not saved: they will be lost.')}
+      confirmLabel={t('Abandonner', 'Discard')}
+      danger
+      onConfirm={close}
+      onCancel={() => setConfirmDiscard(false)}
+    />
+    </>
   )
 }

@@ -68,7 +68,7 @@ struct Failure {
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
-        .user_agent(concat!("RustNVR/", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("RustNVR/{}", rustnvr_core::release_version()))
         .build()
         .unwrap_or_default()
 }
@@ -227,7 +227,7 @@ fn body(kind: &str, event: &DetectionEvent, camera_name: &str, image: Option<&[u
             "data:image/jpeg;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(jpeg)
         )),
-        "rustnvr": env!("CARGO_PKG_VERSION"),
+        "rustnvr": rustnvr_core::release_version(),
     })
 }
 
@@ -326,11 +326,11 @@ fn discord_payload(
         lines.push(format!("Durée : {}", duration_text(end - event.start_ms)));
     }
     let footer = if kind == "test" {
-        format!("RustNVR {}", env!("CARGO_PKG_VERSION"))
+        format!("RustNVR {}", rustnvr_core::release_version())
     } else {
         format!(
             "RustNVR {} · événement {}",
-            env!("CARGO_PKG_VERSION"),
+            rustnvr_core::release_version(),
             event.id
         )
     };
@@ -445,7 +445,7 @@ fn crossing_body(c: &CrossingCall<'_>, image: Option<&[u8]>) -> Value {
             "data:image/jpeg;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(jpeg)
         )),
-        "rustnvr": env!("CARGO_PKG_VERSION"),
+        "rustnvr": rustnvr_core::release_version(),
     })
 }
 
@@ -462,7 +462,7 @@ fn discord_message(
         "title": title,
         "color": color,
         "description": description,
-        "footer": { "text": format!("RustNVR {}", env!("CARGO_PKG_VERSION")) },
+        "footer": { "text": format!("RustNVR {}", rustnvr_core::release_version()) },
     });
     if let Ok(at) = jiff::Timestamp::from_millisecond(at_ms) {
         embed["timestamp"] = at.to_string().into();
@@ -504,7 +504,7 @@ fn storage_body(destination: &str, name: &str, problem: Option<&str>, at_ms: i64
             "problem": problem,
             "at_ms": at_ms,
         },
-        "rustnvr": env!("CARGO_PKG_VERSION"),
+        "rustnvr": rustnvr_core::release_version(),
     })
 }
 
@@ -710,7 +710,7 @@ fn camera_body(change: &CameraChange, camera_name: &str, at_ms: i64) -> Value {
             "offline_ms": u64::try_from(down_for.as_millis()).unwrap_or(u64::MAX),
             "error": error,
         },
-        "rustnvr": env!("CARGO_PKG_VERSION"),
+        "rustnvr": rustnvr_core::release_version(),
     })
 }
 

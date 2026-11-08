@@ -160,7 +160,7 @@ export function CameraDetailPage({ id }: { id: string }) {
     [t('Résolution', 'Resolution'), formatResolution(camera.width, camera.height)],
     [t('Images par seconde (mesurées)', 'Frames per second (measured)'), camera.fps === null ? '—' : formatNumber(camera.fps, 1)],
     [t('Débit reçu', 'Received bitrate'), formatBitrate(camera.bitrate_kbps)],
-    [t('Son', 'Sound'), camera.audio ? `${camera.audio}, ${camera.record_audio ? t('enregistré', 'recorded') : t('non enregistré', 'not recorded')}` : camera.record_audio ? t('aucun son AAC reçu', 'no AAC sound received') : t('non enregistré', 'not recorded')],
+    [t('Son', 'Sound'), camera.audio ? `${camera.audio}${camera.audio.startsWith('opus') ? t(' (G.711 de la caméra converti)', ' (G.711 of the camera converted)') : ''}, ${camera.record_audio ? t('enregistré', 'recorded') : t('non enregistré', 'not recorded')}` : camera.record_audio ? t('aucun son AAC ou G.711 reçu', 'no AAC or G.711 sound received') : t('non enregistré', 'not recorded')],
     [t('En ligne depuis', 'Online for'), camera.online_since_ms ? formatDateTime(camera.online_since_ms) : '—'],
     [t('Durée enregistrée aujourd’hui', 'Recorded today'), <TodayRecordedDuration cameraId={camera.id} />],
   ]

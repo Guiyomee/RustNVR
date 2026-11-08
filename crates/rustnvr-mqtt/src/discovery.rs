@@ -55,7 +55,7 @@ fn nvr_device(client_id: &str) -> Value {
         "name": "RustNVR",
         "manufacturer": "RustNVR",
         "model": "NVR",
-        "sw_version": env!("CARGO_PKG_VERSION"),
+        "sw_version": rustnvr_core::release_version(),
     })
 }
 

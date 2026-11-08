@@ -28,7 +28,7 @@ const MAX_NOTES: usize = 20_000;
 
 /// The running version.
 fn current() -> String {
-    env!("CARGO_PKG_VERSION").to_owned()
+    rustnvr_core::release_version().to_owned()
 }
 
 /// How this RustNVR runs, for the installation instructions.
@@ -59,7 +59,7 @@ async fn latest(config: &UpdatesConfig, repository: &str) -> Result<Option<Relea
     let api = latest_release_api(repository)?;
     let client = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
-        .user_agent(concat!("RustNVR/", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("RustNVR/{}", rustnvr_core::release_version()))
         .build()
         .map_err(|e| e.to_string())?;
     let mut request = client.get(&api).header("Accept", "application/json");

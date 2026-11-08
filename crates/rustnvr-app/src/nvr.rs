@@ -1827,7 +1827,7 @@ async fn start_web(
     let _ = shared.api.set(state.clone());
     // Shown before the first check (a few seconds after startup).
     state.set_update_status(rustnvr_api::dto::UpdateStatus {
-        current: env!("CARGO_PKG_VERSION").to_owned(),
+        current: rustnvr_core::release_version().to_owned(),
         repository: shared
             .updates
             .lock()

@@ -252,7 +252,7 @@ impl ApiState {
             ffmpeg_available: OnceLock::new(),
             ai_provider: RwLock::new(None),
             updates: RwLock::new(crate::dto::UpdateStatus {
-                current: env!("CARGO_PKG_VERSION").to_owned(),
+                current: rustnvr_core::release_version().to_owned(),
                 install: "other".to_owned(),
                 ..Default::default()
             }),
@@ -567,7 +567,7 @@ impl ApiState {
             })
             .count();
         SystemDto {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: rustnvr_core::release_version().to_owned(),
             started_at_ms: unix_ms(self.started_at),
             uptime_seconds: self.started.elapsed().as_secs(),
             auth_enabled: self.auth_required(),

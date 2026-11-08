@@ -181,6 +181,13 @@ défaut). Au démarrage, des essais choisissent ce qui marche :
 
 Sans carte, ou si les essais échouent, le processeur convertit comme avant.
 
+**Mot de passe perdu** : un nouveau mot de passe pour le compte `admin`
+(tiré au hasard et affiché ; le conteneur peut rester en marche) :
+
+```sh
+docker exec rustnvr rustnvr reset-password -c /config/config.toml
+```
+
 ## 6. Mise à jour, arrêt
 
 ```sh

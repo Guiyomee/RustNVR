@@ -237,8 +237,10 @@ d'un autre site ne peut pas les déclencher sans contrôle CORS préalable).
   stockage ; la taille s'entend par point de stockage. Renvoyées aussi dans
   `GET /cameras`.
 - `record_audio` : enregistrer le son avec la vidéo (par défaut `true` à la
-  création ; absent dans `PUT` : inchangé). Seul le son AAC est enregistré,
-  dans la même piste MP4 que la vidéo, sans conversion.
+  création ; absent dans `PUT` : inchangé). Le son AAC est enregistré tel
+  quel ; le son G.711 (PCMU, PCMA, 8 kHz mono) est converti en Opus (16 kbit/s,
+  piste `Opus` du MP4, lue par les navigateurs). Les autres sons (G.726,
+  G.722…) ne sont pas enregistrés.
 - `record_mode` : `continuous` (défaut) ou `motion` : seulement autour des
   événements de mouvement (`recording.pre_roll_seconds` avant, au moins
   `recording.post_roll_seconds` après), ce qui suppose la détection activée
@@ -372,6 +374,16 @@ seconde, 640 px de large au plus, H.264 et H.265 convertis par FFmpeg) pendant
 les identifiants restent sur le serveur (seul le jeton circule). Jeton
 inconnu, déjà utilisé ou expiré : 404 ; la connexion à la caméra s'arrête
 quand le navigateur ferme l'image.
+
+### `POST /api/v1/cameras/usb/preview` (admin)
+
+Aperçu d'une webcam avant de l'enregistrer comme caméra. Corps : l'objet `usb`
+de `POST /cameras` (`device`, `input_format`, `width`, `height`, `framerate`,
+`bitrate_kbps`). Réponse `{ "preview": "/api/v1/cameras/preview/<jeton>" }`,
+même jeton à usage unique que ci-dessus : `GET` dessus fait lire la webcam par
+FFmpeg avec ces réglages (MJPEG, 4 images par seconde, 1 minute au plus).
+Réglages invalides : 400 ; webcam déjà lue par une caméra activée : 409
+`busy` (une webcam ne s'ouvre qu'une fois) ; FFmpeg absent : 503.
 
 ### `GET /api/v1/cameras/{id}/recordings?from={ms}&to={ms}`
 
@@ -627,8 +639,8 @@ enregistrement). 409 `read_only` pour une caméra de `config.toml`
 (`record = { audio = … }` dans ce fichier).
 
 Dans `GET /cameras` : `record_audio` (réglage) et `audio` (son reçu de la
-caméra, par exemple `"mp4a.40.2 16000 Hz"`, ou `null` hors ligne ou sans son
-AAC).
+caméra, par exemple `"mp4a.40.2 16000 Hz"`, ou `"opus 48000 Hz"` pour un son
+G.711 converti, ou `null` hors ligne ou sans son enregistrable).
 
 ### `GET /api/v1/cameras/{id}/ptz` · `POST …/ptz/move` · `POST …/ptz/stop` · presets
 
@@ -818,13 +830,17 @@ l'interface et appliqués sans redémarrage :
 ```json
 { "settings": { "provider": { "type": "onnx", "model": "/var/lib/rustnvr/models/yolox_nano.onnx" },
                 "min_score": 0.5, "labels": ["person", "car"], "timeout_seconds": 10,
-                "max_pictures": 5, "interval_seconds": 3 },
+                "max_pictures": 5, "interval_seconds": 3,
+                "night": { "min_score": 0.75, "from": "20:00", "to": "07:00" } },
   "active": "onnx", "device": "CPU", "error": null, "onnx_available": true,
   "detection_ready": true, "managed": true,
   "models": [{ "id": "yolox_nano", "name": "YOLOX-nano", "bytes": 3659407, "license": "Apache-2.0", "hint": "Le plus léger : …",
               "path": "/var/lib/rustnvr/recordings/.rustnvr/models/yolox_nano.onnx", "downloaded": false }] }
 ```
 
+- `night` (facultatif, `null` : aucun) : de `from` à `to` (heure locale du
+  serveur, `HH:MM`, à cheval sur minuit quand `from` est plus tard), un objet
+  doit atteindre `night.min_score` au lieu de `min_score`.
 - `PUT` prend l'objet `settings` (sans `provider` : reconnaissance coupée ;
   `{"type":"deepstack_http","url":"…","api_key_env":"…"}` pour CodeProject.AI).
   Le fournisseur est démarré avant l'enregistrement : un modèle absent ou

@@ -314,7 +314,8 @@ pub struct CameraDto {
     pub motion: MotionDto,
     /// The sound is recorded with the video (when the camera sends AAC).
     pub record_audio: bool,
-    /// Sound received from the camera (`mp4a.40.2 16000 Hz`), while online.
+    /// Sound received from the camera (`mp4a.40.2 16000 Hz`; `opus 48000 Hz`:
+    /// G.711 converted), while online.
     pub audio: Option<String>,
     /// Privacy masks (`[x1, y1, x2, y2]`, picture fractions), blacked out by
     /// the interface on the live view and playback.

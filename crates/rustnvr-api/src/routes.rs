@@ -218,7 +218,12 @@ async fn run_probe(
         ApiError::new(StatusCode::BAD_GATEWAY, "probe_failed", message)
     })?;
     let preview = (report.video.is_some() && state.ffmpeg_ok())
-        .then(|| state.previews.register(preview_target.0, preview_target.1))
+        .then(|| {
+            state.previews.register(crate::preview::PreviewSource::Rtsp(
+                preview_target.0,
+                preview_target.1,
+            ))
+        })
         .flatten()
         .map(|token| format!("/api/v1/cameras/preview/{token}"));
     Ok(Json(ProbeDto {
@@ -498,6 +503,7 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route("/cameras", get(cameras).post(create_camera))
         .route("/cameras/probe", post(probe_url))
         .route("/cameras/preview/{token}", get(crate::preview::preview))
+        .route("/cameras/usb/preview", post(crate::preview::usb_token))
         .route("/discovery/scan", post(crate::discovery::scan_network))
         .route("/discovery/streams", post(crate::discovery::streams))
         .route(

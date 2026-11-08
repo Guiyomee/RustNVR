@@ -208,3 +208,78 @@ async fn recording_survives_camera_disconnections() {
     );
     check_segments(&segments, VideoCodec::H264, dir.path());
 }
+
+/// A camera sending G.711 µ-law sound (a 440 Hz tone): the sound is recorded
+/// as Opus next to the untouched video, and FFmpeg decodes it back to the
+/// tone, as long as the video.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn records_g711_sound_as_opus() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = MockServerConfig::new(Fixture::h264());
+    cfg.frame_interval = Duration::from_millis(5);
+    cfg.pcmu_audio = true;
+    let segments = record(cfg, 2, dir.path()).await;
+    check_segments(&segments, VideoCodec::H264, dir.path());
+    if !ffprobe_available() {
+        eprintln!("ffprobe not found: skipping the sound check");
+        return;
+    }
+    let file = &segments[0].path;
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "a:0", "-count_packets"])
+        .args([
+            "-show_entries",
+            "stream=codec_name,sample_rate,channels,nb_read_packets",
+            "-of",
+            "default=nw=1",
+        ])
+        .arg(file)
+        .output()
+        .unwrap();
+    let info = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(info.contains("codec_name=opus"), "{info}");
+    assert!(info.contains("channels=1"), "{info}");
+    let packets: u64 = info
+        .lines()
+        .find_map(|l| l.strip_prefix("nb_read_packets="))
+        .unwrap()
+        .parse()
+        .unwrap();
+    // 5 s of sound in 20 ms packets (the first ones may start just after the video).
+    assert!((235..=251).contains(&packets), "{packets} packets: {info}");
+    // Decoded by FFmpeg: the tone again.
+    let pcm = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(file)
+        .args(["-map", "0:a", "-f", "s16le", "-ac", "1", "-ar", "8000", "-"])
+        .output()
+        .unwrap();
+    // FFmpeg 8 reports its own Opus MP4 files the same way at their last
+    // packet (pre-skip): not a fault of the file.
+    let stderr = String::from_utf8_lossy(&pcm.stderr);
+    let problems: Vec<&str> = stderr
+        .lines()
+        .filter(|l| !l.contains("non monotonically increasing dts"))
+        .collect();
+    assert!(pcm.status.success() && problems.is_empty(), "{stderr}");
+    let samples: Vec<i16> = pcm
+        .stdout
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16::from_le_bytes(*b))
+        .collect();
+    let steady = &samples[1_600..samples.len() - 800];
+    let rms =
+        (steady.iter().map(|&s| f64::from(s).powi(2)).sum::<f64>() / steady.len() as f64).sqrt();
+    let crossings = steady
+        .windows(2)
+        .filter(|w| (w[0] < 0) != (w[1] < 0))
+        .count();
+    let per_second = crossings as f64 * 8_000.0 / steady.len() as f64;
+    assert!((4_000.0..7_500.0).contains(&rms), "rms {rms}");
+    assert!(
+        (860.0..900.0).contains(&per_second),
+        "{per_second} crossings per second"
+    );
+}

@@ -233,3 +233,6 @@ export const ptzDeletePreset = (camera: string, token: string) =>
 // Video devices of the machine (USB webcams), for the camera form
 // (capabilities.usb_cameras). FFmpeg reads their formats: a few seconds.
 export const getVideoDevices = () => apiGet<{ devices: VideoDevice[] }>('/devices/video', 30_000)
+// Live preview of a webcam in the camera form (a minute, motion JPEG).
+export const usbPreview = (usb: NonNullable<CameraInput['usb']>) =>
+  apiSend<{ preview: string }>('POST', '/cameras/usb/preview', usb, 30_000)

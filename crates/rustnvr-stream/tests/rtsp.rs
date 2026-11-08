@@ -283,3 +283,66 @@ async fn tolerates_wrong_rtp_info_sequence_number() {
         }
     }
 }
+
+/// Reproduces a camera (Reolink E1) sending fragmented NALs whose first
+/// packet is missing without a gap in the sequence numbers: Retina refuses
+/// those packets (« FU-A has start bit unset while no frag in progress »),
+/// the session skips them and keeps going.
+#[tokio::test]
+async fn skips_fragments_without_their_start() {
+    for fixture in [Fixture::h264(), Fixture::h265()] {
+        let mut cfg = MockServerConfig::new(fixture);
+        cfg.drop_fragment_start_every = Some(3);
+        let server = MockRtspServer::start(cfg).await.unwrap();
+        let mut s = RtspSession::connect(&target(&server), &opts(), 1)
+            .await
+            .unwrap();
+        let (mut damaged, mut keys) = (0, 0);
+        for expected_seq in 0..40 {
+            let f = timeout(Duration::from_secs(5), s.next_frame())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(f.seq, expected_seq);
+            damaged += usize::from(f.loss > 0);
+            keys += usize::from(f.is_key);
+        }
+        let stats = server.stats();
+        assert!(ServerStats::get(&stats.dropped_fragment_starts) > 5);
+        assert!(damaged > 0, "skipped packets are counted as lost");
+        assert!(keys > 0);
+        assert_eq!(ServerStats::get(&stats.connections), 1, "no reconnection");
+    }
+}
+
+/// The same without RTP marker bits: Retina ends a frame on the next
+/// timestamp, so a refused packet can leave a frame pending, on which it
+/// panics afterwards. The session must fail (and be started again by the
+/// supervisor), not the task.
+#[tokio::test]
+async fn retina_failures_end_the_session_only() {
+    let mut cfg = MockServerConfig::new(Fixture::h264());
+    cfg.drop_fragment_start_every = Some(3);
+    cfg.marker = false;
+    let server = MockRtspServer::start(cfg).await.unwrap();
+    let mut s = RtspSession::connect(&target(&server), &opts(), 1)
+        .await
+        .unwrap();
+    let mut frames = 0;
+    let outcome = loop {
+        match timeout(Duration::from_secs(5), s.next_frame())
+            .await
+            .unwrap()
+        {
+            Ok(_) if frames < 60 => frames += 1,
+            Ok(_) => break None,
+            Err(e) => break Some(e),
+        }
+    };
+    if let Some(e) = outcome {
+        assert!(
+            matches!(e, rustnvr_stream::StreamError::ClientFailure(_)),
+            "{e}"
+        );
+    }
+}

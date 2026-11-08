@@ -47,6 +47,8 @@ RUN groupadd --gid 1000 rustnvr \
 COPY --from=build /usr/local/bin/rustnvr /usr/local/bin/rustnvr
 COPY --from=web /src/web/dist /usr/share/rustnvr/web
 COPY docker/config.toml /usr/share/rustnvr/config.toml
+# Licences: RustNVR, and libopus linked into the program.
+COPY LICENSE-MIT LICENSE-APACHE LICENSE-libopus /usr/share/doc/rustnvr/
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/rustnvr-entrypoint
 
 USER rustnvr

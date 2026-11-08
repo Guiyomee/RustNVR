@@ -30,6 +30,11 @@ interface Form {
   interval: string
   timeout: string
   keepPictures: boolean
+  /** A higher confidence at night. */
+  night: boolean
+  nightScore: number
+  nightFrom: string
+  nightTo: string
 }
 
 function toForm(s: Settings): Form {
@@ -45,6 +50,10 @@ function toForm(s: Settings): Form {
     interval: String(s.interval_seconds),
     timeout: String(s.timeout_seconds),
     keepPictures: s.keep_pictures ?? false,
+    night: Boolean(s.night),
+    nightScore: s.night?.min_score ?? Math.min(0.95, s.min_score + 0.2),
+    nightFrom: s.night?.from ?? '20:00',
+    nightTo: s.night?.to ?? '07:00',
   }
 }
 
@@ -56,6 +65,7 @@ function toSettings(f: Form): Settings {
     interval_seconds: Number(f.interval),
     timeout_seconds: Number(f.timeout),
     keep_pictures: f.keepPictures,
+    night: f.night ? { min_score: f.nightScore, from: f.nightFrom, to: f.nightTo } : null,
   }
   if (f.kind === 'onnx') return { ...base, provider: { type: 'onnx', model: f.model.trim() } }
   if (f.kind === 'http') return { ...base, provider: { type: 'deepstack_http', url: f.url.trim(), ...(f.apiKeyEnv.trim() ? { api_key_env: f.apiKeyEnv.trim() } : {}) } }
@@ -473,6 +483,30 @@ export function AiSettings() {
             <input type="range" min={0.2} max={0.95} step={0.05} className="mt-1 w-full accent-accent" value={form.minScore} disabled={disabled} onChange={(e) => set('minScore', Number(e.target.value))} />
             <span className="block text-xs text-muted">{t('Plus haut : moins de fausses détections, mais des objets ratés. 50 % convient au modèle intégré.', 'Higher: fewer false detections, but missed objects. 50 % suits the built-in model.')}</span>
           </label>
+
+          <div className="max-w-md space-y-2 text-sm">
+            <label className="flex items-start gap-2">
+              <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={form.night} disabled={disabled} onChange={(e) => set('night', e.target.checked)} />
+              <span>
+                {t('Plus exigeante la nuit', 'Stricter at night')}
+                <span className="block text-xs text-muted">{t('En infrarouge, insectes, pluie et phares trompent plus souvent l’IA : une confiance plus haute pendant ces heures (heure du serveur).', 'In infrared light, insects, rain and headlights fool the AI more often: a higher confidence during these hours (server time).')}</span>
+              </span>
+            </label>
+            {form.night && (
+              <div className="ml-6 space-y-2">
+                <label className="block">
+                  {t('Confiance minimale la nuit : ', 'Minimum confidence at night: ')}<span className="tabular text-fg">{Math.round(form.nightScore * 100)} %</span>
+                  <input type="range" min={0.2} max={0.95} step={0.05} className="mt-1 w-full accent-accent" value={form.nightScore} disabled={disabled} onChange={(e) => set('nightScore', Number(e.target.value))} />
+                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  {t('De', 'From')}
+                  <input type="time" aria-label={t('Début de la nuit', 'Start of the night')} className="h-8 rounded-md border border-line bg-bg-2 px-2" value={form.nightFrom} disabled={disabled} onChange={(e) => set('nightFrom', e.target.value)} />
+                  {t('à', 'to')}
+                  <input type="time" aria-label={t('Fin de la nuit', 'End of the night')} className="h-8 rounded-md border border-line bg-bg-2 px-2" value={form.nightTo} disabled={disabled} onChange={(e) => set('nightTo', e.target.value)} />
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="text-sm">
             <p className="mb-2 font-medium">{t('Objets à reconnaître', 'Objects to recognize')}</p>

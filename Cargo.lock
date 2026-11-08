@@ -2604,6 +2604,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1"
 
 [[package]]
+name = "opus"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33718946cc77d4032911d4efe03a66dbcbfbd2bb16c3da06aaeadcc637c32216"
+dependencies = [
+ "opusic-sys",
+]
+
+[[package]]
+name = "opusic-sys"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "986d749e9dc12035f11bf3ecc83a2a696ff7534d4143be9469a4a0faa25b9fd1"
+dependencies = [
+ "cmake",
+]
+
+[[package]]
 name = "p256"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3677,8 +3695,9 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-ai"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
+ "jiff",
  "reqwest",
  "rustnvr-core",
  "serde",
@@ -3692,7 +3711,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-api"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "argon2",
  "axum",
@@ -3731,7 +3750,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-app"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3765,7 +3784,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-core"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "bytes",
  "percent-encoding",
@@ -3779,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-discovery"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "base64 0.23.1",
  "futures",
@@ -3796,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-motion"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "bytes",
  "rustnvr-core",
@@ -3809,7 +3828,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-mqtt"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "bytes",
  "rumqttc",
@@ -3825,7 +3844,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-recorder"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "bytes",
  "jiff",
@@ -3838,7 +3857,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-remote"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "object_store",
  "russh",
@@ -3852,7 +3871,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-storage"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "rustnvr-core",
  "serde",
@@ -3866,11 +3885,12 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-stream"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "bytes",
  "futures",
  "h264-reader",
+ "opus",
  "retina",
  "rustnvr-core",
  "rustnvr-testkit",
@@ -3882,7 +3902,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-testkit"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3893,7 +3913,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-webrtc"
-version = "2026.11.3"
+version = "2026.11.4"
 dependencies = [
  "bytes",
  "rustnvr-core",

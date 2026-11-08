@@ -304,7 +304,8 @@ pub(crate) async fn prepare(
         && !o.status.success()
     {
         let detail = String::from_utf8_lossy(&o.stderr);
-        state.note_hw_failure("export", detail.lines().last().unwrap_or_default());
+        let reason = crate::hwaccel::failure_reason(&detail).unwrap_or_default();
+        state.note_hw_failure("export", &reason);
         output = export(None).await;
     }
     let _ = tokio::fs::remove_file(&list_path).await;
@@ -315,7 +316,7 @@ pub(crate) async fn prepare(
         ))),
         Ok(Ok(output)) if !output.status.success() => {
             let detail = String::from_utf8_lossy(&output.stderr);
-            let last = detail.lines().last().unwrap_or_default().to_owned();
+            let last = crate::hwaccel::failure_reason(&detail).unwrap_or_default();
             tracing::warn!(camera = %id, error = %last, "export failed");
             Some(ApiError::internal(format!("export impossible : {last}")))
         }

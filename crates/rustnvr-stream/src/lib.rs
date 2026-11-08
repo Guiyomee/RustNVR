@@ -16,6 +16,7 @@ pub mod backoff;
 pub mod device;
 pub mod error;
 pub mod fanout;
+pub mod g711;
 pub mod live;
 pub mod metrics;
 pub mod probe;

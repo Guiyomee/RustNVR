@@ -134,6 +134,9 @@ dans `config.toml` (redémarrage nécessaire) :
 [ai]
 provider = { type = "deepstack_http", url = "http://127.0.0.1:32168" }
 min_score = 0.5          # confiance minimale (0..1)
+# Plus exigeante la nuit (heure locale du serveur ; à cheval sur minuit si
+# from est plus tard que to) : insectes, pluie et phares en infrarouge.
+night = { min_score = 0.75, from = "20:00", to = "07:00" }
 labels = ["person", "car", "dog", "cat"]   # vide : toutes les étiquettes
 timeout_seconds = 10
 ```

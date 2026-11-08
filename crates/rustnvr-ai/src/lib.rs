@@ -9,7 +9,7 @@ pub mod models;
 #[cfg(feature = "onnx")]
 pub mod onnx;
 
-use rustnvr_core::config::{AiConfig, AiProviderConfig};
+use rustnvr_core::config::{AiConfig, AiNight, AiProviderConfig};
 use rustnvr_core::{DetectedObject, Secret};
 use serde::Deserialize;
 use std::future::Future;
@@ -52,6 +52,8 @@ pub trait ObjectDetector: Send + Sync {
 pub struct Analyzer {
     detector: Arc<dyn ObjectDetector>,
     min_score: f32,
+    /// A higher confidence at night, if set.
+    night: Option<AiNight>,
     labels: Vec<String>,
     timeout: Duration,
     max_pictures: u32,
@@ -84,7 +86,12 @@ impl Analyzer {
                 Arc::new(DeepStackHttp::new(
                     url,
                     api_key,
-                    config.min_score,
+                    // The lowest of the day and night thresholds: the
+                    // filters keep what the time of day needs.
+                    config
+                        .night
+                        .as_ref()
+                        .map_or(config.min_score, |n| n.min_score.min(config.min_score)),
                     config.timeout(),
                 )?)
             }
@@ -110,6 +117,7 @@ impl Analyzer {
         };
         Ok(Some(Self {
             max_pictures: config.max_pictures.max(1),
+            night: config.night.clone(),
             interval: Duration::from_secs(config.interval_seconds.max(1)),
             ..Self::new(
                 detector,
@@ -130,6 +138,7 @@ impl Analyzer {
         Self {
             detector,
             min_score,
+            night: None,
             labels,
             timeout,
             max_pictures: 1,
@@ -167,9 +176,27 @@ impl Analyzer {
         Ok(found)
     }
 
-    /// Whether `o` passes the confidence and label filters.
+    /// The confidence needed now: the night one between its hours (local
+    /// time of the server).
+    pub fn min_score_now(&self) -> f32 {
+        self.min_score_at(local_minute())
+    }
+
+    fn min_score_at(&self, minute: u16) -> f32 {
+        match &self.night {
+            Some(n) if n.contains(minute) => n.min_score,
+            _ => self.min_score,
+        }
+    }
+
+    /// Whether `o` passes the confidence (of this time of day) and label
+    /// filters.
     pub fn keeps(&self, o: &DetectedObject) -> bool {
-        o.score >= self.min_score
+        self.keeps_at(o, local_minute())
+    }
+
+    fn keeps_at(&self, o: &DetectedObject, minute: u16) -> bool {
+        o.score >= self.min_score_at(minute)
             && (self.labels.is_empty() || self.labels.iter().any(|l| l == &o.label))
     }
 
@@ -178,6 +205,12 @@ impl Analyzer {
         kept.sort_by(|a, b| b.score.total_cmp(&a.score));
         kept
     }
+}
+
+/// Minute of the day now (0..1440), in the local time of the server.
+fn local_minute() -> u16 {
+    let now = jiff::Zoned::now();
+    u16::try_from(i32::from(now.hour()) * 60 + i32::from(now.minute())).unwrap_or(0)
 }
 
 /// Client of the DeepStack / CodeProject.AI Server object detection API:
@@ -407,6 +440,61 @@ mod tests {
         j
     }
 
+    struct Nothing;
+    impl ObjectDetector for Nothing {
+        fn name(&self) -> &str {
+            "nothing"
+        }
+        fn detect<'a>(
+            &'a self,
+            _jpeg: &'a [u8],
+        ) -> BoxFuture<'a, Result<Vec<DetectedObject>, AiError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    #[test]
+    fn a_higher_confidence_is_needed_at_night() {
+        let mut analyzer = Analyzer::new(
+            Arc::new(Nothing),
+            0.5,
+            vec!["person".into()],
+            Duration::from_secs(5),
+        );
+        analyzer.night = Some(AiNight {
+            min_score: 0.8,
+            from: "20:00".into(),
+            to: "07:00".into(),
+        });
+        let person = |score| DetectedObject {
+            label: "person".into(),
+            score,
+            bbox: None,
+            zone: None,
+        };
+        let at = |h: u16, m: u16| h * 60 + m;
+        // Day: 0.6 is enough; night (across midnight): it is not.
+        assert!(analyzer.keeps_at(&person(0.6), at(12, 0)));
+        assert!(analyzer.keeps_at(&person(0.6), at(19, 59)));
+        assert!(!analyzer.keeps_at(&person(0.6), at(20, 0)));
+        assert!(!analyzer.keeps_at(&person(0.6), at(3, 0)));
+        assert!(analyzer.keeps_at(&person(0.85), at(3, 0)));
+        assert!(analyzer.keeps_at(&person(0.6), at(7, 0)));
+        assert_eq!(analyzer.min_score_at(at(23, 30)), 0.8);
+        // A night within the day (a dark garage, 13:00-15:00).
+        analyzer.night = Some(AiNight {
+            min_score: 0.9,
+            from: "13:00".into(),
+            to: "15:00".into(),
+        });
+        assert_eq!(analyzer.min_score_at(at(14, 0)), 0.9);
+        assert_eq!(analyzer.min_score_at(at(15, 0)), 0.5);
+        // Without a night: the day threshold all the time.
+        analyzer.night = None;
+        assert_eq!(analyzer.min_score_at(at(2, 0)), 0.5);
+        assert!(local_minute() < 1440);
+    }
+
     #[test]
     fn reads_jpeg_size() {
         assert_eq!(jpeg_size(&jpeg()), Some((320, 240)));
@@ -481,6 +569,7 @@ mod tests {
             max_pictures: 4,
             interval_seconds: 2,
             keep_pictures: false,
+            night: None,
         };
         let analyzer = Analyzer::from_config(&config, |_| Some("s3cret".into()))
             .expect("config")

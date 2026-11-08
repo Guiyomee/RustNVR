@@ -52,13 +52,14 @@ pub struct VideoParams {
 /// Decoder configuration of an audio stream (AAC only for now).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioParams {
-    /// RFC 6381 codec string, e.g. `mp4a.40.2`.
+    /// RFC 6381 codec string, e.g. `mp4a.40.2`, `opus`.
     pub rfc6381_codec: String,
     /// Timestamp clock rate in Hz (the sample rate for AAC).
     pub clock_rate: u32,
     /// Number of channels.
     pub channels: u16,
-    /// Complete ISO BMFF `AudioSampleEntry` box (`mp4a`, including `esds`).
+    /// Complete ISO BMFF `AudioSampleEntry` box (`mp4a` with `esds`, or
+    /// `Opus` with `dOps`).
     pub sample_entry: Bytes,
 }
 

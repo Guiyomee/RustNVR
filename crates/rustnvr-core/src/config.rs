@@ -1124,6 +1124,52 @@ pub struct AiConfig {
     /// destination (`.captures`), to replay the recognition on them later.
     /// Deleted with the recordings (`retention_days`).
     pub keep_pictures: bool,
+    /// A higher confidence at night (insects, headlights, rain in the
+    /// infrared light fool the models more often).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub night: Option<AiNight>,
+}
+
+/// The night of the recognition: from `from` to `to` (local time of the
+/// server, `HH:MM`, across midnight when `from` is later), objects need
+/// `min_score`.
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiNight {
+    /// Confidence needed at night (0..1).
+    pub min_score: f32,
+    /// Start of the night.
+    #[serde(default = "default_night_from")]
+    pub from: String,
+    /// End of the night.
+    #[serde(default = "default_night_to")]
+    pub to: String,
+}
+
+fn default_night_from() -> String {
+    "20:00".to_owned()
+}
+
+fn default_night_to() -> String {
+    "07:00".to_owned()
+}
+
+/// Minutes since midnight of `HH:MM`.
+pub fn minute_of_day(hhmm: &str) -> Option<u16> {
+    let (h, m) = hhmm.trim().split_once(':')?;
+    let (h, m): (u16, u16) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60 && hhmm.trim().len() == 5).then_some(h * 60 + m)
+}
+
+impl AiNight {
+    /// Whether minute `now` of the day (0..1440) is in the night.
+    pub fn contains(&self, now: u16) -> bool {
+        match (minute_of_day(&self.from), minute_of_day(&self.to)) {
+            (Some(from), Some(to)) if from <= to => (from..to).contains(&now),
+            (Some(from), Some(to)) => now >= from || now < to,
+            _ => false,
+        }
+    }
 }
 
 impl Default for AiConfig {
@@ -1136,6 +1182,7 @@ impl Default for AiConfig {
             max_pictures: 5,
             interval_seconds: 3,
             keep_pictures: false,
+            night: None,
         }
     }
 }
@@ -1172,6 +1219,19 @@ impl AiConfig {
         let mut p = Vec::new();
         if !(0.0..=1.0).contains(&self.min_score) {
             p.push("ai.min_score must be between 0 and 1".to_owned());
+        }
+        if let Some(night) = &self.night {
+            if !(0.0..=1.0).contains(&night.min_score) {
+                p.push("ai.night.min_score must be between 0 and 1".to_owned());
+            }
+            for (name, value) in [("from", &night.from), ("to", &night.to)] {
+                if minute_of_day(value).is_none() {
+                    p.push(format!("ai.night.{name} must be a time like 20:00"));
+                }
+            }
+            if night.from == night.to {
+                p.push("ai.night: from and to must differ".to_owned());
+            }
         }
         if !(1..=120).contains(&self.timeout_seconds) {
             p.push("ai.timeout_seconds must be between 1 and 120".to_owned());
@@ -2271,6 +2331,35 @@ main = { url = \"rtsp://x/b\" }
         assert!(msg.contains("ai.min_score"), "{msg}");
         assert!(msg.contains("\"K\" is not set"), "{msg}");
         assert!(!msg.contains("SECRET"), "{msg}");
+    }
+
+    #[test]
+    fn night_threshold_of_the_recognition() {
+        let ok = Config::from_toml_with_env(
+            "[ai]\nmin_score = 0.5\nnight = { min_score = 0.8 }\n",
+            |_| None,
+        )
+        .expect("valid");
+        let night = ok.ai.night.expect("night");
+        assert_eq!((night.from.as_str(), night.to.as_str()), ("20:00", "07:00"));
+        assert!(night.contains(23 * 60) && night.contains(6 * 60 + 59));
+        assert!(!night.contains(7 * 60) && !night.contains(12 * 60));
+        assert_eq!(minute_of_day("06:05"), Some(365));
+        assert_eq!(minute_of_day("6:05"), None);
+        assert_eq!(minute_of_day("24:00"), None);
+        let err = Config::from_toml_with_env(
+            "[ai]\nnight = { min_score = 1.5, from = \"25:00\", to = \"7h\" }\n",
+            |_| None,
+        )
+        .expect_err("invalid");
+        let msg = err.to_string();
+        for expected in [
+            "ai.night.min_score must be between 0 and 1",
+            "ai.night.from must be a time",
+            "ai.night.to must be a time",
+        ] {
+            assert!(msg.contains(expected), "{expected}: {msg}");
+        }
     }
 
     #[test]

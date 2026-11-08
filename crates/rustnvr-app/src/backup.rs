@@ -163,7 +163,7 @@ pub fn collect(
     Ok(Backup {
         format: 1,
         created_ms: now_ms,
-        rustnvr: env!("CARGO_PKG_VERSION").to_owned(),
+        rustnvr: rustnvr_core::release_version().to_owned(),
         files,
         motion,
     })

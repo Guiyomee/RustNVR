@@ -362,7 +362,7 @@ const GENERIC_FAILURES: &[&str] = &[
 /// Why a failed FFmpeg run failed, from its error output: the first line that
 /// says why ("Driver does not support any RC mode…"), and the last one when
 /// it differs (the final summary).
-fn failure_reason(stderr: &str) -> Option<String> {
+pub(crate) fn failure_reason(stderr: &str) -> Option<String> {
     let lines: Vec<&str> = stderr
         .lines()
         .map(str::trim)

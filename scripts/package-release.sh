@@ -25,7 +25,7 @@ DIR=$STAGE/$NAME
 mkdir -p "$DIR/bin" "$DIR/share"
 install -m 0755 "$BIN" "$DIR/bin/rustnvr"
 cp -r web/dist "$DIR/share/web"
-install -m 0644 packaging/systemd/rustnvr.service config.example.toml LICENSE-MIT LICENSE-APACHE "$DIR/"
+install -m 0644 packaging/systemd/rustnvr.service config.example.toml LICENSE-MIT LICENSE-APACHE LICENSE-libopus "$DIR/"
 install -m 0755 packaging/install.sh "$DIR/install.sh"
 
 mkdir -p "$OUT"

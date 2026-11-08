@@ -209,6 +209,9 @@ fn ffmpeg_args(s: &LiveSettings) -> Vec<String> {
     .collect()
 }
 
+/// FFmpeg error lines kept for the failure message.
+const KEPT_ERROR_LINES: usize = 20;
+
 async fn run_ffmpeg(
     source: &LiveTap,
     out: &LiveTap,
@@ -239,18 +242,28 @@ async fn run_ffmpeg(
         return Err("transcode: FFmpeg pipes unavailable".to_owned());
     };
 
-    // Keep FFmpeg's last error line for the failure message.
-    let last_error = Arc::new(Mutex::new(String::new()));
-    let stderr_lines = last_error.clone();
+    // Keep FFmpeg's last error lines: the cause is often before the final
+    // summary (« Nothing was written into output file… »).
+    let last_errors = Arc::new(Mutex::new(VecDeque::<String>::new()));
+    let stderr_lines = last_errors.clone();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             tracing::debug!(target: "ffmpeg", "{line}");
-            *stderr_lines.lock().unwrap_or_else(|e| e.into_inner()) = line;
+            let mut kept = stderr_lines.lock().unwrap_or_else(|e| e.into_inner());
+            if kept.len() >= KEPT_ERROR_LINES {
+                kept.pop_front();
+            }
+            kept.push_back(line);
         }
     });
     let failed = |what: &str| {
-        let detail = last_error.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let kept = last_errors.lock().unwrap_or_else(|e| e.into_inner());
+        let text = kept.iter().map(String::as_str).collect::<Vec<_>>().join(
+            "
+",
+        );
+        let detail = crate::hwaccel::failure_reason(&text).unwrap_or_default();
         format!(
             "transcode: FFmpeg {what}{}{detail}",
             if detail.is_empty() { "" } else { ": " }

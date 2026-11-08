@@ -1,8 +1,9 @@
 //! One RTSP session, from DESCRIBE to the last frame.
 
 use crate::error::StreamError;
+use crate::g711::{G711ToOpus, Law};
 use bytes::Bytes;
-use futures::StreamExt as _;
+use futures::{FutureExt as _, StreamExt as _};
 use retina::client::{
     Demuxed, Described, InitialSequenceNumberPolicy, InitialTimestampPolicy, PlayOptions, Session,
     SessionGroup, SetupOptions, Transport,
@@ -28,7 +29,8 @@ pub struct SessionOptions {
     pub stall_timeout: Duration,
     /// `User-Agent` header.
     pub user_agent: String,
-    /// Also receive the camera's audio stream, if it is AAC.
+    /// Also receive the camera's audio stream: AAC as is, G.711 converted
+    /// to Opus.
     pub audio: bool,
 }
 
@@ -104,12 +106,18 @@ pub(crate) fn select_video_stream(session: &Session<Described>) -> Result<usize,
         })
 }
 
-/// Index of the first AAC audio stream (the only audio codec recorded).
+/// Index of the audio stream to record: AAC (kept as is) first, else G.711
+/// (converted to Opus).
 pub(crate) fn select_audio_stream(session: &Session<Described>) -> Option<usize> {
-    session
-        .streams()
+    let streams = session.streams();
+    streams
         .iter()
         .position(|s| s.media() == "audio" && s.encoding_name() == "mpeg4-generic")
+        .or_else(|| {
+            streams.iter().position(|s| {
+                s.media() == "audio" && Law::from_encoding(s.encoding_name()).is_some()
+            })
+        })
 }
 
 /// Most audio frames kept while waiting for the next video frame (≈ 16 s of
@@ -128,12 +136,22 @@ pub struct RtspSession {
     /// Audio stream, when set up and its parameters are usable.
     audio_index: Option<usize>,
     audio_params: Option<Arc<AudioParams>>,
+    /// Clock of the camera's audio timestamps (differs from
+    /// `audio_params.clock_rate` when the sound is converted).
+    audio_input_rate: u32,
+    /// G.711 sound converted to Opus.
+    audio_converter: Option<G711ToOpus>,
     /// Audio frames received since the last video frame.
     pending_audio: Vec<AudioSample>,
     /// First video frame of the session: timestamp and arrival.
     first_video: Option<(i64, Instant)>,
     /// Subtracted from audio timestamps to put them on the video timeline.
     audio_offset: Option<i64>,
+    /// Malformed video packets skipped since the start of the session.
+    malformed: u64,
+    /// Malformed packets skipped since the last video frame, counted as lost
+    /// on the next one.
+    malformed_since_frame: u16,
 }
 
 impl RtspSession {
@@ -227,15 +245,44 @@ impl RtspSession {
             last_frame_at: Instant::now(),
             audio_index,
             audio_params: None,
+            audio_input_rate: 0,
+            audio_converter: None,
             pending_audio: Vec::new(),
             first_video: None,
             audio_offset: None,
+            malformed: 0,
+            malformed_since_frame: 0,
         };
         if let Some(a) = audio_index {
-            match audio_params(&s.demuxed, a) {
+            let stream = &s.demuxed.streams()[a];
+            let input_rate = stream.clock_rate_hz();
+            let converted = Law::from_encoding(stream.encoding_name()).map(|law| {
+                let channels = stream.channels().map_or(1, |c| c.get());
+                G711ToOpus::new(law, input_rate, channels)
+            });
+            let params = match converted {
+                Some(Ok(c)) => {
+                    tracing::info!(
+                        from = c.law().name(),
+                        rate = input_rate,
+                        "camera sound converted to Opus"
+                    );
+                    let p = c.params().clone();
+                    s.audio_converter = Some(c);
+                    Ok(p)
+                }
+                Some(Err(e)) => Err(e),
+                None => audio_params(&s.demuxed, a).map(Arc::new),
+            };
+            match params {
                 Ok(p) => {
                     tracing::debug!(codec = %p.rfc6381_codec, rate = p.clock_rate, channels = p.channels, "audio parameters");
-                    s.audio_params = Some(Arc::new(p));
+                    s.audio_input_rate = if s.audio_converter.is_some() {
+                        input_rate
+                    } else {
+                        p.clock_rate
+                    };
+                    s.audio_params = Some(p);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "unusable audio stream, recording without sound");
@@ -288,8 +335,8 @@ impl RtspSession {
         }))
     }
 
-    /// Timestamp of an audio frame on the video timeline (in audio clock
-    /// units), or `None` before the first video frame.
+    /// Timestamp of an audio frame on the video timeline (in the camera's
+    /// audio clock units), or `None` before the first video frame.
     ///
     /// Cameras do not reliably relate their audio and video RTP clocks (one
     /// announced an audio `rtptime` five hours away from the video one), so
@@ -301,7 +348,8 @@ impl RtspSession {
         }
         let (video_pts, video_at) = self.first_video?;
         let video_rate = i128::from(self.params.as_ref()?.clock_rate.max(1));
-        let audio_rate = i128::from(self.audio_params.as_ref()?.clock_rate);
+        self.audio_params.as_ref()?;
+        let audio_rate = i128::from(self.audio_input_rate.max(1));
         let elapsed = i128::try_from(video_at.elapsed().as_nanos()).ok()?;
         let video_now = i128::from(video_pts) + elapsed * video_rate / 1_000_000_000;
         let audio_now = i64::try_from(video_now * audio_rate / video_rate).ok()?;
@@ -317,11 +365,39 @@ impl RtspSession {
     pub async fn next_frame(&mut self) -> Result<VideoFrame, StreamError> {
         loop {
             let deadline = self.last_frame_at + self.stall_timeout;
-            let item = tokio::time::timeout_at(deadline, self.demuxed.next())
+            // Retina panics when a packet it refused leaves a picture
+            // pending (« push with data already pending »): skipping
+            // malformed packets must not end the camera's task.
+            let next = std::panic::AssertUnwindSafe(self.demuxed.next()).catch_unwind();
+            let item = tokio::time::timeout_at(deadline, next)
                 .await
-                .map_err(|_| StreamError::Stalled(self.stall_timeout))?;
+                .map_err(|_| StreamError::Stalled(self.stall_timeout))?
+                .map_err(|panic| {
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or("panic");
+                    StreamError::ClientFailure(message.to_owned())
+                })?;
             let frame = match item {
                 None => return Err(StreamError::Ended),
+                Some(Err(error)) if is_malformed_packet(&error) => {
+                    // Retina refuses the packet, drops the picture being
+                    // assembled and keeps reading: like a lost packet
+                    // (GStreamer and FFmpeg skip these too). A camera that
+                    // only sends such packets ends on the stall timeout.
+                    self.malformed += 1;
+                    self.malformed_since_frame = self.malformed_since_frame.saturating_add(1);
+                    if self.malformed == 1 || self.malformed.is_power_of_two() {
+                        tracing::warn!(
+                            count = self.malformed,
+                            error = %first_line(&error),
+                            "malformed video packet from the camera skipped (picture damaged until the next key frame)"
+                        );
+                    }
+                    continue;
+                }
                 Some(Err(error)) => {
                     return Err(StreamError::Rtsp {
                         stage: "stream",
@@ -333,14 +409,18 @@ impl RtspSession {
                     let Some(pts) = self.audio_pts(a.timestamp().elapsed()) else {
                         continue;
                     };
-                    if self.pending_audio.len() >= MAX_PENDING_AUDIO {
-                        self.pending_audio.remove(0);
+                    match &mut self.audio_converter {
+                        Some(c) => c.push(pts, a.data(), &mut self.pending_audio),
+                        None => self.pending_audio.push(AudioSample {
+                            pts,
+                            duration: a.frame_length().get(),
+                            data: Bytes::copy_from_slice(a.data()),
+                        }),
                     }
-                    self.pending_audio.push(AudioSample {
-                        pts,
-                        duration: a.frame_length().get(),
-                        data: Bytes::copy_from_slice(a.data()),
-                    });
+                    if self.pending_audio.len() > MAX_PENDING_AUDIO {
+                        let extra = self.pending_audio.len() - MAX_PENDING_AUDIO;
+                        self.pending_audio.drain(..extra);
+                    }
                     continue;
                 }
                 Some(Ok(_)) => continue,
@@ -375,7 +455,9 @@ impl RtspSession {
                 pts: frame.timestamp().elapsed(),
                 is_key,
                 wall_time: SystemTime::now(),
-                loss: frame.loss(),
+                loss: frame
+                    .loss()
+                    .saturating_add(std::mem::take(&mut self.malformed_since_frame)),
                 data: Bytes::from(frame.into_data()),
                 audio: self.audio_params.as_ref().map(|p| {
                     Arc::new(FrameAudio {
@@ -386,6 +468,47 @@ impl RtspSession {
             });
         }
     }
+}
+
+/// First line of a Retina error (the description, before its context).
+fn first_line(error: &retina::Error) -> String {
+    error
+        .to_string()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Retina's refusals of one badly packetized H.264 / H.265 RTP packet
+/// (`codec/h264.rs`, `codec/h265.rs`, Retina 0.4). Retina discards the
+/// picture being assembled and its stream stays usable: some cameras send
+/// such packets now and then (a Reolink E1 sends fragments whose first
+/// packet is missing without a gap in the sequence numbers). Other errors
+/// (connection, SSRC change, reordering over TCP, timestamps) end the
+/// session.
+const MALFORMED_PACKET: &[&str] = &[
+    "FU-A has start bit unset while no frag in progress",
+    "FU-A with start bit while frag in progress",
+    "FU-A pkt with MARK && !END",
+    "FU-A len ",
+    "FU has start bit unset while no frag in progress",
+    "FU with start bit while frag in progress",
+    "FU pkt with MARK && !END",
+    "FU has MARK and no END",
+    "FU len ",
+    "Non-fragmented NAL ",
+    "STAP-A NAL while FU-A fragment in progress",
+    "zero length in STAP-A",
+    "Empty NAL",
+    "Short NAL",
+    "forbidden sequence 00 00 0",
+];
+
+/// True if `error` is one packet that Retina could not depacketize.
+fn is_malformed_packet(error: &retina::Error) -> bool {
+    let line = first_line(error);
+    MALFORMED_PACKET.iter().any(|m| line.starts_with(m))
 }
 
 /// Parameters of the AAC stream `index`, from the SDP.

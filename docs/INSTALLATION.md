@@ -182,8 +182,8 @@ explicite ; le direct standard fonctionne toujours.
 
 - **NAS ou second disque** : montez le partage (`/etc/fstab`, options `soft`
   pour NFS afin qu'une panne du NAS renvoie des erreurs au lieu de bloquer),
-  ajoutez le point de montage à `ReadWritePaths=` du service
-  (`sudo systemctl edit rustnvr`), puis déclarez-le dans **Stockage** ou dans
+  donnez-en l'accès au compte `rustnvr` (options `uid=`/`gid=` d'un partage
+  SMB, ou propriétaire du dossier), puis déclarez-le dans **Stockage** ou dans
   `[[storage.destinations]]` avec `require_mount = true` : RustNVR n'écrit
   jamais dans le dossier vide d'un partage non monté et se rabat sur le disque
   local pendant la panne.
@@ -212,6 +212,20 @@ Pour être prévenu des nouvelles versions : À propos → Mises à jour, adress
 dépôt (voir [DOCKER.md](DOCKER.md#être-prévenu-des-nouvelles-versions), même
 fonctionnement hors Docker ; la procédure affichée est celle ci-dessus).
 
+**Mot de passe perdu** : un nouveau mot de passe pour le compte `admin` (créé
+s'il n'existe plus, rendu administrateur, ses sessions fermées), tiré au
+hasard et affiché ; RustNVR peut rester en marche :
+
+```sh
+sudo runuser -u rustnvr -- rustnvr reset-password -c /etc/rustnvr/config.toml
+# Proxmox, depuis l'hôte :
+pct exec <ctid> -- runuser -u rustnvr -- rustnvr reset-password -c /etc/rustnvr/config.toml
+```
+
+`--user nom` pour un autre compte, `--password-env VAR` pour choisir le mot
+de passe (lu dans la variable `VAR`). Lancée en root sur les données du
+compte `rustnvr`, la commande refuse et rappelle le `runuser`.
+
 ## 11. Sauvegarder
 
 À sauvegarder : `/etc/rustnvr` (configuration et réglages de l'interface,
@@ -234,10 +248,13 @@ sudo userdel rustnvr
 ## Proxmox VE
 
 > État : **installé sur un vrai Proxmox VE** (LXC Debian 13 non privilégié,
-> release prise sur un serveur Gitea : conteneur créé, FFmpeg, archive
-> vérifiée, service démarré). Points de montage (`--recordings`) et carte
-> graphique (`--gpu`) vérifiés seulement contre des commandes Proxmox
-> simulées : retours bienvenus.
+> releases GitHub et Gitea : conteneur créé, FFmpeg, archive vérifiée,
+> service démarré). `--recordings` et `--gpu` vérifiés sur Proxmox VE 9 par
+> un utilisateur (issue #1 : `mp0`, `renderD128`, VAAPI i965). L'assistant
+> complet, les réglages enregistrés et le partage SMB (2026.11.04) ne sont
+> vérifiés que contre des commandes Proxmox, `mount` et `whiptail` simulées
+> (ce que le script envoie à `pct`, `/etc/fstab`, les fichiers écrits) : pas
+> encore sur un vrai Proxmox.
 
 ### Conteneur LXC (le plus léger)
 
@@ -248,20 +265,89 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Guiyomee/RustNVR/main/pa
 ```
 
 [`rustnvr-lxc.sh`](../packaging/proxmox/rustnvr-lxc.sh) crée un conteneur
-Debian **non privilégié** (13, sinon 12), avec démarrage automatique, y
-installe FFmpeg et la dernière version de RustNVR (avec `install.sh`, comme
-ci-dessus), puis affiche l'adresse, le compte et le mot de passe. Réglages :
+Debian (13, sinon 12), avec démarrage automatique, y installe FFmpeg et la
+dernière version de RustNVR (avec `install.sh`, comme ci-dessus), puis
+affiche l'adresse, le compte et le mot de passe.
+
+**Le menu.** Lancé dans un terminal sans option, le script propose :
+
+- **Paramètres par défaut** : conteneur non privilégié, 2 cœurs, 2 Go, 8 Go
+  de disque, DHCP ; un résumé à confirmer avant la création ;
+- **Paramètres avancés** : tous les réglages des Proxmox VE Helper-Scripts,
+  un écran par réglage, « Retour » revient à l'écran précédent :
+  type (non privilégié / privilégié), mot de passe root, numéro, nom, disque,
+  cœurs, mémoire, swap, stockage du conteneur et des modèles, Debian 12 ou 13,
+  pont ou vnet SDN, IPv4 (DHCP ou fixe, passerelle), IPv6 (aucune, SLAAC,
+  DHCPv6, fixe), MTU, domaine de recherche, serveurs DNS, adresse MAC, VLAN,
+  étiquettes, SSH (clés de l'hôte, collée ou fichier ; accès root), fonctions
+  (nesting, keyctl, FUSE, TUN/TAP, mknod), carte graphique, montages dans le
+  conteneur, cache apt, proxy HTTP, autorités de l'hôte, fuseau horaire,
+  protection, mode de la console, script de fin sur l'hôte ; puis ceux de
+  RustNVR : port, mot de passe admin, version, **lieu des enregistrements**
+  (disque du conteneur, dossier de l'hôte ou **partage SMB**), détails de
+  l'installation. Le résumé final permet encore de revenir en arrière ; les
+  réglages peuvent ensuite être enregistrés ;
+- **Réglages enregistrés pour RustNVR** et **Mes réglages par défaut** (ceux
+  des Helper-Scripts) quand ces fichiers existent :
+  `/usr/local/community-scripts/defaults/rustnvr.vars` et
+  `/usr/local/community-scripts/default.vars`. Le numéro, les adresses fixes,
+  l'adresse MAC et les mots de passe n'y sont jamais écrits.
+
+Sans mot de passe root, root est connecté automatiquement à la console web
+de Proxmox et à `pct console` (comme les Helper-Scripts).
+
+**Sans menu.** Avec des options, rien n'est demandé (les options absentes
+gardent leur valeur par défaut). Avec la commande d'une ligne, elles se
+placent après `--`. Les réglages peuvent aussi venir de l'environnement, sous
+les noms des Helper-Scripts (`var_cpu`, `var_ram`, `var_disk`, `var_brg`,
+`var_net`, `var_gateway`, `var_timezone`…) :
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Guiyomee/RustNVR/main/packaging/proxmox/rustnvr-lxc.sh)" -- --help
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Guiyomee/RustNVR/main/packaging/proxmox/rustnvr-lxc.sh)" -- --ctid 120 --ip 192.168.1.50/24 --gw 192.168.1.1 --gpu
+var_cpu=4 var_ram=4096 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Guiyomee/RustNVR/main/packaging/proxmox/rustnvr-lxc.sh)" -- -y
+```
 
 | Option | Défaut | |
 |---|---|---|
-| `--ctid N` | le prochain libre | numéro du conteneur |
-| `--hostname`, `--cores`, `--memory`, `--disk` | `rustnvr`, 2, 2048 Mo, 8 Go | taille ; 2 Go laissent de la place à la reconnaissance d'objets |
-| `--storage ID` | le premier stockage de conteneurs actif | disque du conteneur |
-| `--bridge`, `--ip`, `--gw` | `vmbr0`, `dhcp` | réseau (`--ip 192.168.1.50/24 --gw 192.168.1.1`) |
-| `--debian 12\|13`, `--version vX`, `--port N`, `--password P` | 13, la dernière, 8080, tiré au hasard | |
-| `--recordings DIR` | — | dossier de l'hôte pour les enregistrements |
+| `--ctid N`, `--hostname NOM` | le prochain libre, `rustnvr` | |
+| `--cores`, `--memory`, `--swap`, `--disk` | 2, 2048 Mo, 512 Mo, 8 Go | 2 Go de mémoire laissent de la place à la reconnaissance d'objets |
+| `--storage ID`, `--template-storage ID` | le premier stockage actif, `local` | disque du conteneur, modèle Debian |
+| `--debian 12\|13`, `--privileged` | 13, non privilégié | privilégié : déconseillé, inutile à RustNVR |
+| `--root-password P`, `--ssh-key FICHIER`, `--ssh` | aucun | accès root ; `--ssh` installe et démarre le serveur SSH |
+| `--bridge`, `--ip`, `--gw` | `vmbr0`, `dhcp` | pont ou vnet SDN ; `--ip 192.168.1.50/24 --gw 192.168.1.1` |
+| `--ipv6 none\|auto\|dhcp\|ADR/MASQUE`, `--gw6` | `none` | |
+| `--mtu`, `--mac`, `--vlan`, `--dns "IP IP"`, `--searchdomain` | ceux de Proxmox et de l'hôte | |
+| `--tags`, `--timezone`, `--protection`, `--console tty\|console\|shell` | `rustnvr`, celui de l'hôte, non, `tty` | le fuseau sert aux heures de nuit de la reconnaissance d'objets |
+| `--no-nesting`, `--keyctl`, `--fuse`, `--tun`, `--mknod`, `--mount-fs nfs,cifs` | nesting seul | RustNVR n'a besoin que de nesting |
+| `--apt-cacher IP`, `--proxy URL`, `--no-proxy LISTE`, `--host-ca` | — | téléchargements de l'installation |
+| `--post-install FICHIER`, `--verbose` | — | script de l'hôte lancé à la fin (`APP`, `CTID`, `IP`, `HN`, `STORAGE`, `BRG`) |
+| `--port N`, `--password P`, `--version vX` | 8080, tiré au hasard, la dernière | `--password` : le compte admin de RustNVR |
 | `--gpu`, `--gpu-device PATH` | — | carte graphique pour les conversions H.264 |
+| `--recordings DIR` | — | dossier de l'hôte pour les enregistrements |
+| `--smb '\\IP\partage\dossier'`, `--smb-user`, `--smb-domain` | — | partage SMB pour les enregistrements (mot de passe : `RUSTNVR_SMB_PASSWORD` ou `--smb-password`) |
 | `--archive FICHIER` | — | une archive de l'hôte (son `.sha256` à côté) au lieu du téléchargement |
+| `-y` | — | aucun menu, même dans un terminal |
+
+**Partage SMB.** Un conteneur non privilégié ne peut pas monter un partage
+lui-même : le script le monte **sur l'hôte**. Il essaie d'abord le partage en
+lecture seule (adresse, compte, mot de passe) avant de créer quoi que ce
+soit. Ensuite il :
+
+- écrit les identifiants dans `/etc/rustnvr-lxc/smb-<ctid>.cred` (lisibles
+  par root seulement) ;
+- ajoute une ligne à `/etc/fstab` : `/mnt/rustnvr-<ctid>`, au compte
+  `rustnvr` du conteneur (`uid=100999` en général), `soft,nofail` ;
+- rend `/mnt/rustnvr-<ctid>` non modifiable (`chattr +i`) tant que le partage
+  n'y est pas monté : RustNVR ne remplit jamais le disque de l'hôte à sa
+  place ;
+- donne le partage au conteneur sur `/nas` (`mp1`) et le déclare dans
+  RustNVR comme destination « nas », par défaut, « partage réseau monté
+  obligatoire » : sans le partage, l'enregistrement continue sur le disque du
+  conteneur ;
+- active `rustnvr-smb@<ctid>.timer`. Toutes les 2 minutes, il remonte le
+  partage s'il manque (un NAS qui démarre après Proxmox, par exemple une VM
+  du même hôte), puis redémarre le conteneur pour qu'il le voie.
 
 Mise à jour, depuis l'hôte : `pct exec <ctid> -- /usr/local/bin/rustnvr-update`.
 
@@ -291,15 +377,27 @@ Avec une archive, les mises à jour se font de même :
 /chemin/sur/l-hôte` l'ajoute comme point de montage `mp0` sur
 `/var/lib/rustnvr/recordings`. Dans un conteneur non privilégié, le compte N
 du conteneur est le compte 100000 + N de l'hôte : le script donne le dossier
-au compte `rustnvr` du conteneur (par exemple `100990:100990`). La base et
-les vignettes restent sur le disque du conteneur (`/var/lib/rustnvr/data`).
+au compte `rustnvr` du conteneur (en général `100999:100999`, le script
+affiche les siens). Sur un partage où root de l'hôte ne peut pas changer le
+propriétaire (NFS en `root_squash`, CIFS), le script prévient et continue :
+réglez alors le propriétaire côté serveur ou dans les options de montage. La
+base et les vignettes restent sur le disque du conteneur
+(`/var/lib/rustnvr/data`).
 
-**NAS.** Un conteneur non privilégié ne peut pas monter un partage SMB/CIFS
-lui-même : montez-le sur l'hôte (fstab), puis donnez-le avec `--recordings`
+**Sauvegardes.** Un point de montage pris sur un dossier de l'hôte (`mp0`
+de `--recordings`, `mp1`…) **n'entre pas dans les sauvegardes vzdump** du
+conteneur : seul son disque y est (configuration, base, vignettes, et les
+enregistrements quand ils sont sur ce disque). Pour la configuration seule,
+RustNVR a aussi sa sauvegarde (Paramètres → Sauvegarde).
+
+**NAS, à la main** (conteneur déjà créé, ou NFS ; à la création, `--smb` fait
+tout, voir plus haut). Un conteneur non privilégié ne peut pas monter un
+partage lui-même : montez-le sur l'hôte (fstab), puis donnez-le avec `--recordings`
 ou `pct set <ctid> -mp1 /mnt/nas/rustnvr,mp=/nas` ; déclarez ensuite `/nas`
 dans Paramètres → Stockage (« Partage réseau monté obligatoire »). Le compte du
-partage côté hôte doit correspondre (option `uid=100990,gid=100990` du
-montage CIFS, par exemple).
+partage côté hôte doit correspondre (option `uid=100999,gid=100999` du
+montage CIFS, par exemple ; `pct exec <ctid> -- id rustnvr` donne le compte,
+à augmenter de 100000).
 
 **Carte graphique (Intel Quick Sync, AMD).** `--gpu` installe les pilotes
 VAAPI et transmet `/dev/dri/renderD128` au conteneur (option `dev0` de

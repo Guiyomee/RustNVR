@@ -50,6 +50,11 @@ mod tests {
             }),
             min_score: 0.45,
             labels: vec!["person".into(), "car".into()],
+            night: Some(rustnvr_core::config::AiNight {
+                min_score: 0.8,
+                from: "21:30".into(),
+                to: "06:15".into(),
+            }),
             ..AiConfig::default()
         };
         save(&dir.path().join(MANAGED_AI_FILE), &settings).expect("save");

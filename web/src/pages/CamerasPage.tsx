@@ -130,8 +130,9 @@ function AudioToggle({ camera }: { camera: Camera }) {
 /** What the camera's sound looks like, for the recording column. */
 function audioText(c: Camera): string {
   if (!c.record_audio) return t('Son non enregistré', 'Sound not recorded')
-  if (c.audio) return t(`Son enregistré (${c.audio.startsWith('mp4a') ? 'AAC' : c.audio})`, `Sound recorded (${c.audio.startsWith('mp4a') ? 'AAC' : c.audio})`)
-  return c.status === 'online' ? t('Pas de son AAC reçu de la caméra', 'No AAC sound received from the camera') : t('Son enregistré si la caméra en envoie', 'Sound recorded if the camera sends some')
+  const kind = (a: string) => (a.startsWith('mp4a') ? 'AAC' : a.startsWith('opus') ? t('G.711 converti en Opus', 'G.711 converted to Opus') : a)
+  if (c.audio) return t(`Son enregistré (${kind(c.audio)})`, `Sound recorded (${kind(c.audio)})`)
+  return c.status === 'online' ? t('Pas de son AAC ou G.711 reçu de la caméra', 'No AAC or G.711 sound received from the camera') : t('Son enregistré si la caméra en envoie', 'Sound recorded if the camera sends some')
 }
 
 /** Starts or stops the recording of every camera managed from the interface. */

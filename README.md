@@ -6,6 +6,8 @@ Enregistreur vidéo réseau (NVR) open source en Rust, conçu pour une faible
 consommation CPU/RAM : les flux H.264/H.265 des caméras IP sont reçus en RTSP
 et enregistrés **sans décodage ni réencodage** dans des segments MP4 fragmentés.
 
+<a href='https://ko-fi.com/Q4Z62AA835' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
+
 > **État : enregistrement continu ou sur mouvement, interface Web, détection de mouvement et
 > MQTT/Home Assistant.** Direct vidéo par WebSocket/MSE, ou WebRTC (expérimental,
 > réseau local) ; enregistrement local
@@ -50,7 +52,9 @@ par des photos libres de droits ([crédits](web/public/demo/CREDITS.md)).
 - Erreurs d'écriture (disque plein) : segment sauvé jusqu'au dernier fragment
   complet, reprise différée.
 - Commandes `probe` (test de connexion), `check-config`, `recover`, `health`
-  (le serveur en marche répond-il ? Contrôle de santé de l'image Docker).
+  (le serveur en marche répond-il ? Contrôle de santé de l'image Docker),
+  `reset-password` (mot de passe perdu : nouveau mot de passe d'un compte,
+  rendu administrateur).
 - Sauvegarde et restauration de la configuration (Paramètres → Sauvegarde) :
   un fichier chiffré par une phrase secrète (caméras et leurs mots de passe,
   stockage, MQTT, IA, webhooks, zones et lignes), restauré avec un aperçu,
@@ -103,7 +107,7 @@ par des photos libres de droits ([crédits](web/public/demo/CREDITS.md)).
   (reprise automatique après une coupure, rien n'est perdu au redémarrage) ;
   clé du serveur SFTP vérifiée (empreinte fixée ou retenue à la première
   connexion).
-- Son des caméras (AAC) enregistré avec la vidéo, sans conversion, désactivable
+- Son des caméras enregistré avec la vidéo (AAC tel quel, G.711 converti en Opus), désactivable
   par caméra (interface, MQTT / Home Assistant) ; bouton son dans la relecture
   et dans le direct de la page caméra (pas dans le direct WebRTC).
 - Enregistrement au choix par caméra : en continu, ou seulement sur mouvement
@@ -125,9 +129,10 @@ par des photos libres de droits ([crédits](web/public/demo/CREDITS.md)).
 ## Construire
 
 Prérequis vérifiés : Linux x86_64 (testé sous Ubuntu 26.04 / WSL2), Rust
-stable (testé avec 1.99.1), un compilateur C (`gcc`) pour l'édition de liens.
-Aucune bibliothèque système n'est requise (pas d'OpenSSL ; l'enregistrement
-n'utilise pas FFmpeg). **FFmpeg est optionnel** : détection de mouvement, captures,
+stable (testé avec 1.99.1), un compilateur C (`gcc`) et `cmake` : libopus
+(conversion du son G.711) est compilée avec RustNVR et liée statiquement.
+Aucune bibliothèque système n'est requise à l'exécution (pas d'OpenSSL ;
+l'enregistrement n'utilise pas FFmpeg). **FFmpeg est optionnel** : détection de mouvement, captures,
 vignettes d'événements, et conversion du direct en H.264 pour les navigateurs
 qui ne décodent pas le H.265 (Firefox).
 Pour l'interface : Node.js 24 et npm (testé avec 24.19 / 11.17).
@@ -271,11 +276,17 @@ segments décodés sans erreur par `ffprobe`.
 
 ## Limites connues
 
-- Son : AAC seulement (les caméras G.711 sont enregistrées sans son) ; pas de
+- Son : AAC et G.711 (converti en Opus) ; les autres (G.726, G.722…) sont
+  enregistrés sans son. Le son Opus se lit dans les navigateurs récents (Safari
+  17 et plus) ; non vérifié en HLS sur iPhone. Pas de
   son dans le direct WebRTC.
 - Images B / horodatages non monotones : le segment est coupé (pas de
   réordonnancement).
 - `rtsps://` non supporté (limite du client RTSP).
+- Paquets vidéo mal formés (fragments sans début, comme sur une Reolink E1) :
+  ignorés, l'image reste abîmée jusqu'à l'image clé suivante. Sur une caméra
+  qui ne marque pas non plus la fin de ses images (bit RTP « marker »), le
+  client RTSP échoue au paquet suivant : la session est relancée.
 - Rétention par point de stockage et par caméra (âge, taille). L'index SQLite
   des enregistrements se reconstruit depuis les fichiers (au démarrage, puis
   toutes les 10 min) : un fichier copié à la main apparaît avec ce délai.
@@ -304,6 +315,10 @@ segments décodés sans erreur par `ffprobe`.
 ## Licence
 
 Au choix : [MIT](LICENSE-MIT) ou [Apache 2.0](LICENSE-APACHE).
+
+Le programme compilé contient libopus (Xiph.Org et autres, licence BSD à
+3 clauses : [LICENSE-libopus](LICENSE-libopus)), jointe aux archives de
+release.
 
 Sauf mention contraire, toute contribution proposée pour être incluse dans
 RustNVR est placée sous ces deux licences, sans condition supplémentaire.

@@ -156,7 +156,7 @@ export interface Camera {
   motion: MotionState
   /** The sound is recorded with the video (when the camera sends AAC). */
   record_audio: boolean
-  /** Sound received from the camera (`mp4a.40.2 16000 Hz`), while online. */
+  /** Sound received from the camera (`mp4a.40.2 16000 Hz`; `opus 48000 Hz`: G.711 converted), while online. */
   audio: string | null
   /** Privacy masks `[x1, y1, x2, y2]` (picture fractions), blacked out on the live view and playback. */
   privacy_masks?: number[][]
@@ -251,6 +251,8 @@ export interface AiSettings {
   interval_seconds: number
   /** Keep every analysed picture in the default destination, to replay the AI on them. */
   keep_pictures?: boolean
+  /** A higher confidence at night (local time of the server, `HH:MM`, across midnight when `from` is later). */
+  night?: { min_score: number; from: string; to: string } | null
 }
 
 /** GET /api/v1/ai. */

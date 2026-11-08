@@ -15,7 +15,7 @@ use std::time::Duration;
 #[derive(Parser)]
 #[command(
     name = "rustnvr",
-    version,
+    version = rustnvr_core::release_version(),
     about = "Lightweight network video recorder"
 )]
 struct Cli {
@@ -85,6 +85,21 @@ enum Command {
         /// Recordings directory.
         #[arg(long)]
         dir: PathBuf,
+    },
+    /// Sets a new password for an account of the web interface (created if
+    /// missing), makes it an administrator and closes its sessions: access
+    /// back when the password is lost. Prints the password when drawn.
+    ResetPassword {
+        /// Configuration file (for the data directory).
+        #[arg(short, long, default_value = "config.toml")]
+        config: PathBuf,
+        /// Account.
+        #[arg(long, default_value = "admin")]
+        user: String,
+        /// Environment variable holding the new password; absent: one is
+        /// drawn at random and printed.
+        #[arg(long)]
+        password_env: Option<String>,
     },
 }
 
@@ -253,7 +268,121 @@ async fn run(command: Command) -> anyhow::Result<ExitCode> {
                 ExitCode::FAILURE
             })
         }
+        Command::ResetPassword {
+            config,
+            user,
+            password_env,
+        } => reset_password(&config, &user, password_env.as_deref()).await,
     }
+}
+
+/// Minimum length of a password (as in the web interface).
+const MIN_PASSWORD: usize = 8;
+
+/// `rustnvr reset-password`.
+async fn reset_password(
+    config: &std::path::Path,
+    user: &str,
+    password_env: Option<&str>,
+) -> anyhow::Result<ExitCode> {
+    let user = user.trim();
+    anyhow::ensure!(!user.is_empty(), "the account name is empty");
+    // Only the data directory is needed: missing secrets (cameras, web
+    // password) get a stand-in, never used; the optional listen address
+    // stays absent.
+    let c = Config::load_with_env(config, |v| {
+        std::env::var(v).ok().or_else(|| {
+            (v != rustnvr_core::config::LISTEN_ENV).then(|| "unused-stand-in".to_owned())
+        })
+    })?;
+    let data_dir = c.storage.data_dir();
+    refuse_foreign_owner(&data_dir)?;
+    let (password, drawn) = match password_env {
+        Some(var) => (
+            std::env::var(var).with_context(|| format!("environment variable {var} is not set"))?,
+            false,
+        ),
+        None => (draw_password()?, true),
+    };
+    anyhow::ensure!(
+        password.chars().count() >= MIN_PASSWORD,
+        "the password must have at least {MIN_PASSWORD} characters"
+    );
+    let db = rustnvr_storage::Database::open(&data_dir)
+        .await
+        .with_context(|| format!("cannot open the database in {}", data_dir.display()))?;
+    let to_hash = password.clone();
+    let hash = tokio::task::spawn_blocking(move || rustnvr_api::auth::hash_password(&to_hash))
+        .await?
+        .map_err(anyhow::Error::msg)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let first_account = db.users().await?.is_empty();
+    let existed = db.update_user(user, Some(&hash), Some("admin")).await?;
+    if !existed {
+        db.create_user(user, &hash, "admin", now).await?;
+    }
+    db.delete_sessions_of(user).await?;
+    println!(
+        "{} {user:?}: administrator, its sessions closed.",
+        if existed {
+            "password reset for"
+        } else {
+            "account created:"
+        }
+    );
+    if drawn {
+        println!("new password: {password}");
+    }
+    if first_account {
+        println!("RustNVR had no account: restart it to require logging in.");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A password of 16 letters and digits (easy to type: no 0/O, 1/l/I).
+fn draw_password() -> anyhow::Result<String> {
+    use ring::rand::SecureRandom as _;
+    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut bytes = [0u8; 16];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("no random source"))?;
+    Ok(bytes
+        .iter()
+        .map(|b| char::from(ALPHABET[usize::from(*b) % ALPHABET.len()]))
+        .collect())
+}
+
+/// Refuses to run as root on the data of another account: the database
+/// files root would create (WAL) could no longer be opened by the service.
+fn refuse_foreign_owner(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("Uid:"))
+                    .and_then(|v| v.split_whitespace().nth(1).map(|e| e == "0"))
+            })
+            .unwrap_or(false);
+        if root
+            && let Ok(meta) = std::fs::metadata(data_dir)
+            && meta.uid() != 0
+        {
+            anyhow::bail!(
+                "{} belongs to another account (uid {}): run this command as that account, \
+                 for instance: runuser -u rustnvr -- rustnvr reset-password -c <config>",
+                data_dir.display(),
+                meta.uid()
+            );
+        }
+    }
+    let _ = data_dir;
+    Ok(())
 }
 
 /// Health check address of the server of `web`: its port on this machine

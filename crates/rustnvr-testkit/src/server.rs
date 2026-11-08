@@ -17,6 +17,11 @@ use tokio_util::sync::CancellationToken;
 
 const PAYLOAD_TYPE: u8 = 96;
 const SSRC: u32 = 0x1234_5678;
+const AUDIO_SSRC: u32 = 0x8765_4321;
+/// RTP payload type of G.711 µ-law (RFC 3551, static).
+const PCMU_PAYLOAD_TYPE: u8 = 0;
+/// G.711 samples (bytes) per audio packet: 20 ms at 8 kHz.
+const PCMU_PACKET: usize = 160;
 const SESSION_ID: &str = "4f3a2b1c";
 
 /// Behaviour of a [`MockRtspServer`]. Behaviours apply to every connection.
@@ -39,6 +44,18 @@ pub struct MockServerConfig {
     /// to imitate cameras whose announced value does not match the first
     /// RTP packet.
     pub rtp_info_seq_offset: u16,
+    /// Every this many frames, the first packet of the first fragmented NAL
+    /// (FU-A / FU with the start bit) is left out without a gap in the
+    /// sequence numbers, like cameras dropping it before numbering it
+    /// (« FU-A has start bit unset while no frag in progress »).
+    pub drop_fragment_start_every: Option<usize>,
+    /// Set the RTP marker bit on the last packet of each frame (cameras
+    /// that never set it: the receiver sees the end of a frame on the next
+    /// timestamp).
+    pub marker: bool,
+    /// Also offer a G.711 µ-law audio track (8 kHz mono, a 440 Hz tone),
+    /// sent with the video when the client sets it up.
+    pub pcmu_audio: bool,
 }
 
 impl MockServerConfig {
@@ -52,6 +69,9 @@ impl MockServerConfig {
             stall_after_frames: None,
             path: "/stream".to_owned(),
             rtp_info_seq_offset: 0,
+            drop_fragment_start_every: None,
+            marker: true,
+            pcmu_audio: false,
         }
     }
 }
@@ -67,6 +87,8 @@ pub struct ServerStats {
     pub frames_sent: AtomicU64,
     /// Requests rejected with 401.
     pub auth_failures: AtomicU64,
+    /// Fragment starts left out (`drop_fragment_start_every`).
+    pub dropped_fragment_starts: AtomicU64,
 }
 
 impl ServerStats {
@@ -174,6 +196,7 @@ async fn accept_loop(
 
 struct Request {
     method: String,
+    uri: String,
     cseq: String,
     headers: Vec<(String, String)>,
 }
@@ -220,11 +243,9 @@ fn parse_incoming(buf: &mut BytesMut) -> io::Result<Option<Incoming>> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 request"))?;
     let mut lines = head.split("\r\n");
     let request_line = lines.next().unwrap_or_default();
-    let method = request_line
-        .split(' ')
-        .next()
-        .unwrap_or_default()
-        .to_owned();
+    let mut words = request_line.split(' ');
+    let method = words.next().unwrap_or_default().to_owned();
+    let uri = words.next().unwrap_or_default().to_owned();
     let headers: Vec<(String, String)> = lines
         .filter_map(|l| l.split_once(':'))
         .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
@@ -245,6 +266,7 @@ fn parse_incoming(buf: &mut BytesMut) -> io::Result<Option<Incoming>> {
     buf.advance(end + 4 + content_length);
     Ok(Some(Incoming::Request(Request {
         method,
+        uri,
         cseq,
         headers,
     })))
@@ -265,6 +287,11 @@ struct Connection<'a> {
     base: String,
     playing: bool,
     channel: u8,
+    /// Interleaved channel of the audio track, once set up.
+    audio_channel: Option<u8>,
+    audio_seq: u16,
+    /// Audio samples sent (the RTP timestamp, at 8 kHz).
+    audio_samples: u64,
     seq: u16,
     timestamp: u32,
     next_frame: usize,
@@ -284,6 +311,9 @@ impl<'a> Connection<'a> {
             base,
             playing: false,
             channel: 0,
+            audio_channel: None,
+            audio_seq: 7000,
+            audio_samples: 0,
             seq: 1000,
             timestamp: 0,
             next_frame: 0,
@@ -332,13 +362,26 @@ impl<'a> Connection<'a> {
         let fixture = &self.config.fixture;
         let au = &fixture.access_units[self.next_frame % fixture.access_units.len()];
         self.next_frame += 1;
-        let payloads = rtp::payloads(fixture.codec, au);
+        let mut payloads = rtp::payloads(fixture.codec, au);
+        if self
+            .config
+            .drop_fragment_start_every
+            .is_some_and(|every| every > 0 && self.next_frame.is_multiple_of(every))
+            && let Some(i) = payloads
+                .iter()
+                .position(|p| is_fragment_start(fixture.codec, p))
+        {
+            payloads.remove(i);
+            self.stats
+                .dropped_fragment_starts
+                .fetch_add(1, Ordering::SeqCst);
+        }
         let mut out = Vec::new();
         let n = payloads.len();
         for (i, payload) in payloads.iter().enumerate() {
             let pkt = rtp::packet(
                 PAYLOAD_TYPE,
-                i + 1 == n,
+                self.config.marker && i + 1 == n,
                 self.seq,
                 self.timestamp,
                 SSRC,
@@ -351,6 +394,29 @@ impl<'a> Connection<'a> {
             out.extend_from_slice(&pkt);
         }
         self.timestamp = self.timestamp.wrapping_add(fixture.ticks_per_frame());
+        if let Some(channel) = self.audio_channel {
+            // The sound of this frame's duration, in 20 ms packets.
+            let target = self.next_frame as u64 * 8_000 / u64::from(fixture.fps.max(1));
+            while self.audio_samples + PCMU_PACKET as u64 <= target {
+                let payload: Vec<u8> = (0..PCMU_PACKET as u64)
+                    .map(|i| mulaw(tone(self.audio_samples + i)))
+                    .collect();
+                let pkt = rtp::packet(
+                    PCMU_PAYLOAD_TYPE,
+                    false,
+                    self.audio_seq,
+                    self.audio_samples as u32,
+                    AUDIO_SSRC,
+                    &payload,
+                );
+                self.audio_seq = self.audio_seq.wrapping_add(1);
+                self.audio_samples += PCMU_PACKET as u64;
+                out.push(b'$');
+                out.push(channel);
+                out.extend_from_slice(&u16::try_from(pkt.len()).unwrap_or(u16::MAX).to_be_bytes());
+                out.extend_from_slice(&pkt);
+            }
+        }
         out
     }
 
@@ -396,19 +462,26 @@ impl<'a> Connection<'a> {
                         Outcome::Continue,
                     );
                 }
-                self.channel = transport
+                let channel = transport
                     .split(';')
                     .find_map(|p| p.strip_prefix("interleaved="))
                     .and_then(|p| p.split('-').next())
                     .and_then(|c| c.parse().ok())
                     .unwrap_or(0);
+                let ssrc = if self.config.pcmu_audio && req.uri.ends_with("trackID=1") {
+                    self.audio_channel = Some(channel);
+                    AUDIO_SSRC
+                } else {
+                    self.channel = channel;
+                    SSRC
+                };
                 let extra = [
                     (
                         "Transport",
                         format!(
-                            "RTP/AVP/TCP;unicast;interleaved={}-{};ssrc={SSRC:08X}",
-                            self.channel,
-                            self.channel + 1
+                            "RTP/AVP/TCP;unicast;interleaved={}-{};ssrc={ssrc:08X}",
+                            channel,
+                            channel + 1
                         ),
                     ),
                     session[0].clone(),
@@ -468,8 +541,46 @@ impl<'a> Connection<'a> {
             "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=rustnvr-testkit\r\nt=0 0\r\n\
              m=video 0 RTP/AVP {PAYLOAD_TYPE}\r\nc=IN IP4 0.0.0.0\r\n\
              a=rtpmap:{PAYLOAD_TYPE} {rtpmap}\r\na=fmtp:{PAYLOAD_TYPE} {fmtp}\r\n\
-             a=framerate:{}\r\na=control:trackID=0\r\n",
-            f.fps
+             a=framerate:{}\r\na=control:trackID=0\r\n{}",
+            f.fps,
+            if self.config.pcmu_audio {
+                "m=audio 0 RTP/AVP 0\r\nc=IN IP4 0.0.0.0\r\na=rtpmap:0 PCMU/8000\r\na=control:trackID=1\r\n"
+            } else {
+                ""
+            }
         )
     }
+}
+
+/// True if `payload` is the first fragment of a NAL (H.264 FU-A, H.265 FU).
+fn is_fragment_start(codec: Codec, payload: &[u8]) -> bool {
+    match codec {
+        Codec::H264 => payload.len() > 2 && payload[0] & 0x1f == 28 && payload[1] & 0x80 != 0,
+        Codec::H265 => {
+            payload.len() > 3 && (payload[0] >> 1) & 0x3f == 49 && payload[2] & 0x80 != 0
+        }
+    }
+}
+
+/// Sample `n` of a 440 Hz tone at 8 kHz, a quarter of full scale.
+fn tone(n: u64) -> i16 {
+    (8_000.0 * (2.0 * std::f64::consts::PI * 440.0 * n as f64 / 8_000.0).sin()) as i16
+}
+
+/// One G.711 µ-law byte (ITU-T G.711).
+fn mulaw(sample: i16) -> u8 {
+    let mut s = i32::from(sample);
+    let sign = if s < 0 {
+        s = -s;
+        0x80
+    } else {
+        0
+    };
+    s = s.min(32_635) + 0x84;
+    let mut exponent = 7;
+    while exponent > 0 && s & (0x80 << exponent) == 0 {
+        exponent -= 1;
+    }
+    let mantissa = (s >> (exponent + 3)) & 0x0f;
+    !(sign | (exponent << 4) as u8 | mantissa as u8)
 }
