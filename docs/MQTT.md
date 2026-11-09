@@ -32,17 +32,28 @@ Par caméra (appareil nommé comme la caméra) :
 |---|---|---|
 | Mouvement | `binary_sensor` (`motion`) | événement de mouvement en cours |
 | Connexion | `binary_sensor` (`connectivity`, diagnostic) | flux principal reçu |
-| Enregistrement continu | `binary_sensor` | enregistrement activé |
+| Enregistrement continu | `binary_sensor` | enregistrement activé (continu ou sur mouvement) |
+| Mode d'enregistrement | `select` (configuration) | « Continu », « Sur mouvement » ou « Arrêté » ; la caméra redémarre (quelques secondes sans image) ; caméras de l'interface seulement (celles de `config.toml` ne changent pas, un avertissement est journalisé) |
 | Détection de mouvement | `switch` (configuration) | active ou coupe la détection de la caméra |
 | Enregistrement du son | `switch` (configuration) | enregistre ou non le son de la caméra (caméras de l'interface) |
 | Personne | `binary_sensor` (`occupancy`) | personne reconnue pendant le mouvement (seulement avec l'IA optionnelle, [AI.md](AI.md)) |
 | Dernier mouvement | `camera` | image prise au début du dernier événement |
 | Dernière personne | `camera` | image où une personne a été reconnue, cadres bleus dessinés (seulement avec l'IA optionnelle) |
+| Créer un événement | `button` | événement « manuel » de 30 s : vignette, analyse par l'IA optionnelle, webhooks, page Événements ; une caméra « sur mouvement » enregistre pendant ce temps (plus les secondes d'avant et d'après) ; n'allume pas le capteur « Mouvement » |
+| Prendre une capture | `button` | image de la caméra tout de suite (flux principal, 1920 px de large au plus, masques de confidentialité appliqués), publiée sur l'entité « Capture » |
+| Capture | `camera` | dernière image prise par le bouton « Prendre une capture » |
 | Position PTZ | `select` | caméras motorisées (port ONVIF réglé) : choisir une position enregistrée y envoie la caméra ; les options sont les noms des positions, lus au démarrage et après chaque ajout ou suppression depuis l'interface (une position créée dans l'appli du fabricant apparaît au prochain démarrage) |
 
 Pour RustNVR (appareil « RustNVR ») : « Caméras en ligne », « Espace disque
 faible » (problème) et « Disque des
-enregistrements » (% utilisé du disque local), mis à jour toutes les minutes.
+enregistrements » (% utilisé du disque local), mis à jour toutes les minutes ;
+et l'interrupteur « Détection (toutes les caméras) » : coupé, la détection de
+mouvement est en pause sur toutes les caméras (mode « présent » d'une
+automatisation), sans toucher aux réglages de chacune ; rétabli, chaque caméra
+reprend avec ses réglages. La pause survit au redémarrage de RustNVR ;
+l'interface l'affiche dans un bandeau avec un bouton « Reprendre ». Pendant la
+pause : pas d'événements de mouvement ni de passages de ligne, et les caméras
+« sur mouvement » n'enregistrent rien (sauf événement manuel).
 
 Toutes les entités deviennent « indisponibles » quand RustNVR s'arrête ou perd
 la connexion (message `offline` de dernière volonté). Les identifiants uniques
@@ -66,6 +77,11 @@ retenus vides).
 | `<p>/<caméra>/audio/set` | commande `ON` / `OFF` | — |
 | `<p>/<caméra>/person` | `ON` / `OFF` (personne reconnue, IA optionnelle) | oui |
 | `<p>/<caméra>/recording` | `ON` / `OFF` | oui |
+| `<p>/<caméra>/record_mode` | `Continu` / `Sur mouvement` / `Arrêté` | oui |
+| `<p>/<caméra>/record_mode/set` | commande : une de ces valeurs, ou `continuous` / `motion` / `off` | — |
+| `<p>/<caméra>/event/create` | commande : `PRESS` (30 s) ou un nombre de secondes (1 à 3600) : événement manuel | — |
+| `<p>/<caméra>/capture/take` | commande (n'importe quel message) : prend une image | — |
+| `<p>/<caméra>/capture` | JPEG de la dernière image prise sur commande | oui |
 | `<p>/<caméra>/snapshot` | JPEG du dernier événement | oui |
 | `<p>/<caméra>/<objet>/snapshot` | JPEG de la dernière image où un objet de ce type (`person`, `car`, `dog`…) a été reconnu, cadres bleus de ces objets dessinés ; publié avant le passage de `person` à `ON` | oui |
 | `<p>/<caméra>/crossing` | JSON de chaque passage d'une ligne : `line`, `direction` (`forward` / `backward`), `at_ms`, `today`, `object` (objet vu sur la ligne, lignes limitées à des objets ; sinon `null`) | non |
@@ -74,6 +90,8 @@ retenus vides).
 | `<p>/<caméra>/line/<ligne>/presence/reset` | n'importe quel message (commande) : remet le compte à zéro ; bouton « Remettre à zéro · ligne » | — |
 | `<p>/<caméra>/ptz/preset/set` | nom d'une position enregistrée sur la caméra (commande) : la caméra motorisée y va ; sélecteur « Position PTZ » | — |
 | `<p>/<caméra>/event` | JSON à chaque début, mise à jour et fin d'événement | non |
+| `<p>/detection` | `ON` / `OFF` (détection en marche / en pause sur toutes les caméras) | oui |
+| `<p>/detection/set` | commande `ON` (reprendre) / `OFF` (mettre en pause) | — |
 | `<p>/cameras_online` | nombre | oui |
 | `<p>/disk_used_percent` | nombre | oui |
 | `<p>/disk_low` | `ON` / `OFF` (un point de stockage à court d'espace) | oui |
@@ -85,6 +103,9 @@ Exemple de message `event` :
 {"id":2,"camera":"jardin","kind":"motion","start_ms":1793607714212,"end_ms":null,
  "score":0.17,"zones":["Allée"],"objects":[],"ongoing":true}
 ```
+
+`kind` : `motion`, ou `manual` pour un événement créé par le bouton (score 0,
+sans zones).
 
 `objects` : objets reconnus par l'IA optionnelle (voir [AI.md](AI.md)), par
 exemple `[{"label":"person","score":0.87,"bbox":[0.25,0.25,0.5,0.75],"zone":"Allée"}]` (`zone` : zone de détection où se trouve l'objet, s'il y en a une) ; un
@@ -120,4 +141,5 @@ Testé avec Mosquitto 2 (listener TLS + mot de passe).
 ## Limites
 
 - Pas de certificat client (authentification mutuelle TLS).
-- Pas de commande pour l'enregistrement continu (lecture seule).
+- Les noms des entités et des options du mode d'enregistrement sont en
+  français (Home Assistant ne les traduit pas).

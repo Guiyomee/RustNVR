@@ -330,6 +330,9 @@ pub struct CameraDto {
 pub struct MotionDto {
     /// Detection is enabled for this camera.
     pub enabled: bool,
+    /// Detection is paused on every camera (Home Assistant « Détection »
+    /// switch, or the interface): nothing is analysed, the settings stay.
+    pub paused: bool,
     /// Pictures are being analysed.
     pub running: bool,
     /// An event is ongoing.

@@ -167,6 +167,8 @@ export interface Camera {
 /** Motion detection state of a camera. */
 export interface MotionState {
   enabled: boolean
+  /** Detection paused on every camera (Home Assistant switch, `PUT /detection/pause`): nothing is analysed, the settings stay. */
+  paused: boolean
   /** Pictures are being analysed. */
   running: boolean
   /** An event is ongoing. */
@@ -555,9 +557,9 @@ export interface ApiErrorBody {
 
 // ---- Not implemented by the backend yet (contracts in API_CONTRACT.md) ----
 
-export type EventKind = 'motion' | 'person' | 'vehicle' | 'animal'
+export type EventKind = 'motion' | 'manual' | 'person' | 'vehicle' | 'animal'
 
-/** `GET /api/v1/events` item. Only `motion` exists today (no object recognition). */
+/** `GET /api/v1/events` item: `motion`, or `manual` (Home Assistant button, MQTT command); `person`, `vehicle`, `animal` are filters on the recognized objects. */
 export interface NvrEvent {
   id: string
   camera: string
@@ -653,7 +655,7 @@ export interface ExportResult {
 /** GET /api/v1/updates: check for new versions. */
 export interface UpdateStatus {
   current: string
-  /** Watched repository (web address); null: no check. */
+  /** Watched repository (web address; the official GitHub one unless config.toml sets another); null: no check. */
   repository: string | null
   latest: string | null
   available: boolean

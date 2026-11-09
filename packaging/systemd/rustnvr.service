@@ -45,8 +45,10 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictNamespaces=yes
 LockPersonality=yes
 UMask=0027
-# Listening on a port below 1024 (e.g. 443):
-# AmbientCapabilities=CAP_NET_BIND_SERVICE
+# The only privilege the service has: listening on a port below 1024 (80,
+# 443) chosen in config.toml; every other capability is dropped.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target

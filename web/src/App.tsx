@@ -8,6 +8,7 @@ import { DataProvider } from './data/DataContext'
 import { Link, matchPath, useLocation } from './lib/router'
 import { OverviewPage } from './pages/OverviewPage'
 import { t } from './lib/i18n'
+import { DEMO_SITE } from './lib/build'
 
 const RELOADED_KEY = 'rustnvr.reloaded-for-update'
 
@@ -122,12 +123,7 @@ function Routes() {
 }
 
 export function App() {
-  return (
-    <AuthGate>
-      <DataProvider>
-      {/* Remount everything when switching live/demo so that no state crosses over. */}
-      {(mode) => <Shell mode={mode} />}
-      </DataProvider>
-    </AuthGate>
-  )
+  const app = <DataProvider>{(mode) => <Shell mode={mode} />}</DataProvider>
+  // The demo site has no server to sign in to.
+  return DEMO_SITE ? app : <AuthGate>{app}</AuthGate>
 }

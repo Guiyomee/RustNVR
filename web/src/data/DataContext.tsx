@@ -1,25 +1,25 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { describeError } from '../api/client'
+import { DEMO_SITE } from '../lib/build'
 import { useLiveState, type LiveState } from '../state/liveStore'
 import type { Capabilities, CapabilityKey } from '../types/api'
 import { createDemoSource } from './demo/demoSource'
 import { createLiveSource } from './liveSource'
 import type { DataMode, DataSource } from './source'
 
-const MODE_KEY = 'rustnvr.mode'
+/** The demo is a separate build (GitHub Pages); RustNVR serves the real data only. */
+const MODE: DataMode = DEMO_SITE ? 'demo' : 'live'
 
-/** Demo mode is opt-in: `?demo=1` in the URL or the toggle in Settings. */
-function initialMode(): DataMode {
-  const q = new URLSearchParams(window.location.search).get('demo')
-  if (q === '1') return 'demo'
-  if (q === '0') return 'live'
-  return window.localStorage.getItem(MODE_KEY) === 'demo' ? 'demo' : 'live'
+// The demo mode of earlier versions was remembered in the browser.
+try {
+  window.localStorage.removeItem('rustnvr.mode')
+} catch {
+  // Storage unavailable: nothing to forget.
 }
 
 interface DataContextValue {
   source: DataSource
   mode: DataMode
-  setMode: (mode: DataMode) => void
   capabilities: Capabilities | null
   capabilitiesError: string | null
 }
@@ -27,8 +27,8 @@ interface DataContextValue {
 const Ctx = createContext<DataContextValue | null>(null)
 
 export function DataProvider({ children }: { children: (mode: DataMode) => ReactNode }) {
-  const [mode, setModeState] = useState<DataMode>(initialMode)
-  const source = useMemo(() => (mode === 'demo' ? createDemoSource() : createLiveSource()), [mode])
+  const mode = MODE
+  const source = useMemo(() => (DEMO_SITE ? createDemoSource() : createLiveSource()), [])
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null)
   const [capabilitiesError, setCapabilitiesError] = useState<string | null>(null)
 
@@ -60,10 +60,6 @@ export function DataProvider({ children }: { children: (mode: DataMode) => React
       mode,
       capabilities,
       capabilitiesError,
-      setMode: (m) => {
-        window.localStorage.setItem(MODE_KEY, m)
-        setModeState(m)
-      },
     }),
     [source, mode, capabilities, capabilitiesError],
   )

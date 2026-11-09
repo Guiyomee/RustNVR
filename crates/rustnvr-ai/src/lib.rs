@@ -105,7 +105,7 @@ impl Analyzer {
                     ms = started.elapsed().as_millis() as u64,
                     "object recognition model loaded"
                 );
-                Arc::new(onnx::SharedOnnx(Arc::new(detector)))
+                Arc::new(onnx::SharedOnnx::new(detector)?)
             }
             #[cfg(not(feature = "onnx"))]
             Some(AiProviderConfig::Onnx { .. }) => {
@@ -174,12 +174,6 @@ impl Analyzer {
             .map_err(|_| AiError::Timeout(self.timeout))??;
         found.sort_by(|a, b| b.score.total_cmp(&a.score));
         Ok(found)
-    }
-
-    /// The confidence needed now: the night one between its hours (local
-    /// time of the server).
-    pub fn min_score_now(&self) -> f32 {
-        self.min_score_at(local_minute())
     }
 
     fn min_score_at(&self, minute: u16) -> f32 {

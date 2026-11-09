@@ -125,7 +125,7 @@ impl G711ToOpus {
             rfc6381_codec: "opus".to_owned(),
             clock_rate: OPUS_RATE,
             channels: 1,
-            sample_entry: opus_sample_entry(1, pre_skip, rate),
+            sample_entry: opus_sample_entry(1, pre_skip),
         };
         Ok(Self {
             law,
@@ -196,14 +196,20 @@ impl G711ToOpus {
 }
 
 /// ISO BMFF `Opus` audio sample entry with its `dOps` box.
-fn opus_sample_entry(channels: u8, pre_skip: u16, input_rate: u32) -> Bytes {
+///
+/// Its input sample rate is 48 kHz, not the G.711 rate: the field is only
+/// informative (decoders always give 48 kHz), and Chromium's media source
+/// refuses a stream whose `dOps` rate differs from the sample entry's
+/// ("Opus AudioSampleEntry sample rate mismatches OpusSpecificBox"), which
+/// broke live view and playback with sound. FFmpeg writes 48 kHz too.
+fn opus_sample_entry(channels: u8, pre_skip: u16) -> Bytes {
     let mut dops = Vec::with_capacity(19);
     dops.extend_from_slice(&19u32.to_be_bytes());
     dops.extend_from_slice(b"dOps");
     dops.push(0); // version
     dops.push(channels);
     dops.extend_from_slice(&pre_skip.to_be_bytes());
-    dops.extend_from_slice(&input_rate.to_be_bytes());
+    dops.extend_from_slice(&OPUS_RATE.to_be_bytes());
     dops.extend_from_slice(&0i16.to_be_bytes()); // output gain
     dops.push(0); // channel mapping family: mono / stereo
     let mut entry = Vec::with_capacity(8 + 28 + dops.len());
@@ -224,24 +230,7 @@ fn opus_sample_entry(channels: u8, pre_skip: u16, input_rate: u32) -> Bytes {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-
-    /// µ-law encoder (ITU-T G.711), to make test input.
-    fn mulaw(sample: i16) -> u8 {
-        let mut s = i32::from(sample);
-        let sign = if s < 0 {
-            s = -s;
-            0x80
-        } else {
-            0
-        };
-        s = s.min(32_635) + 0x84;
-        let mut exponent = 7;
-        while exponent > 0 && s & (0x80 << exponent) == 0 {
-            exponent -= 1;
-        }
-        let mantissa = (s >> (exponent + 3)) & 0x0f;
-        !(sign | (exponent << 4) as u8 | mantissa as u8)
-    }
+    use rustnvr_testkit::audio::{mulaw, tone};
 
     #[test]
     fn g711_bytes_decode_like_the_standard() {
@@ -283,9 +272,14 @@ mod tests {
         );
         assert_eq!(&e[4..8], b"Opus");
         assert_eq!(&e[36 + 4..36 + 8], b"dOps");
+        // The same rate in the sample entry and in dOps (Chromium checks it).
+        assert_eq!(
+            u32::from_be_bytes(e[32..36].try_into().unwrap()),
+            48_000 << 16
+        );
         assert_eq!(
             u32::from_be_bytes(e[36 + 12..36 + 16].try_into().unwrap()),
-            8_000
+            48_000
         );
         assert_eq!(c.params().clock_rate, OPUS_RATE);
         assert_eq!(c.params().rfc6381_codec, "opus");
@@ -297,12 +291,11 @@ mod tests {
     #[test]
     fn a_tone_comes_back_through_opus() {
         let mut c = G711ToOpus::new(Law::Mu, 8_000, 1).unwrap();
-        let tone = |n: i64| {
-            (8_000.0 * (2.0 * std::f64::consts::PI * 440.0 * n as f64 / 8_000.0).sin()) as i16
-        };
         let mut out = Vec::new();
         for packet in 0..50i64 {
-            let bytes: Vec<u8> = (0..160).map(|i| mulaw(tone(packet * 160 + i))).collect();
+            let bytes: Vec<u8> = (0..160)
+                .map(|i| mulaw(tone((packet * 160 + i) as u64)))
+                .collect();
             c.push(1_000 + packet * 160, &bytes, &mut out);
         }
         assert_eq!(out.len(), 50);
@@ -312,7 +305,7 @@ mod tests {
             assert!(s.data.len() < 120, "{} bytes", s.data.len());
         }
         // 5 s later: a new timeline.
-        let bytes: Vec<u8> = (0..160).map(|i| mulaw(tone(i))).collect();
+        let bytes: Vec<u8> = (0..160u64).map(|i| mulaw(tone(i))).collect();
         c.push(1_000 + 45_000, &bytes, &mut out);
         assert_eq!(out.last().unwrap().pts, (1_000 + 45_000) * 6);
 
@@ -347,11 +340,12 @@ mod tests {
     #[ignore = "measurement"]
     fn conversion_cost() {
         let mut c = G711ToOpus::new(Law::Mu, 8_000, 1).unwrap();
-        let tone = |n: i64| {
-            (8_000.0 * (2.0 * std::f64::consts::PI * 440.0 * n as f64 / 8_000.0).sin()) as i16
-        };
         let packets: Vec<Vec<u8>> = (0..50i64)
-            .map(|p| (0..160).map(|i| mulaw(tone(p * 160 + i))).collect())
+            .map(|p| {
+                (0..160)
+                    .map(|i| mulaw(tone((p * 160 + i) as u64)))
+                    .collect()
+            })
             .collect();
         let mut out = Vec::new();
         let seconds = 600i64;

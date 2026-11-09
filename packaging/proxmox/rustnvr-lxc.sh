@@ -88,6 +88,12 @@ RustNVR :
 
 Les réglages peuvent aussi venir de l'environnement, avec les noms des
 Proxmox VE Helper-Scripts : var_cpu=4 var_ram=4096 var_disk=16 bash -c "…"
+
+Mots de passe : passés en option, ils restent dans l'historique du shell et
+se voient dans la liste des processus. Le menu les demande sans les afficher ;
+sans menu, préférez l'environnement (une espace en tête de ligne évite
+l'historique dans bash) :
+   RUSTNVR_ROOT_PASSWORD=…  RUSTNVR_WEB_PASSWORD=…  RUSTNVR_SMB_PASSWORD=…
 Mise à jour : pct exec <ctid> -- /usr/local/bin/rustnvr-update
 EOF
 }
@@ -119,6 +125,9 @@ APP_DEFAULTS=$CS_DIR/defaults/rustnvr.vars
 : "${var_recordings:=}" "${var_smb:=}" "${var_smb_user:=}" "${var_smb_domain:=}"
 SMB_PASSWORD=${RUSTNVR_SMB_PASSWORD:-}
 PASSWORD=${RUSTNVR_WEB_PASSWORD:-}
+[ -n "${RUSTNVR_ROOT_PASSWORD:-}" ] && var_pw=$RUSTNVR_ROOT_PASSWORD
+# Passwords given as options (seen in the shell history and `ps`).
+SECRET_OPTIONS=()
 ARCHIVE="" SSH_KEY_FILES=()
 
 # Settings read from the files of saved settings (no passwords written).
@@ -149,7 +158,7 @@ while [ $# -gt 0 ]; do
         --template-storage) var_template_storage=${2:?}; shift 2 ;;
         --debian) var_version=${2:?}; shift 2 ;;
         --privileged) var_unprivileged=0; shift ;;
-        --root-password) var_pw=${2:?}; shift 2 ;;
+        --root-password) var_pw=${2:?}; SECRET_OPTIONS+=(--root-password); shift 2 ;;
         --ssh-key) SSH_KEY_FILES+=("${2:?}"); shift 2 ;;
         --ssh) var_ssh=yes; shift ;;
         --tags) var_tags=${2:?}; shift 2 ;;
@@ -185,14 +194,14 @@ while [ $# -gt 0 ]; do
         --host-ca) var_inherit_host_ca=yes; shift ;;
         --port) var_rustnvr_port=${2:?}; shift 2 ;;
         --version) var_rustnvr_version=${2:?}; shift 2 ;;
-        --password) PASSWORD=${2:?}; shift 2 ;;
+        --password) PASSWORD=${2:?}; SECRET_OPTIONS+=(--password); shift 2 ;;
         --gpu) var_gpu=yes; shift ;;
         --gpu-device) var_gpu=yes; var_gpu_device=${2:?}; shift 2 ;;
         --recordings) var_recordings=${2:?}; shift 2 ;;
         --smb) var_smb=${2:?}; shift 2 ;;
         --smb-user) var_smb_user=${2:?}; shift 2 ;;
         --smb-domain) var_smb_domain=${2:?}; shift 2 ;;
-        --smb-password) SMB_PASSWORD=${2:?}; shift 2 ;;
+        --smb-password) SMB_PASSWORD=${2:?}; SECRET_OPTIONS+=(--smb-password); shift 2 ;;
         --archive) ARCHIVE=${2:?}; shift 2 ;;
         --source) SOURCE=${2:?}; shift 2 ;;
         -y|--yes) shift ;;  # any option skips the menu
@@ -677,7 +686,7 @@ st_admin_password() {
 st_rustnvr_version() {
     [ -z "$ARCHIVE" ] || { skip; return; }
     local v
-    v=$(wt --title "RUSTNVR" --inputbox "\nVersion à installer (v2026.11.04 ; vide : la dernière) :" 10 72 "$var_rustnvr_version") || return 1
+    v=$(wt --title "RUSTNVR" --inputbox "\nVersion à installer (v2026.11.05 ; vide : la dernière) :" 10 72 "$var_rustnvr_version") || return 1
     var_rustnvr_version=$v
 }
 st_recordings() {
@@ -900,6 +909,9 @@ if [ "$OPTIONS" -eq 0 ] && [ -t 0 ] && [ -t 1 ] && command -v whiptail >/dev/nul
 fi
 
 # --- Checks -----------------------------------------------------------------------
+if [ ${#SECRET_OPTIONS[@]} -gt 0 ]; then
+    warn "${SECRET_OPTIONS[*]} : mot de passe visible dans l'historique du shell (history -d, ou effacez ~/.bash_history) ; la prochaine fois : RUSTNVR_ROOT_PASSWORD, RUSTNVR_WEB_PASSWORD, RUSTNVR_SMB_PASSWORD (--help)"
+fi
 for f in "${SSH_KEY_FILES[@]}"; do [ -f "$f" ] && cat "$f" >>"$SSH_KEYS"; done
 [ -n "$var_ssh_authorized_key" ] && printf '%s\n' "$var_ssh_authorized_key" >>"$SSH_KEYS"
 check_settings

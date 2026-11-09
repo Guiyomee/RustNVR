@@ -25,8 +25,3 @@ export function eventPeriods(events: NvrEvent[]): Period[] {
 export function recordingAt(recordings: Recording[], t: number): Recording | undefined {
   return recordings.find((r) => r.start_ms <= t && t < r.end_ms)
 }
-
-/** First recording starting at or after `t`. */
-export function nextRecording(recordings: Recording[], t: number): Recording | undefined {
-  return recordings.filter((r) => r.start_ms >= t).sort((a, b) => a.start_ms - b.start_ms)[0]
-}

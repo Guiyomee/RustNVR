@@ -155,7 +155,8 @@ interval_seconds = 3
 # New versions: the latest release published on a Git forge (Gitea, Forgejo
 # or GitHub) is compared with this version, shown in the interface (À propos,
 # banner). Nothing is downloaded nor installed. Also editable in the
-# interface (saved in updates.ui.toml, which then wins). Default: no check.
+# interface (saved in updates.ui.toml, which then wins). Default: the official
+# repository (https://github.com/Guiyomee/RustNVR); check = false turns it off.
 # [updates]
 # repository = "https://gitea.example.org/owner/RustNVR"
 # token_env = "RUSTNVR_UPDATES_TOKEN"   # private repository only

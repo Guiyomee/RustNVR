@@ -366,7 +366,25 @@ async fn storage(State(state): State<Arc<ApiState>>) -> Result<Json<StorageDto>,
     Ok(Json(dto))
 }
 
+/// `GET /storage/destinations`; a viewer gets no account of a remote
+/// destination (S3 access key, SFTP user).
 async fn list_destinations(
+    State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
+) -> Result<Json<Vec<DestinationDto>>, ApiError> {
+    let Json(mut list) = destinations_list(State(state)).await?;
+    if crate::auth::is_viewer(principal.as_ref()) {
+        for remote in list.iter_mut().filter_map(|d| d.remote.as_mut()) {
+            if let Some(fields) = remote.as_object_mut() {
+                fields.remove("access_key_id");
+                fields.remove("username");
+            }
+        }
+    }
+    Ok(Json(list))
+}
+
+async fn destinations_list(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<Vec<DestinationDto>>, ApiError> {
     // Availability checks touch the filesystems (possibly network ones).
@@ -381,7 +399,7 @@ async fn after_storage_change(
     state: &Arc<ApiState>,
 ) -> Result<Json<Vec<DestinationDto>>, ApiError> {
     *state.storage_cache.lock().await = None;
-    list_destinations(State(state.clone())).await
+    destinations_list(State(state.clone())).await
 }
 
 async fn create_destination(
@@ -492,6 +510,16 @@ async fn interface_cache(req: Request, next: middleware::Next) -> Response {
     res
 }
 
+/// What the interface may load: only this server (a script injected some
+/// day could neither load code nor send data elsewhere). Video uses `blob:`
+/// URLs (media sources, the HLS worker); React sets style attributes.
+const CONTENT_SECURITY_POLICY: &str = concat!(
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
+    "img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; ",
+    "connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'none'; ",
+    "form-action 'self'; frame-ancestors 'none'"
+);
+
 /// Builds the application: `/api/v1/*`, then the static interface with a
 /// fallback to `index.html` for client-side routes. Everything requires
 /// authentication when it is configured.
@@ -543,6 +571,10 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route(
             "/cameras/{id}/audio",
             axum::routing::put(detection::set_audio),
+        )
+        .route(
+            "/detection/pause",
+            axum::routing::put(detection::set_detection_paused),
         )
         .route(
             "/cameras/{id}/presence/reset",
@@ -638,6 +670,10 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
     .layer(SetResponseHeaderLayer::if_not_present(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
+    ))
+    .layer(SetResponseHeaderLayer::if_not_present(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
     ))
     .with_state(state)
 }

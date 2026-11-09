@@ -3,6 +3,8 @@
 *.mp4.part
 /web/node_modules
 /web/dist
+/web/dist-demo
+/dist-release
 
 # Local configuration: camera, MQTT and storage passwords. Never committed.
 /config.toml
@@ -12,3 +14,4 @@
 /docker-data
 # Settings of one machine (NAS folder, graphics card), merged with compose.yaml.
 compose.override.yaml
+/.release-leaks

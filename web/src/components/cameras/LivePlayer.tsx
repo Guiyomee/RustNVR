@@ -4,7 +4,8 @@ import { liveUrl, type LiveStream } from '../../api/endpoints'
 import { t } from '../../lib/i18n'
 
 type Status =
-  | { kind: 'connecting' }
+  /** `refused`: the server never accepted the connection (a reverse proxy without WebSockets, usually). */
+  | { kind: 'connecting'; refused?: boolean }
   | { kind: 'playing'; converted: boolean }
   | { kind: 'unsupported'; codec: string }
   | { kind: 'error'; message: string }
@@ -78,6 +79,8 @@ export function LivePlayer({
     let retryTimer: number | undefined
     let delay = 1000
     let lastData = Date.now()
+    // Connections closed before opening, in a row.
+    let refusals = 0
 
     const teardown = () => {
       const socket = ws
@@ -94,7 +97,7 @@ export function LivePlayer({
     const scheduleReconnect = () => {
       teardown()
       if (stopped) return
-      setStatus({ kind: 'connecting' })
+      setStatus({ kind: 'connecting', refused: refusals >= 3 })
       retryTimer = window.setTimeout(connect, delay * (1 - Math.random() * 0.2))
       delay = Math.min(delay * 2, 15_000)
     }
@@ -145,6 +148,11 @@ export function LivePlayer({
           const socket = new WebSocket(liveUrl(cameraId, { stream, transcode: convert, audio: withAudio }))
           socket.binaryType = 'arraybuffer'
           ws = socket
+          let opened = false
+          socket.onopen = () => {
+            opened = true
+            refusals = 0
+          }
           socket.onmessage = (ev: MessageEvent) => {
             lastData = Date.now()
             if (typeof ev.data === 'string') {
@@ -202,6 +210,7 @@ export function LivePlayer({
               setStatus({ kind: 'error', message: t(`Conversion H.264 impossible (${ev.reason.slice('transcode:'.length).trim()}).`, `H.264 conversion failed (${ev.reason.slice('transcode:'.length).trim()}).`) })
               return
             }
+            if (!opened) refusals += 1
             scheduleReconnect()
           }
         },
@@ -261,6 +270,11 @@ export function LivePlayer({
             <>
               <LoaderCircle className={`${large ? 'size-8' : 'size-6'} animate-spin text-muted`} aria-hidden />
               <p className="text-sm text-muted">{t('Connexion au direct…', 'Connecting to the live view…')}</p>
+              {status.refused && (
+                <p className={`max-w-md text-xs text-warn ${large ? '' : 'line-clamp-3'}`}>
+                  {t('Le serveur refuse la connexion du direct (WebSocket). Derrière un mandataire inverse, activez les WebSockets : case « Websockets Support » dans Nginx Proxy Manager.', 'The server refuses the live connection (WebSocket). Behind a reverse proxy, turn WebSockets on: « Websockets Support » in Nginx Proxy Manager.')}
+                </p>
+              )}
             </>
           ) : (
             <>

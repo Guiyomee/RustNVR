@@ -135,11 +135,12 @@ fn event_from_row(row: &SqliteRow) -> Result<DetectionEvent, DbError> {
     let thumbnail: Option<String> = row.try_get("thumbnail")?;
     let score: f64 = row.try_get("score")?;
     let objects: String = row.try_get("objects")?;
+    let kind: String = row.try_get("kind")?;
     Ok(DetectionEvent {
         id: row.try_get("id")?,
         // Identifiers were validated when the event was written.
         camera: CameraId::new(camera).map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
-        kind: EventKind::Motion,
+        kind: EventKind::from_name(&kind),
         start_ms: row.try_get("start_ms")?,
         end_ms: row.try_get("end_ms")?,
         score: score as f32,

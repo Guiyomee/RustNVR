@@ -208,7 +208,7 @@ impl RtspSession {
             && let Err(e) = step("SETUP", opts.connect_timeout, session.setup(a, setup())).await
         {
             // The video alone is still worth recording.
-            tracing::warn!(error = %e, "audio stream refused by the camera, recording without sound");
+            tracing::warn!(error = %e.one_line(), "audio stream refused by the camera, recording without sound");
             audio_index = None;
         }
         let playing = step(

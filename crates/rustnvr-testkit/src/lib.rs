@@ -11,6 +11,7 @@
 //! purpose RTSP server.
 
 pub mod annexb;
+pub mod audio;
 pub mod rtp;
 mod server;
 

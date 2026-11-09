@@ -2,6 +2,7 @@
 // The Axum server answers unknown non-API paths with index.html.
 
 import { useSyncExternalStore, type AnchorHTMLAttributes, type MouseEvent, type ReactNode } from 'react'
+import { BASE_PATH } from './build'
 
 const listeners = new Set<() => void>()
 
@@ -14,14 +15,17 @@ function subscribe(listener: () => void): () => void {
   }
 }
 
+/** The page's path in the interface (without the base path of the demo site). */
 function snapshot(): string {
-  return window.location.pathname + window.location.search
+  let path = window.location.pathname
+  if (BASE_PATH && path.startsWith(BASE_PATH)) path = path.slice(BASE_PATH.length) || '/'
+  return path + window.location.search
 }
 
 export function navigate(to: string, opts: { replace?: boolean } = {}): void {
   if (to === snapshot()) return
-  if (opts.replace) window.history.replaceState(null, '', to)
-  else window.history.pushState(null, '', to)
+  if (opts.replace) window.history.replaceState(null, '', BASE_PATH + to)
+  else window.history.pushState(null, '', BASE_PATH + to)
   listeners.forEach((l) => l())
   if (!opts.replace) window.scrollTo(0, 0)
 }
@@ -62,7 +66,7 @@ export function Link({ to, onClick, children, ...rest }: LinkProps) {
     navigate(to)
   }
   return (
-    <a href={to} onClick={handle} {...rest}>
+    <a href={BASE_PATH + to} onClick={handle} {...rest}>
       {children}
     </a>
   )

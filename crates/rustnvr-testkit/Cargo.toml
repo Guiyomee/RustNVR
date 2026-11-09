@@ -13,5 +13,8 @@ tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "macro
 tokio-util.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["signal", "rt", "macros"] }
+
 [lints]
 workspace = true

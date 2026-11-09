@@ -178,6 +178,9 @@ pub trait NvrControl: Send + Sync {
     /// Switches the recording of the sound of a camera (stored with the
     /// camera). Off applies at once; on starts with the next key frame.
     fn set_audio(&self, id: String, enabled: bool) -> BoxFuture<'_, Result<(), ControlError>>;
+    /// Pauses motion detection on every camera, or resumes it (kept across
+    /// restarts; the settings of each camera do not change).
+    fn set_detection_paused(&self, paused: bool) -> BoxFuture<'_, Result<(), ControlError>>;
     /// MQTT settings (never the password) and connection state.
     fn mqtt(&self) -> BoxFuture<'_, MqttView>;
     /// Stores the MQTT settings and reconnects.
@@ -214,11 +217,11 @@ pub trait NvrControl: Send + Sync {
     ) -> BoxFuture<'_, WebhookTestResult>;
     /// Checks the watched repository for a newer version now.
     fn check_updates(&self) -> BoxFuture<'_, crate::dto::UpdateStatus>;
-    /// Stores (`updates.ui.toml`) the watched repository (`None`: no check)
-    /// and checks it.
+    /// Turns the check for new versions on or off (`updates.ui.toml`), then
+    /// checks.
     fn set_updates(
         &self,
-        repository: Option<String>,
+        check: bool,
     ) -> BoxFuture<'_, Result<crate::dto::UpdateStatus, ControlError>>;
     /// Who is inside according to each line counting the presence:
     /// camera, line, count.

@@ -9,7 +9,12 @@
 //! | `<p>/<camera>/motion` | `ON` / `OFF` (event ongoing) | yes |
 //! | `<p>/<camera>/motion_detection` | `ON` / `OFF` (detection enabled) | yes |
 //! | `<p>/<camera>/motion_detection/set` | `ON` / `OFF` (command) | — |
-//! | `<p>/<camera>/recording` | `ON` / `OFF` (continuous recording enabled) | yes |
+//! | `<p>/<camera>/recording` | `ON` / `OFF` (recording enabled) | yes |
+//! | `<p>/<camera>/record_mode` | `Continu` / `Sur mouvement` / `Arrêté` | yes |
+//! | `<p>/<camera>/record_mode/set` | one of these, or `continuous` / `motion` / `off` (command) | — |
+//! | `<p>/<camera>/event/create` | `PRESS` or a number of seconds (command): a manual event | — |
+//! | `<p>/<camera>/capture/take` | any payload (command): a picture now, on `capture` | — |
+//! | `<p>/<camera>/capture` | JPEG of the last picture taken on command | yes |
 //! | `<p>/<camera>/audio` | `ON` / `OFF` (sound recorded) | yes |
 //! | `<p>/<camera>/audio/set` | `ON` / `OFF` (command) | — |
 //! | `<p>/<camera>/person` | `ON` / `OFF` (person recognized, optional AI) | yes |
@@ -21,6 +26,8 @@
 //! | `<p>/<camera>/line/<line>/present` | who is inside (lines counting the presence) | yes |
 //! | `<p>/<camera>/line/<line>/presence/reset` | any payload (command): count from zero again | — |
 //! | `<p>/<camera>/ptz/preset/set` | name of a PTZ preset (command): the motorised camera goes there | — |
+//! | `<p>/detection` | `ON` / `OFF` (motion detection running, not paused) | yes |
+//! | `<p>/detection/set` | `ON` / `OFF` (command): resumes or pauses detection on every camera | — |
 //! | `<p>/cameras_online` | number | yes |
 //! | `<p>/disk_used_percent` | number (local recordings disk) | yes |
 //! | `<p>/disk_low` | `ON` / `OFF` (a destination is short of space) | yes |
@@ -38,8 +45,8 @@ use rumqttc::{
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject as _;
 use rustls::{ClientConfig, RootCertStore};
-use rustnvr_core::config::MqttConfig;
-use rustnvr_core::{CameraId, DetectionEvent, EventBus, NvrEvent, Secret, StreamRole};
+use rustnvr_core::config::{MqttConfig, RecordMode};
+use rustnvr_core::{CameraId, DetectionEvent, EventBus, EventKind, NvrEvent, Secret, StreamRole};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -62,6 +69,16 @@ const FIRST_RETRY: Duration = Duration::from_secs(1);
 const MAX_RETRY: Duration = Duration::from_secs(30);
 /// Period of the NVR-wide sensors.
 const SYSTEM_PERIOD: Duration = Duration::from_secs(60);
+/// Length of a manual event when the command gives none.
+const MANUAL_EVENT_SECONDS: u32 = 30;
+/// Longest manual event.
+const MAX_MANUAL_EVENT_SECONDS: u32 = 3600;
+/// Options of the recording mode selector: (published name, mode).
+const RECORD_MODES: [(&str, Option<RecordMode>); 3] = [
+    ("Continu", Some(RecordMode::Continuous)),
+    ("Sur mouvement", Some(RecordMode::Motion)),
+    ("Arrêté", None),
+];
 
 /// Future returned by [`NvrView`] methods.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -75,8 +92,10 @@ pub struct CameraView {
     pub name: String,
     /// Main stream connected.
     pub online: bool,
-    /// Continuous recording enabled.
+    /// Recording enabled.
     pub recording: bool,
+    /// When it records, if enabled.
+    pub record_mode: RecordMode,
     /// Motion detection enabled.
     pub motion_enabled: bool,
     /// Motion event ongoing.
@@ -103,6 +122,8 @@ pub struct SystemView {
     /// A storage destination cannot be used (share not mounted, not
     /// writable, not answering).
     pub storage_problem: bool,
+    /// Motion detection is paused on every camera.
+    pub detection_paused: bool,
 }
 
 /// What the MQTT client reads from, and asks to, the NVR.
@@ -128,6 +149,21 @@ pub trait NvrView: Send + Sync + 'static {
     fn reset_presence(&self, camera: CameraId, label: String) -> BoxFuture<'_, Result<(), String>>;
     /// Sends a motorised camera to its preset named `name` (command from MQTT).
     fn ptz_goto(&self, camera: CameraId, name: String) -> BoxFuture<'_, Result<(), String>>;
+    /// Records `camera` all the time, on motion, or not at all (`None`)
+    /// (command from MQTT).
+    fn set_record_mode(
+        &self,
+        camera: CameraId,
+        mode: Option<RecordMode>,
+    ) -> BoxFuture<'_, Result<(), String>>;
+    /// Starts an event of `seconds` on `camera` (command from MQTT); its
+    /// identifier.
+    fn manual_event(&self, camera: CameraId, seconds: u32) -> BoxFuture<'_, Result<i64, String>>;
+    /// A picture of `camera` now, as a JPEG (command from MQTT).
+    fn capture(&self, camera: CameraId) -> BoxFuture<'_, Result<Vec<u8>, String>>;
+    /// Pauses motion detection on every camera, or resumes it (command from
+    /// MQTT).
+    fn set_detection_paused(&self, paused: bool) -> BoxFuture<'_, Result<(), String>>;
 }
 
 /// Resolved connection settings.
@@ -339,14 +375,19 @@ impl Topics {
         Some((CameraId::new(cam).ok()?, label.to_owned()))
     }
 
-    /// Camera of a `<p>/<camera>/ptz/preset/set` command.
-    fn ptz_preset(&self, topic: &str) -> Option<CameraId> {
+    /// Camera of a `<p>/<camera>/<command>` topic.
+    fn camera_command(&self, topic: &str, command: &str) -> Option<CameraId> {
         let rest = topic.strip_prefix(&self.prefix)?.strip_prefix('/')?;
-        let cam = rest.strip_suffix("/ptz/preset/set")?;
+        let cam = rest.strip_suffix(command)?.strip_suffix('/')?;
         if cam.contains('/') {
             return None;
         }
         CameraId::new(cam).ok()
+    }
+
+    /// Camera of a `<p>/<camera>/ptz/preset/set` command.
+    fn ptz_preset(&self, topic: &str) -> Option<CameraId> {
+        self.camera_command(topic, "ptz/preset/set")
     }
 
     /// Camera and switch of a `<p>/<camera>/motion_detection/set` or
@@ -371,6 +412,50 @@ enum Switch {
 
 fn on_off(v: bool) -> &'static str {
     if v { "ON" } else { "OFF" }
+}
+
+/// `ON` / `OFF` command payload.
+fn parse_on_off(payload: &[u8]) -> Option<bool> {
+    match payload.trim_ascii() {
+        b"ON" | b"on" | b"true" | b"1" => Some(true),
+        b"OFF" | b"off" | b"false" | b"0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Published name of the recording mode of `c`.
+fn record_mode_name(c: &CameraView) -> &'static str {
+    let mode = c.recording.then_some(c.record_mode);
+    RECORD_MODES
+        .iter()
+        .find(|(_, m)| *m == mode)
+        .map_or("Arrêté", |(name, _)| name)
+}
+
+/// Recording mode asked by a `record_mode/set` command: an option of the
+/// selector, or `continuous` / `motion` / `off`.
+fn parse_record_mode(payload: &[u8]) -> Option<Option<RecordMode>> {
+    let text = std::str::from_utf8(payload).ok()?.trim();
+    match text.to_ascii_lowercase().as_str() {
+        "continuous" => return Some(Some(RecordMode::Continuous)),
+        "motion" => return Some(Some(RecordMode::Motion)),
+        "off" => return Some(None),
+        _ => {}
+    }
+    RECORD_MODES
+        .iter()
+        .find(|(name, _)| *name == text)
+        .map(|(_, mode)| *mode)
+}
+
+/// Length of a manual event: a number of seconds (1 to an hour), else the
+/// default (the `PRESS` of a Home Assistant button).
+fn event_seconds(payload: &[u8]) -> u32 {
+    std::str::from_utf8(payload)
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .filter(|s| (1..=MAX_MANUAL_EVENT_SECONDS).contains(s))
+        .unwrap_or(MANUAL_EVENT_SECONDS)
 }
 
 /// A score with 3 decimals (an `f32` would print as 0.8700000047683716).
@@ -483,6 +568,7 @@ impl Client {
                 on_off(c.motion_enabled),
             ),
             (t.camera(&c.id, "recording"), on_off(c.recording)),
+            (t.camera(&c.id, "record_mode"), record_mode_name(c)),
             (t.camera(&c.id, "audio"), on_off(c.audio_enabled)),
         ];
         for (topic, payload) in msgs {
@@ -587,7 +673,9 @@ impl Client {
             "motion",
             "motion_detection",
             "recording",
+            "record_mode",
             "snapshot",
+            "capture",
             "audio",
             "person",
         ] {
@@ -645,6 +733,8 @@ impl Client {
                 }
                 let topic = self.topics.camera(&c.id, "recording");
                 self.publish(topic, true, on_off(c.recording));
+                let topic = self.topics.camera(&c.id, "record_mode");
+                self.publish(topic, true, record_mode_name(c));
                 let topic = self.topics.camera(&c.id, "audio");
                 self.publish(topic, true, on_off(c.audio_enabled));
                 self.publish_presence(c);
@@ -666,6 +756,8 @@ impl Client {
         self.publish(topic, true, on_off(s.low_space));
         let topic = self.topics.system("storage_problem");
         self.publish(topic, true, on_off(s.storage_problem));
+        let topic = self.topics.system("detection");
+        self.publish(topic, true, on_off(!s.detection_paused));
     }
 
     async fn on_connected(&mut self) {
@@ -690,15 +782,78 @@ impl Client {
             "audio/set",
             "line/+/presence/reset",
             "ptz/preset/set",
+            "record_mode/set",
+            "event/create",
+            "capture/take",
         ] {
             let topic = format!("{}/+/{command}", self.topics.prefix);
             if self.client.try_subscribe(topic, QoS::AtLeastOnce).is_err() {
                 tracing::warn!("MQTT: cannot subscribe to commands");
             }
         }
+        let topic = self.topics.system("detection/set");
+        if self.client.try_subscribe(topic, QoS::AtLeastOnce).is_err() {
+            tracing::warn!("MQTT: cannot subscribe to commands");
+        }
     }
 
     fn on_command(&self, topic: &str, payload: &[u8]) {
+        if topic == self.topics.system("detection/set") {
+            let Some(on) = parse_on_off(payload) else {
+                tracing::warn!("MQTT: ignored detection command (expected ON or OFF)");
+                return;
+            };
+            let view = self.view.clone();
+            tokio::spawn(async move {
+                if let Err(e) = view.set_detection_paused(!on).await {
+                    tracing::warn!(error = %e, "MQTT: detection command failed");
+                }
+            });
+            return;
+        }
+        if let Some(camera) = self.topics.camera_command(topic, "record_mode/set") {
+            let Some(mode) = parse_record_mode(payload) else {
+                tracing::warn!(%camera, "MQTT: ignored recording mode (expected Continu, Sur mouvement or Arrêté)");
+                return;
+            };
+            let view = self.view.clone();
+            tokio::spawn(async move {
+                if let Err(e) = view.set_record_mode(camera.clone(), mode).await {
+                    tracing::warn!(%camera, error = %e, "MQTT: recording mode command failed");
+                }
+            });
+            return;
+        }
+        if let Some(camera) = self.topics.camera_command(topic, "event/create") {
+            let seconds = event_seconds(payload);
+            let view = self.view.clone();
+            tokio::spawn(async move {
+                if let Err(e) = view.manual_event(camera.clone(), seconds).await {
+                    tracing::warn!(%camera, error = %e, "MQTT: manual event failed");
+                }
+            });
+            return;
+        }
+        if let Some(camera) = self.topics.camera_command(topic, "capture/take") {
+            let view = self.view.clone();
+            let client = self.client.clone();
+            let topic = self.topics.camera(&camera, "capture");
+            tokio::spawn(async move {
+                match view.capture(camera.clone()).await {
+                    Ok(jpeg) => {
+                        if client
+                            .publish(topic, QoS::AtLeastOnce, true, jpeg)
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!(%camera, "MQTT: capture not sent (client stopped)");
+                        }
+                    }
+                    Err(e) => tracing::warn!(%camera, error = %e, "MQTT: capture failed"),
+                }
+            });
+            return;
+        }
         if let Some(camera) = self.topics.ptz_preset(topic) {
             let name = String::from_utf8_lossy(payload).trim().to_owned();
             let view = self.view.clone();
@@ -721,13 +876,9 @@ impl Client {
         let Some((camera, switch)) = self.topics.command(topic) else {
             return;
         };
-        let enabled = match payload {
-            b"ON" | b"on" | b"true" | b"1" => true,
-            b"OFF" | b"off" | b"false" | b"0" => false,
-            _ => {
-                tracing::warn!(%camera, "MQTT: ignored command (expected ON or OFF)");
-                return;
-            }
+        let Some(enabled) = parse_on_off(payload) else {
+            tracing::warn!(%camera, "MQTT: ignored command (expected ON or OFF)");
+            return;
         };
         let view = self.view.clone();
         // Applying it may take a moment: never block the network task.
@@ -758,8 +909,11 @@ impl Client {
                 self.publish(topic, true, online);
             }
             NvrEvent::Detection(e) => {
-                let topic = self.topics.camera(&e.camera, "motion");
-                self.publish(topic, true, on_off(e.end_ms.is_none()));
+                // A manual event is no motion.
+                if e.kind == EventKind::Motion {
+                    let topic = self.topics.camera(&e.camera, "motion");
+                    self.publish(topic, true, on_off(e.end_ms.is_none()));
+                }
                 self.update_person(&e);
                 let topic = self.topics.camera(&e.camera, "event");
                 self.publish(topic, false, event_json(&e));
@@ -806,7 +960,11 @@ impl Client {
                 // Lines counting the presence may have changed.
                 self.sync_cameras(false).await;
             }
-            NvrEvent::CamerasChanged => self.sync_cameras(false).await,
+            NvrEvent::CamerasChanged => {
+                self.sync_cameras(false).await;
+                // Detection may have been paused or resumed.
+                self.publish_system().await;
+            }
             NvrEvent::Presence {
                 camera,
                 line,
@@ -950,6 +1108,20 @@ mod tests {
         );
         assert!(t.ptz_preset("home/nvr/a/b/ptz/preset/set").is_none());
         assert!(t.ptz_preset("home/nvr/garage/audio/set").is_none());
+        assert!(t.ptz_preset("home/nvr/ptz/preset/set").is_none());
+        assert_eq!(
+            t.camera_command("home/nvr/garage/event/create", "event/create")
+                .map(|c| c.to_string()),
+            Some("garage".to_owned())
+        );
+        assert!(
+            t.camera_command("home/nvr/garage/xevent/create", "event/create")
+                .is_none()
+        );
+        assert!(
+            t.camera_command("home/nvr/detection/set", "record_mode/set")
+                .is_none()
+        );
         let parse = |topic: &str| t.command(topic).map(|(c, s)| (c.to_string(), s));
         assert_eq!(
             parse("home/nvr/jardin/motion_detection/set"),
@@ -963,6 +1135,48 @@ mod tests {
         assert!(parse("home/nvr/jardin/audio").is_none());
         assert!(parse("other/jardin/motion_detection/set").is_none());
         assert!(parse("home/nvr/a/b/motion_detection/set").is_none());
+    }
+
+    #[test]
+    fn parses_command_payloads() {
+        assert_eq!(parse_on_off(b"ON\n"), Some(true));
+        assert_eq!(parse_on_off(b"off"), Some(false));
+        assert_eq!(parse_on_off(b"PRESS"), None);
+        assert_eq!(
+            parse_record_mode("Sur mouvement".as_bytes()),
+            Some(Some(RecordMode::Motion))
+        );
+        assert_eq!(parse_record_mode("Arrêté".as_bytes()), Some(None));
+        assert_eq!(
+            parse_record_mode(b" Continuous "),
+            Some(Some(RecordMode::Continuous))
+        );
+        assert_eq!(parse_record_mode(b"off"), Some(None));
+        assert_eq!(parse_record_mode(b"jamais"), None);
+        assert_eq!(event_seconds(b"PRESS"), MANUAL_EVENT_SECONDS);
+        assert_eq!(event_seconds(b"90"), 90);
+        assert_eq!(event_seconds(b"0"), MANUAL_EVENT_SECONDS);
+        assert_eq!(event_seconds(b"99999"), MANUAL_EVENT_SECONDS);
+        let mut cam = CameraView {
+            id: CameraId::new("jardin").expect("id"),
+            name: "Jardin".into(),
+            online: true,
+            recording: true,
+            record_mode: RecordMode::Motion,
+            motion_enabled: true,
+            motion_active: false,
+            audio_enabled: false,
+            person_detection: false,
+            presence: Vec::new(),
+            ptz_presets: Vec::new(),
+        };
+        assert_eq!(record_mode_name(&cam), "Sur mouvement");
+        cam.recording = false;
+        assert_eq!(record_mode_name(&cam), "Arrêté");
+        // What is published is accepted back.
+        for (name, mode) in RECORD_MODES {
+            assert_eq!(parse_record_mode(name.as_bytes()), Some(mode));
+        }
     }
 
     #[test]

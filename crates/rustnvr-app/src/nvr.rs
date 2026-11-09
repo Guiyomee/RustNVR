@@ -49,7 +49,7 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// How long shutdown waits for each supervisor and recorder.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
@@ -221,6 +221,9 @@ struct Engine {
     /// Where detections go; `None` when detection is unavailable (no
     /// database or no FFmpeg) and after shutdown.
     motion_tx: std::sync::Mutex<Option<mpsc::Sender<MotionUpdate>>>,
+    /// Motion detection paused on every camera (the settings of each camera
+    /// stay); kept across restarts by a file in the data directory.
+    detection_paused: AtomicBool,
     /// The API once started (shared with [`Shared`]): USB cameras encode
     /// on the graphics card it found.
     api: Arc<OnceLock<Arc<ApiState>>>,
@@ -264,6 +267,10 @@ impl Engine {
         let Some(settings) = settings.filter(|s| s.enabled) else {
             return;
         };
+        if self.detection_paused.load(Ordering::Relaxed) {
+            debug!(camera = %rt.id, "motion detection paused");
+            return;
+        }
         let Some(sink) = self.motion_sender() else {
             warn!(camera = %rt.id, "motion detection unavailable (database or FFmpeg missing)");
             return;
@@ -551,6 +558,9 @@ struct Shared {
     captures_root: std::sync::Mutex<Option<(PathBuf, Option<u32>)>>,
     /// Database, thumbnails and outboxes of remote destinations.
     data_dir: PathBuf,
+    /// Manual events (Home Assistant button), written with the detections;
+    /// `None` without database.
+    manual: Option<mpsc::Sender<detection::Manual>>,
     /// One uploader per S3 / SFTP destination.
     uploaders: tokio::sync::Mutex<HashMap<String, UploaderHandle>>,
     /// Their states, for the API.
@@ -586,6 +596,7 @@ impl Shared {
 
     fn publish(&self, state: &State) {
         if let Some(api) = self.api.get() {
+            api.set_detection_paused(self.engine.detection_paused.load(Ordering::Relaxed));
             api.set_cameras(state.sources());
             api.set_destinations(self.destination_infos(state));
         }
@@ -616,6 +627,65 @@ impl Shared {
             ControlError::Internal(format!("cannot write {}: {e}", path.display()))
         })
     }
+}
+
+/// Records camera `raw_id` all the time, on motion, or not at all (`None`),
+/// and restarts it (Home Assistant selector).
+async fn set_record_mode(
+    shared: &Arc<Shared>,
+    raw_id: &str,
+    mode: Option<RecordMode>,
+) -> Result<(), ControlError> {
+    let mut state = shared.state.lock().await;
+    let index = state
+        .configs
+        .iter()
+        .position(|c| c.id.as_str() == raw_id)
+        .ok_or_else(|| ControlError::NotFound(format!("aucune caméra {raw_id:?}")))?;
+    let previous = state.configs[index].clone();
+    let enabled = mode.is_some();
+    let new_mode = mode.unwrap_or(previous.record.mode);
+    if previous.record.enabled == enabled && previous.record.mode == new_mode {
+        return Ok(());
+    }
+    if !previous.managed {
+        return Err(ControlError::ReadOnly(format!(
+            "la caméra {raw_id:?} est déclarée dans config.toml : réglez « record = {{ enabled = …, mode = … }} » dans ce fichier puis redémarrez RustNVR"
+        )));
+    }
+    let mut cam = previous.clone();
+    cam.record.enabled = enabled;
+    cam.record.mode = new_mode;
+    // Recording again without a destination: the default one.
+    if enabled && cam.record.destinations.is_empty() {
+        let default = shared.general().default_destination;
+        cam.record.destinations = vec![if state.storage.destination(&default).is_some() {
+            default
+        } else {
+            LOCAL_DESTINATION.to_owned()
+        }];
+    }
+    state.configs[index] = cam.clone();
+    if let Err(e) = shared.save_cameras(&state.configs) {
+        state.configs[index] = previous;
+        return Err(e);
+    }
+    if let Some(old) = state.running.remove(&cam.id) {
+        old.stop().await;
+    }
+    if cam.enabled {
+        let rt = shared
+            .engine
+            .start(&cam, &state.storage, state.motion.get(&cam.id))
+            .map_err(internal)?;
+        state.running.insert(cam.id.clone(), rt);
+    }
+    if mode == Some(RecordMode::Motion) && !state.motion.get(&cam.id).is_some_and(|m| m.enabled) {
+        warn!(camera = %cam.id, "recording on motion without motion detection: nothing will be recorded");
+    }
+    info!(camera = %cam.id, recording = enabled, mode = new_mode.as_str(), "recording mode changed");
+    shared.publish(&state);
+    Ok(())
 }
 
 /// Repairs interrupted segments on every available destination.
@@ -689,6 +759,13 @@ impl Nvr {
             None => HashMap::new(),
         };
         let (motion_tx, motion_rx) = mpsc::channel(256);
+        let (manual_tx, manual_rx) = mpsc::channel(16);
+        let detection_paused = data_dir.join(detection::PAUSED_FILE).exists();
+        if detection_paused {
+            warn!(
+                "motion detection paused on every camera (Home Assistant or the interface resumes it)"
+            );
+        }
         let detection_ready = database.is_some() && ffmpeg_ok;
         let (ai, ai_error) = detection::start_ai(&config.ai, detection_ready);
 
@@ -699,6 +776,7 @@ impl Nvr {
             cancel: CancellationToken::new(),
             motion: std::sync::RwLock::new(MotionOptions::new(&config.motion, &config.live.ffmpeg)),
             motion_tx: std::sync::Mutex::new(detection_ready.then_some(motion_tx)),
+            detection_paused: AtomicBool::new(detection_paused),
             triggers: std::sync::Mutex::new(HashMap::new()),
             api: Arc::new(OnceLock::new()),
         };
@@ -744,6 +822,7 @@ impl Nvr {
             storage_problems: std::sync::Mutex::new(Vec::new()),
             captures_root: std::sync::Mutex::new(None),
             data_dir: data_dir.clone(),
+            manual: database.is_some().then_some(manual_tx),
             uploaders: tokio::sync::Mutex::new(HashMap::new()),
             upload_status: std::sync::Mutex::new(HashMap::new()),
             ptz: ptz::Sessions::default(),
@@ -778,8 +857,14 @@ impl Nvr {
             )));
         }
         // Ends once every detection has stopped (see `shutdown`).
-        let detection_events =
-            database.map(|db| tokio::spawn(detection::run_events(shared.clone(), db, motion_rx)));
+        let detection_events = database.map(|db| {
+            tokio::spawn(detection::run_events(
+                shared.clone(),
+                db,
+                motion_rx,
+                manual_rx,
+            ))
+        });
         detection::restart_mqtt(&shared).await;
         detection::restart_uploaders(&shared).await;
         if config.metrics.log_interval_seconds > 0 {
@@ -1592,6 +1677,10 @@ impl NvrControl for Controller {
         })
     }
 
+    fn set_detection_paused(&self, paused: bool) -> BoxFuture<'_, Result<(), ControlError>> {
+        Box::pin(async move { detection::set_detection_paused(&self.0, paused).await })
+    }
+
     fn mqtt(&self) -> BoxFuture<'_, MqttView> {
         Box::pin(async move { detection::mqtt_view(&self.0).await })
     }
@@ -1646,9 +1735,9 @@ impl NvrControl for Controller {
 
     fn set_updates(
         &self,
-        repository: Option<String>,
+        check: bool,
     ) -> BoxFuture<'_, Result<rustnvr_api::dto::UpdateStatus, ControlError>> {
-        Box::pin(async move { updates::set(&self.0, repository).await })
+        Box::pin(async move { updates::set(&self.0, check).await })
     }
 
     fn captures(&self) -> BoxFuture<'_, Result<Vec<rustnvr_api::CaptureDay>, ControlError>> {
@@ -1805,6 +1894,7 @@ async fn start_web(
         LiveSettings::from(&config.live),
     );
     state.set_destinations(destinations);
+    state.set_detection_paused(shared.engine.detection_paused.load(Ordering::Relaxed));
     if let Some(db) = &shared.database {
         state.set_database(db.clone());
         bootstrap_accounts(db, config_auth.as_ref(), &state).await;
@@ -1844,7 +1934,16 @@ async fn start_web(
     }
     let server = ApiServer::start_with_tls(addr, state, web.static_dir.clone(), tls)
         .await
-        .with_context(|| format!("cannot listen on {addr}"))?;
+        .map_err(|e| {
+            // Ports below 1024 are refused to an unprivileged account.
+            if e.kind() == std::io::ErrorKind::PermissionDenied && addr.port() < 1024 {
+                anyhow::anyhow!(
+                    "cannot listen on {addr}: {e}; a port below 1024 needs the capability                      CAP_NET_BIND_SERVICE (AmbientCapabilities=CAP_NET_BIND_SERVICE in the                      systemd unit, which rustnvr-update installs), or use a port from 1024 up"
+                )
+            } else {
+                anyhow::Error::new(e).context(format!("cannot listen on {addr}"))
+            }
+        })?;
     info!(url = %format!("{scheme}://{}", server.local_addr()), "web interface listening");
     Ok(server)
 }

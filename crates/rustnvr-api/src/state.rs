@@ -210,6 +210,8 @@ pub struct ApiState {
     hw_test: tokio::sync::Mutex<()>,
     /// Cameras tested a moment ago, for their live preview (by token).
     pub(crate) previews: crate::preview::Previews,
+    /// Motion detection paused on every camera (Home Assistant, interface).
+    detection_paused: std::sync::atomic::AtomicBool,
 }
 
 impl ApiState {
@@ -267,7 +269,13 @@ impl ApiState {
             hw: RwLock::new((crate::dto::HwAccelDto::default(), None)),
             hw_test: tokio::sync::Mutex::new(()),
             previews: crate::preview::Previews::default(),
+            detection_paused: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Motion detection is paused on every camera, or resumed.
+    pub fn set_detection_paused(&self, paused: bool) {
+        self.detection_paused.store(paused, Ordering::Relaxed);
     }
 
     pub(crate) fn live(&self) -> std::sync::MutexGuard<'_, Live> {
@@ -657,6 +665,7 @@ impl ApiState {
                     .unwrap_or_default();
                 MotionDto {
                     enabled: c.motion_enabled,
+                    paused: self.detection_paused.load(Ordering::Relaxed),
                     running: status.running,
                     active: status.active,
                     error: status.error,

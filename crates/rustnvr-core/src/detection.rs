@@ -273,6 +273,8 @@ pub fn presence(crossings: impl IntoIterator<Item = bool>) -> u64 {
 pub enum EventKind {
     /// Changes in the picture (no object recognition).
     Motion,
+    /// Asked for (Home Assistant button, MQTT command), for a set time.
+    Manual,
 }
 
 impl EventKind {
@@ -280,6 +282,15 @@ impl EventKind {
     pub fn as_str(self) -> &'static str {
         match self {
             EventKind::Motion => "motion",
+            EventKind::Manual => "manual",
+        }
+    }
+
+    /// Kind stored as `name` (unknown names are motion events).
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "manual" => EventKind::Manual,
+            _ => EventKind::Motion,
         }
     }
 }

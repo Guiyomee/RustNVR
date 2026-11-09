@@ -43,6 +43,12 @@ impl RecordTrigger {
         self.until_ms.store(until_ms, Ordering::Relaxed);
     }
 
+    /// Records at least up to `until_ms` (a manual event), without
+    /// shortening a later deadline nor an ongoing event.
+    pub fn extend_to(&self, until_ms: i64) {
+        self.until_ms.fetch_max(until_ms, Ordering::Relaxed);
+    }
+
     /// Current deadline in milliseconds since the Unix epoch.
     pub fn deadline_ms(&self) -> i64 {
         self.until_ms.load(Ordering::Relaxed)
@@ -228,6 +234,22 @@ mod tests {
         assert_eq!(seqs(&feed(&mut gate, 13_000)), vec![14]);
         assert!(matches!(feed(&mut gate, 14_000), GateAction::Close));
         assert!(matches!(feed(&mut gate, 15_000), GateAction::Hold));
+    }
+
+    #[test]
+    fn a_manual_deadline_never_shortens_recording() {
+        let trigger = RecordTrigger::default();
+        trigger.extend_to(5_000);
+        assert_eq!(trigger.deadline_ms(), 5_000);
+        // An event starting meanwhile holds until its end.
+        trigger.hold();
+        trigger.extend_to(8_000);
+        assert_eq!(trigger.deadline_ms(), i64::MAX);
+        trigger.release_at(3_000);
+        trigger.extend_to(8_000);
+        assert_eq!(trigger.deadline_ms(), 8_000);
+        trigger.extend_to(6_000);
+        assert_eq!(trigger.deadline_ms(), 8_000);
     }
 
     #[test]

@@ -154,8 +154,8 @@ async fn accounts_sessions_and_roles() {
         http(addr, "GET", "/api/v1/users", None, &viewer)
             .await
             .status,
-        200,
-        "GET allowed"
+        403,
+        "the list of accounts is for administrators"
     );
     let r = http(addr, "DELETE", "/api/v1/users/admin", None, &admin).await;
     assert_eq!(r.status, 409, "last administrator kept");
@@ -215,4 +215,99 @@ async fn accounts_sessions_and_roles() {
     .await;
     assert_eq!(r.status, 204);
     nvr.shutdown().await;
+}
+
+/// Basic credentials, accepted on every route, are locked out like the login
+/// page; a WebSocket opened by a page of another origin is refused even with
+/// a valid session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn basic_guessing_is_locked_and_websockets_check_their_origin() {
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[storage]\nrecordings_dir = \"{}\"\n[metrics]\nlog_interval_seconds = 0\n[web]\nlisten = \"127.0.0.1:0\"\nstatic_dir = \"/nonexistent-rustnvr-web\"\n",
+            dir.path().join("rec").display()
+        ),
+    )
+    .unwrap();
+    let config = Config::load_with_env(&config_path, |_| None).unwrap();
+    let nvr = Nvr::start(&config, event_bus(64)).await.unwrap();
+    let addr = nvr.web_addr().unwrap();
+    let r = http(
+        addr,
+        "POST",
+        "/api/v1/auth/setup",
+        Some(r#"{"username":"admin","password":"tres-secret-1"}"#),
+        "",
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let admin = session_cookie(&r);
+    let basic = |password: &str| {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(format!("admin:{password}"));
+        format!("Authorization: Basic {b64}\r\n")
+    };
+
+    // The right password works with Basic.
+    let r = http(
+        addr,
+        "GET",
+        "/api/v1/cameras",
+        None,
+        &basic("tres-secret-1"),
+    )
+    .await;
+    assert_eq!(r.status, 200);
+    // Five wrong ones lock it, the right one included, for a while.
+    for _ in 0..5 {
+        let r = http(addr, "GET", "/api/v1/cameras", None, &basic("devine")).await;
+        assert_eq!(r.status, 401);
+    }
+    let r = http(
+        addr,
+        "GET",
+        "/api/v1/cameras",
+        None,
+        &basic("tres-secret-1"),
+    )
+    .await;
+    assert_eq!(r.status, 429, "{}", r.body);
+    // The page's login is locked too (same account, same address).
+    let r = http(
+        addr,
+        "POST",
+        "/api/v1/auth/login",
+        Some(r#"{"username":"admin","password":"tres-secret-1"}"#),
+        "",
+    )
+    .await;
+    assert_eq!(r.status, 429);
+    // An open session still works.
+    assert_eq!(
+        http(addr, "GET", "/api/v1/cameras", None, &admin)
+            .await
+            .status,
+        200
+    );
+
+    // WebSocket from another origin: refused before the upgrade.
+    let upgrade = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
+    let evil = format!("{admin}{upgrade}Origin: https://other.example:8443\r\n");
+    let r = http(addr, "GET", "/api/v1/ws", None, &evil).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    // Same origin: switched to WebSocket (the status line is enough).
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "GET /api/v1/ws HTTP/1.1\r\nHost: test\r\n{admin}{upgrade}Origin: http://test\r\n\r\n"
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut first = [0u8; 12];
+    tokio::time::timeout(std::time::Duration::from_secs(5), s.read_exact(&mut first))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&first, b"HTTP/1.1 101");
 }

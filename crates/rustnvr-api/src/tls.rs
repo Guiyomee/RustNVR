@@ -64,15 +64,41 @@ pub fn self_signed(dir: &Path, names: Vec<String>) -> Result<(PathBuf, PathBuf),
         tracing::info!(names = %names.join(", "), "new names: self-signed HTTPS certificate made again");
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let generated = rcgen::generate_simple_self_signed(names.clone()).map_err(|e| e.to_string())?;
-    write_private(&key_path, generated.signing_key.serialize_pem().as_bytes())
+    let signing_key = rcgen::KeyPair::generate().map_err(|e| e.to_string())?;
+    let mut params = rcgen::CertificateParams::new(names.clone()).map_err(|e| e.to_string())?;
+    // Ten years from yesterday (a clock a little behind), instead of the
+    // library's 1975 to 4096.
+    let (from, to) = validity(
+        jiff::Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .date(),
+    );
+    params.not_before = rcgen::date_time_ymd(from.0, from.1, from.2);
+    params.not_after = rcgen::date_time_ymd(to.0, to.1, to.2);
+    let cert = params
+        .self_signed(&signing_key)
+        .map_err(|e| e.to_string())?;
+    write_private(&key_path, signing_key.serialize_pem().as_bytes())
         .map_err(|e| format!("{}: {e}", key_path.display()))?;
-    std::fs::write(&cert_path, generated.cert.pem())
-        .map_err(|e| format!("{}: {e}", cert_path.display()))?;
+    std::fs::write(&cert_path, cert.pem()).map_err(|e| format!("{}: {e}", cert_path.display()))?;
     std::fs::write(&names_path, names.join("\n"))
         .map_err(|e| format!("{}: {e}", names_path.display()))?;
     tracing::info!(cert = %cert_path.display(), names = %names.join(", "), "self-signed HTTPS certificate created");
     Ok((cert_path, key_path))
+}
+
+/// Validity of a self-signed certificate made `today`: from the day before
+/// to ten years later (day 28 at most, which every month has).
+fn validity(today: jiff::civil::Date) -> ((i32, u8, u8), (i32, u8, u8)) {
+    let from = today.yesterday().unwrap_or(today);
+    let ymd = |d: jiff::civil::Date, years: i32| {
+        (
+            i32::from(d.year()) + years,
+            d.month().unsigned_abs(),
+            d.day().unsigned_abs().min(28),
+        )
+    };
+    (ymd(from, 0), ymd(today, 10))
 }
 
 /// The answer to a plain HTTP request sent to the HTTPS port: a redirect to
@@ -226,6 +252,23 @@ pub(crate) async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_signed_certificates_last_ten_years() {
+        assert_eq!(
+            validity(jiff::civil::date(2026, 11, 8)),
+            ((2026, 11, 7), (2036, 11, 8))
+        );
+        // Leap day and year boundary: dates that exist.
+        assert_eq!(
+            validity(jiff::civil::date(2028, 2, 29)),
+            ((2028, 2, 28), (2038, 2, 28))
+        );
+        assert_eq!(
+            validity(jiff::civil::date(2026, 1, 1)),
+            ((2025, 12, 28), (2036, 1, 1))
+        );
+    }
 
     #[test]
     fn creates_and_loads_a_self_signed_certificate() {

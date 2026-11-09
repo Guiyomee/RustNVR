@@ -131,7 +131,7 @@ impl Supervisor {
 
             self.metrics.record_failure();
             let retry_in = backoff.next_delay();
-            warn!(attempt, retry_in_ms = retry_in.as_millis() as u64, error = %error, "stream unavailable");
+            warn!(attempt, retry_in_ms = retry_in.as_millis() as u64, error = %error.one_line(), "stream unavailable");
             self.set_state(StreamState::Retrying {
                 attempt,
                 retry_in,

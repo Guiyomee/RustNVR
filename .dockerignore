@@ -11,3 +11,5 @@ docker-data
 
 .git
 .vscode
+dist-release
+.release-leaks

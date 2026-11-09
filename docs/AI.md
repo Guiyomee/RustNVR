@@ -196,6 +196,12 @@ parking : « rien » devient quatre voitures), noms de fichiers piégés refusé
 
 La reconnaissance intégrée calcule **toujours sur le processeur**, un cœur
 par image : tract, le moteur en Rust pur, n'utilise pas de carte graphique.
+Les images sont analysées **une à la fois**, sur un seul fil : quand
+plusieurs caméras bougent ensemble, leurs images attendent leur tour. C'est ce
+qui garde la mémoire au niveau du modèle (YOLOX-l : 474 Mio contre 617 Mio
+avec trois analyses en parallèle ; YOLOX-s : 130 Mio). Si les analyses
+prennent trop de retard (plus de 16 images en attente, message « picture
+skipped » dans le journal), prenez un modèle plus léger.
 Pour l'IA sur GPU, RustNVR passe par **CodeProject.AI** (fournisseur
 « CodeProject.AI / DeepStack ») installé avec accès à la carte, par exemple
 son image `cuda` pour une carte NVIDIA. Le module de détection de

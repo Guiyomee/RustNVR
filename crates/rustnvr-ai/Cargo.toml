@@ -15,7 +15,7 @@ rustnvr-core.workspace = true
 jiff.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "sync"] }
 tracing.workspace = true
 
 [features]

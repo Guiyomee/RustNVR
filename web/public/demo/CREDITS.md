@@ -3,7 +3,8 @@
 Photos de Wikimedia Commons sous licence **CC0 1.0** (domaine public, aucune
 obligation d'attribution ; les auteurs sont cités par courtoisie), recadrées en
 960 × 540 et recompressées. Elles ne viennent d'aucune caméra : elles
-illustrent seulement les caméras fictives du mode démo (`/?demo=1`).
+illustrent seulement les caméras fictives de la démo (`npm run build:demo`,
+https://guiyomee.github.io/RustNVR/).
 
 | Fichier | Caméra fictive | Photo d'origine | Auteur |
 |---|---|---|---|

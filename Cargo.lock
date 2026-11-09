@@ -3695,7 +3695,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-ai"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "jiff",
  "reqwest",
@@ -3711,7 +3711,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-api"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "argon2",
  "axum",
@@ -3750,7 +3750,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-app"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3784,7 +3784,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-core"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "bytes",
  "percent-encoding",
@@ -3798,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-discovery"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "base64 0.23.1",
  "futures",
@@ -3815,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-motion"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "bytes",
  "rustnvr-core",
@@ -3828,14 +3828,12 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-mqtt"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
- "bytes",
  "rumqttc",
  "rustls",
  "rustls-native-certs",
  "rustnvr-core",
- "serde",
  "serde_json",
  "tokio",
  "tokio-util",
@@ -3844,7 +3842,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-recorder"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "bytes",
  "jiff",
@@ -3857,7 +3855,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-remote"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "object_store",
  "russh",
@@ -3871,10 +3869,9 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-storage"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "rustnvr-core",
- "serde",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -3885,7 +3882,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-stream"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "bytes",
  "futures",
@@ -3902,7 +3899,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-testkit"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3913,7 +3910,7 @@ dependencies = [
 
 [[package]]
 name = "rustnvr-webrtc"
-version = "2026.11.4"
+version = "2026.11.5"
 dependencies = [
  "bytes",
  "rustnvr-core",

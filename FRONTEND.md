@@ -85,18 +85,21 @@ Règles :
 - **Les données temps réel** (système, caméras) arrivent par WebSocket dans
   `LiveStore` ; les composants ne s'abonnent qu'à la tranche qu'ils lisent.
 
-## Mode démo
+## Démo
 
-Activé par `?demo=1` dans l'URL ou par Paramètres → Général ; désactivé par
-`?demo=0` ou le bouton du bandeau. Le choix est mémorisé dans le navigateur.
+La démo est une **construction à part** de l'interface, publiée sur GitHub
+Pages (https://guiyomee.github.io/RustNVR/) : `npm run build:demo` écrit
+`dist-demo/` (adresses sous `/RustNVR/`, `404.html` pour les liens directs),
+`npm run dev:demo` la lance en développement. L'interface servie par RustNVR
+n'a **pas** de mode démo : `DEMO_SITE` (`src/lib/build.ts`) vaut `false`, le
+code et les photos de la démo n'y sont pas inclus (`?demo=1` ne fait rien).
 
 Garanties :
 
 - les données fictives sont dans `src/data/demo/` et ne sont jamais lues par
-  la source réelle ; la source démo n'appelle jamais l'API ;
-- changer de mode recrée la source et **remonte toute l'application**
-  (`key={mode}`) : aucun état ne passe d'un mode à l'autre ;
-- bandeau orange permanent, badge « Mode démo » dans la barre latérale,
+  la source réelle ; la démo n'appelle jamais l'API (ni l'écran de connexion) ;
+- bandeau orange permanent avec un lien « Installer RustNVR », badge « Mode
+  démo » dans la barre latérale,
   « (démo) » dans les noms et les états, badge DÉMO sur chaque image ;
 - les images de démonstration sont des photos fixes libres de droits (CC0,
   Wikimedia Commons, `public/demo/`, crédits dans `public/demo/CREDITS.md`)
@@ -127,9 +130,16 @@ Firefox, ou Edge sans l'extension HEVC) et que le serveur annonce
 inutile) et affiche le badge « converti H.264 ». Les vignettes utilisent le
 sous-flux ; la page d'une caméra propose « Sous-flux / Principal (HD) ».
 
+**Détection en pause.** Si une caméra a `motion.paused`, un bandeau en haut
+de chaque page le dit, avec « Reprendre » (`PUT /api/v1/detection/pause`) pour
+un administrateur ; l'état du NVR passe à « Détection en pause » et l'onglet
+Détection d'une caméra le rappelle. Les événements `manual` sont libellés
+« Manuel » (cartes, liste, marqueurs de la timeline).
+
 **WebRTC (faible latence, expérimental).** Si `capabilities.live_webrtc`, la
 page d'une caméra propose « Standard / Faible latence ». `WebrtcPlayer` est un
-client WHEP minimal : transceiver vidéo en réception seule, attente de la fin
+client WHEP minimal : transceiver vidéo en réception seule (et audio, en grand,
+quand la caméra a un son Opus enregistré : bouton son, coupé au départ), attente de la fin
 du rassemblement des candidats ICE (2 s au plus), `POST
 /api/v1/cameras/{id}/live/webrtc` avec l'offre SDP, puis
 `setRemoteDescription`. Le badge « WEBRTC » distingue ce mode. Si ICE échoue

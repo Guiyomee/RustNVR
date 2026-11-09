@@ -191,8 +191,43 @@ impl OnnxDetector {
     }
 }
 
-/// Shares the model between analyses (tract plans are immutable).
-pub struct SharedOnnx(pub Arc<OnnxDetector>);
+/// Pictures waiting for the model. Each event waits for its answer before
+/// sending its next picture, so the queue stays below the number of events
+/// in progress; this only bounds a model far too slow for the cameras.
+const QUEUE: usize = 16;
+
+type Job = (
+    Vec<u8>,
+    tokio::sync::oneshot::Sender<Result<Vec<DetectedObject>, AiError>>,
+);
+
+/// Runs every analysis on one dedicated thread, one at a time.
+///
+/// The allocator keeps a memory arena per thread at the size of the largest
+/// analysis it ran: analyses spread over the blocking pool kept one per
+/// simultaneous analysis (YOLOX-l: 410 MiB loaded, 622 MiB after three at a
+/// time, `examples/onnx_memory.rs`). One thread keeps one. Pictures of
+/// cameras moving together wait for each other instead.
+pub struct SharedOnnx {
+    jobs: std::sync::mpsc::SyncSender<Job>,
+}
+
+impl SharedOnnx {
+    /// Starts the analysis thread for `detector`; it stops with the last
+    /// [`SharedOnnx`].
+    pub fn new(detector: OnnxDetector) -> Result<Self, String> {
+        let (jobs, queue) = std::sync::mpsc::sync_channel::<Job>(QUEUE);
+        std::thread::Builder::new()
+            .name("ai-onnx".to_owned())
+            .spawn(move || {
+                for (jpeg, reply) in queue {
+                    let _ = reply.send(detector.detect_blocking(&jpeg));
+                }
+            })
+            .map_err(|e| format!("cannot start the analysis thread: {e}"))?;
+        Ok(Self { jobs })
+    }
+}
 
 impl ObjectDetector for SharedOnnx {
     fn name(&self) -> &str {
@@ -200,13 +235,20 @@ impl ObjectDetector for SharedOnnx {
     }
 
     fn detect<'a>(&'a self, jpeg: &'a [u8]) -> BoxFuture<'a, Result<Vec<DetectedObject>, AiError>> {
-        let model = self.0.clone();
-        let jpeg = jpeg.to_vec();
-        // Inference is CPU work: off the async runtime.
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let queued = self.jobs.try_send((jpeg.to_vec(), reply)).map_err(|e| match e {
+            std::sync::mpsc::TrySendError::Full(_) => AiError::Provider(format!(
+                "{QUEUE} pictures already waiting: the model is too slow for the cameras' motion, picture skipped (a lighter model keeps up)"
+            )),
+            std::sync::mpsc::TrySendError::Disconnected(_) => {
+                AiError::Provider("analysis thread stopped".to_owned())
+            }
+        });
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || model.detect_blocking(&jpeg))
+            queued?;
+            answer
                 .await
-                .map_err(|e| AiError::Provider(e.to_string()))?
+                .map_err(|_| AiError::Provider("analysis thread stopped".to_owned()))?
         })
     }
 

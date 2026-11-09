@@ -214,9 +214,34 @@ pub(crate) async fn set_audio(
     Ok(Json(state.camera_dto(&camera)))
 }
 
+/// Body of `PUT /detection/pause`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PauseInput {
+    paused: bool,
+}
+
+/// `PUT /detection/pause`: pauses motion detection on every camera, or
+/// resumes it.
+pub(crate) async fn set_detection_paused(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<PauseInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    control(&state)?.set_detection_paused(input.paused).await?;
+    Ok(Json(serde_json::json!({ "paused": input.paused })))
+}
+
 /// `GET /mqtt`.
-pub(crate) async fn mqtt(State(state): State<Arc<ApiState>>) -> Result<Json<MqttView>, ApiError> {
-    Ok(Json(control(&state)?.mqtt().await))
+pub(crate) async fn mqtt(
+    State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
+) -> Result<Json<MqttView>, ApiError> {
+    let mut view = control(&state)?.mqtt().await;
+    // A viewer sees the settings, not the broker's account.
+    if crate::auth::is_viewer(principal.as_ref()) {
+        view.username = None;
+    }
+    Ok(Json(view))
 }
 
 /// `PUT /mqtt`: stores the settings and reconnects.
@@ -378,23 +403,17 @@ pub(crate) async fn check_updates(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdatesInput {
-    /// Web address of the repository; empty or absent: no check.
-    repository: Option<String>,
+    /// Check for new versions (the repository is the official one unless
+    /// `config.toml` sets another).
+    check: bool,
 }
 
-/// `PUT /updates`: changes the watched repository, then checks it.
+/// `PUT /updates`: turns the check on or off, then checks.
 pub(crate) async fn set_updates(
     State(state): State<Arc<ApiState>>,
     Json(input): Json<UpdatesInput>,
 ) -> Result<Json<crate::dto::UpdateStatus>, ApiError> {
-    let repository = input
-        .repository
-        .map(|r| r.trim().to_owned())
-        .filter(|r| !r.is_empty());
-    if let Some(r) = &repository {
-        rustnvr_core::config::latest_release_api(r).map_err(ApiError::bad_request)?;
-    }
-    Ok(Json(control(&state)?.set_updates(repository).await?))
+    Ok(Json(control(&state)?.set_updates(input.check).await?))
 }
 
 /// Query of `GET /logs`.

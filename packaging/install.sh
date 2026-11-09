@@ -42,6 +42,7 @@ EOF
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mErreur :\033[0m %s\n' "$*" >&2; exit 1; }
+warn() { printf '\033[1;33mAttention :\033[0m %s\n' "$*"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -158,6 +159,16 @@ rm -rf "$SHARE/web.old"
 install -m 0644 "$SRC/config.example.toml" "$SHARE/config.example.toml"
 # This script, for the next updates.
 install -m 0755 "$SRC/install.sh" "$BIN/rustnvr-update"
+# Also reachable from /usr/bin: `pct enter` / `pct exec` (Proxmox) and some
+# sudo or cron setups give a PATH without /usr/local/bin. A real file there
+# (another package) is left alone.
+if [ "$ROOT" = / ]; then
+    for cmd in rustnvr rustnvr-update; do
+        if [ -L "/usr/bin/$cmd" ] || [ ! -e "/usr/bin/$cmd" ]; then
+            ln -sfn "/usr/local/bin/$cmd" "/usr/bin/$cmd"
+        fi
+    done
+fi
 # Where it came from, for the next `rustnvr-update`.
 printf 'RUSTNVR_SOURCE=%s\nRUSTNVR_REPO=%s\n' "$SOURCE" "$REPO" > "$ETC/update.conf"
 install -d -m 0755 "$(dirname "$UNIT")"
@@ -214,11 +225,36 @@ if [ "$ROOT" = / ]; then
 fi
 
 # --- Service -------------------------------------------------------------------
+# Address of the interface: config.toml, unless RUSTNVR_WEB_LISTEN replaces it.
+LISTEN=$(sed -n 's/^listen *= *"\(.*\)"/\1/p' "$ETC/config.toml" | head -n 1)
+ENV_LISTEN=$(sed -n 's/^RUSTNVR_WEB_LISTEN=//p' "$ETC/rustnvr.env" 2>/dev/null | tr -d '"' | head -n 1)
+[ -n "$ENV_LISTEN" ] && LISTEN=$ENV_LISTEN
+PORT_NOW=${LISTEN##*:}
+LISTEN_HOST=${LISTEN%:*}
+LISTEN_HOST=${LISTEN_HOST#[}
+LISTEN_HOST=${LISTEN_HOST%]}
+case "$LISTEN_HOST" in ''|0.0.0.0|::) LISTEN_HOST=127.0.0.1 ;; esac
+# Whether the interface accepts connections, for up to 20 s.
+listening() {
+    for _ in $(seq 1 20); do
+        (exec 3<>"/dev/tcp/$LISTEN_HOST/$PORT_NOW") 2>/dev/null && return 0
+        sleep 1
+    done
+    return 1
+}
+LISTENING=unknown
 if [ "$START" = 1 ] && systemd_running; then
     systemctl daemon-reload
     systemctl enable --quiet rustnvr
     systemctl restart rustnvr
     say "Service démarré (journaux : journalctl -u rustnvr -f)"
+    if listening; then
+        LISTENING=yes
+    else
+        LISTENING=no
+        warn "l'interface ne répond pas sur le port ${PORT_NOW:-?} : dernières lignes du journal"
+        journalctl -u rustnvr -n 15 --no-pager -o cat 2>/dev/null | sed 's/^/    /' || true
+    fi
 elif [ "$START" = 1 ]; then
     say "systemd ne tourne pas ici : démarrez RustNVR vous-même"
 fi
@@ -226,8 +262,6 @@ command -v ffmpeg >/dev/null || [ "$ROOT" != / ] \
     || say "FFmpeg absent : détection de mouvement et captures indisponibles (apt install ffmpeg)"
 
 # --- Summary -------------------------------------------------------------------
-LISTEN=$(sed -n 's/^listen *= *"\(.*\)"/\1/p' "$ETC/config.toml" | head -n 1)
-PORT_NOW=${LISTEN##*:}
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo
 if [ "$FIRST" = 1 ]; then
@@ -235,7 +269,12 @@ if [ "$FIRST" = 1 ]; then
 else
     echo "RustNVR mis à jour : ${OLD_VERSION:-?} → $NEW_VERSION (configuration et enregistrements gardés)."
 fi
-echo "  Interface : https://${IP:-<adresse>}:${PORT_NOW:-$PORT}/"
+if [ "$LISTENING" = no ]; then
+    echo "  Interface : PAS JOIGNABLE pour l'instant (voir le journal ci-dessus,"
+    echo "              journalctl -u rustnvr -n 50), prévue sur https://${IP:-<adresse>}:${PORT_NOW:-$PORT}/"
+else
+    echo "  Interface : https://${IP:-<adresse>}:${PORT_NOW:-$PORT}/"
+fi
 if [ -n "$PASSWORD" ]; then
     echo "  Compte    : admin"
     echo "  Mot de passe : $PASSWORD"

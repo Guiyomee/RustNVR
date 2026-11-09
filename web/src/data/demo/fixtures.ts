@@ -2,6 +2,7 @@
 // Every identifier starts with "demo-" and every name is visibly fictitious.
 
 import type { Camera, StreamStats } from '../../types/api'
+import { DEMO_SITE } from '../../lib/build'
 
 export const DEMO_PREFIX = 'demo-'
 
@@ -41,6 +42,8 @@ export const DEMO_CAMERAS: DemoCameraSpec[] = [
 ]
 
 export function demoSpec(id: string): DemoCameraSpec | undefined {
+  // Outside the demo site, nothing: the fictional data stays out of the build.
+  if (!DEMO_SITE) return undefined
   return DEMO_CAMERAS.find((c) => c.id === id)
 }
 
@@ -76,7 +79,7 @@ export function demoCamera(spec: DemoCameraSpec, now: number, jitter: number): C
     record_mode: 'continuous',
     retention_days: null,
     max_size_gb: null,
-    motion: { enabled: !offline, running: !offline, active: false, error: null },
+    motion: { enabled: !offline, paused: false, running: !offline, active: false, error: null },
     record_audio: true,
     audio: null,
     // The garage camera shows the PTZ controls (nothing is sent in demo mode).

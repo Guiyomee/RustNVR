@@ -11,7 +11,7 @@ use rustnvr_api::{
 };
 use rustnvr_core::config::{
     AiConfig, Config, HwAccelMode, MANAGED_SETTINGS_FILE, ManagedSettings, MotionConfig,
-    MqttConfig, RecordingConfig, RemoteConfig,
+    MqttConfig, RecordMode, RecordingConfig, RemoteConfig,
 };
 use rustnvr_core::{
     CameraId, DetectedObject, DetectionEvent, EventKind, MotionSettings, NvrEvent, Secret,
@@ -62,6 +62,20 @@ pub(super) async fn ffmpeg_works(ffmpeg: &str) -> bool {
     )
 }
 
+/// File of the data directory present while motion detection is paused.
+pub(super) const PAUSED_FILE: &str = "detection-paused";
+
+/// Width of the pictures taken on command (Home Assistant button).
+const CAPTURE_WIDTH: u32 = 1920;
+
+/// A manual event asked for (Home Assistant button, MQTT command).
+pub(super) struct Manual {
+    pub(super) camera: CameraId,
+    pub(super) seconds: u32,
+    /// Its identifier, or why it was not created.
+    pub(super) reply: tokio::sync::oneshot::Sender<Result<i64, String>>,
+}
+
 /// Background work finished on an event (announced by [`run_events`]).
 enum EventUpdate {
     /// The thumbnail is stored.
@@ -80,9 +94,18 @@ pub(super) async fn run_events(
     shared: Arc<Shared>,
     db: Database,
     mut updates: mpsc::Receiver<MotionUpdate>,
+    mut manual: mpsc::Receiver<Manual>,
 ) {
     let (thumb_tx, mut thumbs) = mpsc::channel::<EventUpdate>(16);
     let mut ongoing: HashMap<CameraId, DetectionEvent> = HashMap::new();
+    // Manual events: their timers end them here.
+    let (end_tx, mut ends) = mpsc::channel::<(CameraId, i64)>(16);
+    let mut open_manual: HashMap<i64, CameraId> = HashMap::new();
+    // Until when each camera records for its manual events (milliseconds).
+    let mut manual_until: HashMap<CameraId, i64> = HashMap::new();
+    let post_roll_ms = |shared: &Shared| {
+        i64::try_from(shared.engine.recording().post_roll().as_millis()).unwrap_or(0)
+    };
     let announce = |e: &DetectionEvent| {
         let _ = shared.engine.events.send(NvrEvent::Detection(e.clone()));
     };
@@ -117,10 +140,12 @@ pub(super) async fn run_events(
                     }
                     MotionUpdate::Ended { camera, end_ms, score, zones } => {
                         if let Some(t) = shared.engine.trigger(&camera) {
-                            let post_roll_ms =
-                                i64::try_from(shared.engine.recording().post_roll().as_millis())
-                                    .unwrap_or(0);
-                            t.release_at(end_ms.saturating_add(post_roll_ms));
+                            let post = post_roll_ms(&shared);
+                            t.release_at(end_ms.saturating_add(post));
+                            // A manual event still running keeps recording.
+                            if let Some(until) = manual_until.get(&camera) {
+                                t.extend_to(until.saturating_add(post));
+                            }
                         }
                         if let Some(mut e) = ongoing.remove(&camera) {
                             e.end_ms = Some(end_ms.max(e.start_ms));
@@ -137,6 +162,43 @@ pub(super) async fn run_events(
                         // A picture may be analysed first: off this loop.
                         tokio::spawn(crossing(shared.clone(), db.clone(), camera, line, forward, at_ms));
                     }
+                }
+            }
+            Some(Manual { camera, seconds, reply }) = manual.recv() => {
+                let start_ms = jiff::Timestamp::now().as_millisecond();
+                let until = start_ms.saturating_add(i64::from(seconds) * 1000);
+                if let Some(t) = shared.engine.trigger(&camera) {
+                    t.extend_to(until.saturating_add(post_roll_ms(&shared)));
+                }
+                let latest = manual_until.entry(camera.clone()).or_insert(until);
+                *latest = (*latest).max(until);
+                match db.start_event(&camera, EventKind::Manual, start_ms, 0.0, &[]).await {
+                    Ok(e) => {
+                        info!(%camera, id = e.id, seconds, "manual event started");
+                        announce(&e);
+                        tokio::spawn(take_thumbnail(shared.clone(), db.clone(), e.clone(), thumb_tx.clone()));
+                        open_manual.insert(e.id, camera.clone());
+                        let end_tx = end_tx.clone();
+                        let id = e.id;
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(seconds.into())).await;
+                            let _ = end_tx.send((camera, id)).await;
+                        });
+                        let _ = reply.send(Ok(id));
+                    }
+                    Err(err) => {
+                        warn!(%camera, error = %err, "cannot record manual event");
+                        let _ = reply.send(Err(err.to_string()));
+                    }
+                }
+            }
+            Some((camera, id)) = ends.recv() => {
+                let now = jiff::Timestamp::now().as_millisecond();
+                if manual_until.get(&camera).is_some_and(|until| *until <= now) {
+                    manual_until.remove(&camera);
+                }
+                if open_manual.remove(&id).is_some() {
+                    end_manual(&db, id, now, &announce).await;
                 }
             }
             Some(update) = thumbs.recv() => {
@@ -161,6 +223,75 @@ pub(super) async fn run_events(
             }
         }
     }
+    // Stopping: the manual events end now.
+    let now = jiff::Timestamp::now().as_millisecond();
+    for id in open_manual.into_keys() {
+        end_manual(&db, id, now, &announce).await;
+    }
+}
+
+/// Ends manual event `id` at `end_ms` (read back: its thumbnail and objects
+/// may have come meanwhile).
+async fn end_manual(db: &Database, id: i64, end_ms: i64, announce: &impl Fn(&DetectionEvent)) {
+    match db.event(id).await {
+        Ok(Some(mut e)) => {
+            e.end_ms = Some(end_ms.max(e.start_ms));
+            if let Err(err) = db.update_event(&e).await {
+                warn!(camera = %e.camera, error = %err, "cannot end manual event");
+            }
+            info!(camera = %e.camera, id, "manual event ended");
+            announce(&e);
+        }
+        Ok(None) => {}
+        Err(err) => warn!(id, error = %err, "cannot end manual event"),
+    }
+}
+
+/// Pauses motion detection on every camera, or resumes it; kept across
+/// restarts (a file in the data directory). The settings of each camera do
+/// not change.
+pub(super) async fn set_detection_paused(
+    shared: &Arc<Shared>,
+    paused: bool,
+) -> Result<(), ControlError> {
+    let path = shared.data_dir.join(PAUSED_FILE);
+    let stored = if paused {
+        tokio::fs::write(&path, b"paused\n").await
+    } else {
+        match tokio::fs::remove_file(&path).await {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    };
+    stored.map_err(|e| ControlError::Internal(format!("{}: {e}", path.display())))?;
+    let mut guard = shared.state.lock().await;
+    let state: &mut State = &mut guard;
+    if shared
+        .engine
+        .detection_paused
+        .swap(paused, std::sync::atomic::Ordering::Relaxed)
+        == paused
+    {
+        return Ok(());
+    }
+    // Stopping a detection ends its ongoing event.
+    let ids: Vec<CameraId> = state.running.keys().cloned().collect();
+    for id in ids {
+        let settings = state.motion.get(&id).cloned();
+        if let Some(rt) = state.running.get_mut(&id) {
+            if let Some(old) = rt.motion.take() {
+                old.stop().await;
+            }
+            shared.engine.start_motion(rt, settings.as_ref());
+        }
+    }
+    if paused {
+        warn!("motion detection paused on every camera");
+    } else {
+        info!("motion detection resumed");
+    }
+    shared.publish(state);
+    Ok(())
 }
 
 /// Distance (fraction of the picture) from a line within which a recognized
@@ -831,6 +962,7 @@ impl NvrView for MqttBridge {
                         name: c.name.clone().unwrap_or_else(|| c.id.to_string()),
                         online: rt.is_some_and(|r| r.stream.state.borrow().is_streaming()),
                         recording: c.enabled && c.record.enabled,
+                        record_mode: c.record.mode,
                         motion_enabled: state.motion.get(&c.id).is_some_and(|m| m.enabled),
                         motion_active: rt
                             .and_then(|r| r.motion.as_ref())
@@ -886,6 +1018,10 @@ impl NvrView for MqttBridge {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .is_empty(),
+                detection_paused: shared
+                    .engine
+                    .detection_paused
+                    .load(std::sync::atomic::Ordering::Relaxed),
             }
         })
     }
@@ -949,6 +1085,76 @@ impl NvrView for MqttBridge {
         Box::pin(async move {
             let shared = self.0.upgrade().ok_or("NVR arrêté")?;
             super::ptz::goto_name(&shared, camera.as_str(), &name)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn set_record_mode(
+        &self,
+        camera: CameraId,
+        mode: Option<RecordMode>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let shared = self.0.upgrade().ok_or("NVR arrêté")?;
+            super::set_record_mode(&shared, camera.as_str(), mode)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn manual_event(&self, camera: CameraId, seconds: u32) -> BoxFuture<'_, Result<i64, String>> {
+        Box::pin(async move {
+            let shared = self.0.upgrade().ok_or("NVR arrêté")?;
+            let manual = shared
+                .manual
+                .clone()
+                .ok_or("base de données indisponible : pas d'événements")?;
+            {
+                let state = shared.state.lock().await;
+                let rt = state
+                    .running
+                    .get(&camera)
+                    .ok_or_else(|| format!("caméra {camera} inconnue ou désactivée"))?;
+                if !rt.stream.state.borrow().is_streaming() {
+                    return Err(format!("caméra {camera} hors ligne"));
+                }
+            }
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            manual
+                .send(Manual {
+                    camera,
+                    seconds,
+                    reply,
+                })
+                .await
+                .map_err(|_| "NVR arrêté")?;
+            answer.await.map_err(|_| "NVR arrêté")?
+        })
+    }
+
+    fn capture(&self, camera: CameraId) -> BoxFuture<'_, Result<Vec<u8>, String>> {
+        Box::pin(async move {
+            let shared = self.0.upgrade().ok_or("NVR arrêté")?;
+            if !shared.ffmpeg_ok {
+                return Err("FFmpeg indisponible".to_owned());
+            }
+            let tap = {
+                let state = shared.state.lock().await;
+                state.running.get(&camera).map(|rt| rt.live.clone())
+            }
+            .ok_or_else(|| format!("caméra {camera} inconnue ou désactivée"))?;
+            let masks = camera_settings(&shared, &camera).await.mask_rects();
+            let jpeg = snapshot_jpeg(&shared.ffmpeg, &tap, CAPTURE_WIDTH, &masks).await?;
+            info!(%camera, bytes = jpeg.len(), "picture taken on command");
+            Ok(jpeg.to_vec())
+        })
+    }
+
+    fn set_detection_paused(&self, paused: bool) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let shared = self.0.upgrade().ok_or("NVR arrêté")?;
+            set_detection_paused(&shared, paused)
                 .await
                 .map_err(|e| e.to_string())
         })

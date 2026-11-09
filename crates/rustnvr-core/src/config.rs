@@ -888,13 +888,20 @@ impl WebhookConfig {
     }
 }
 
+/// Repository whose releases are checked when no other one is set.
+pub const OFFICIAL_REPOSITORY: &str = "https://github.com/Guiyomee/RustNVR";
+
 /// Check for new versions (`[updates]`): the latest release published on the
 /// repository is compared with the running version. Nothing is installed.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct UpdatesConfig {
+    /// Check at all (on by default: one request to the repository at startup
+    /// then every 12 hours).
+    pub check: bool,
     /// Web address of the repository (Gitea, Forgejo or GitHub), e.g.
-    /// `https://gitea.example.org/owner/RustNVR`. None: no check.
+    /// `https://gitea.example.org/owner/RustNVR`. None: the official one
+    /// ([`OFFICIAL_REPOSITORY`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     /// Environment variable holding an access token, for a private repository.
@@ -902,7 +909,23 @@ pub struct UpdatesConfig {
     pub token_env: Option<String>,
 }
 
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self {
+            check: true,
+            repository: None,
+            token_env: None,
+        }
+    }
+}
+
 impl UpdatesConfig {
+    /// The repository checked, or `None` when the check is off.
+    pub fn watched(&self) -> Option<&str> {
+        self.check
+            .then(|| self.repository.as_deref().unwrap_or(OFFICIAL_REPOSITORY))
+    }
+
     /// Configuration errors.
     pub fn problems(&self) -> Vec<String> {
         match &self.repository {
@@ -1997,12 +2020,6 @@ impl Config {
         config.managed_settings_file = Some(settings_path);
         config.validate_with(env)?;
         Ok(config)
-    }
-
-    /// Parses and validates a configuration, resolving environment variables
-    /// from the process environment.
-    pub fn from_toml(text: &str) -> Result<Self, ConfigError> {
-        Self::from_toml_with_env(text, |name| std::env::var(name).ok())
     }
 
     /// Parses and validates a configuration with a custom environment lookup.

@@ -110,11 +110,11 @@ pub(super) async fn check(shared: &Shared) -> UpdateStatus {
         .and_then(|d| i64::try_from(d.as_millis()).ok());
     let mut status = UpdateStatus {
         current: current(),
-        repository: config.repository.clone(),
+        repository: config.watched().map(str::to_owned),
         install: install_kind().to_owned(),
         ..UpdateStatus::default()
     };
-    if let Some(repository) = &config.repository {
+    if let Some(repository) = config.watched() {
         status.checked_at_ms = checked_at_ms;
         match latest(&config, repository).await {
             Ok(Some(r)) => {
@@ -166,23 +166,21 @@ pub(super) async fn run_checks(shared: Arc<Shared>, cancel: CancellationToken) {
     }
 }
 
-/// Stores the watched repository (`None`: no check) and checks it.
-pub(super) async fn set(
-    shared: &Arc<Shared>,
-    repository: Option<String>,
-) -> Result<UpdateStatus, ControlError> {
+/// Turns the check on or off (the repository stays as configured) and
+/// checks.
+pub(super) async fn set(shared: &Arc<Shared>, on: bool) -> Result<UpdateStatus, ControlError> {
     let path = shared.managed_updates_file.clone().ok_or_else(|| {
         ControlError::Internal("no configuration file to store settings next to".into())
     })?;
     let next = {
         let mut config = shared.updates.lock().unwrap_or_else(|e| e.into_inner());
-        config.repository = repository;
+        config.check = on;
         config.clone()
     };
     save(&path, &next)
         .map_err(|e| ControlError::Internal(format!("cannot write {}: {e}", path.display())))?;
     info!(
-        repository = next.repository.as_deref().unwrap_or("-"),
+        repository = next.watched().unwrap_or("-"),
         "update check settings changed"
     );
     Ok(check(shared).await)
@@ -223,13 +221,14 @@ mod tests {
         let config_path = dir.path().join("config.toml");
         std::fs::write(&config_path, "").expect("config");
         let settings = UpdatesConfig {
+            check: true,
             repository: Some("https://gitea.example.org/me/RustNVR".into()),
             token_env: None,
         };
         save(&dir.path().join(MANAGED_UPDATES_FILE), &settings).expect("save");
         let loaded = Config::load_with_env(&config_path, |_| None).expect("load");
         assert_eq!(loaded.updates, settings);
-        // No repository: no check, and the file still loads.
+        // No repository: the official one.
         save(
             &dir.path().join(MANAGED_UPDATES_FILE),
             &UpdatesConfig::default(),
@@ -237,6 +236,31 @@ mod tests {
         .expect("save");
         let loaded = Config::load_with_env(&config_path, |_| None).expect("load");
         assert_eq!(loaded.updates, UpdatesConfig::default());
+        assert_eq!(
+            loaded.updates.watched(),
+            Some(rustnvr_core::config::OFFICIAL_REPOSITORY)
+        );
+        // Turned off in the interface: nothing checked.
+        let off = UpdatesConfig {
+            check: false,
+            ..UpdatesConfig::default()
+        };
+        save(&dir.path().join(MANAGED_UPDATES_FILE), &off).expect("save");
+        let loaded = Config::load_with_env(&config_path, |_| None).expect("load");
+        assert_eq!(loaded.updates.watched(), None);
+        // A file of an earlier version (no `check`): checked.
+        std::fs::write(
+            dir.path().join(MANAGED_UPDATES_FILE),
+            "[updates]
+repository = \"https://gitea.example.org/me/RustNVR\"
+",
+        )
+        .expect("write");
+        let loaded = Config::load_with_env(&config_path, |_| None).expect("load");
+        assert_eq!(
+            loaded.updates.watched(),
+            Some("https://gitea.example.org/me/RustNVR")
+        );
     }
 
     #[test]

@@ -217,6 +217,7 @@ fn body(kind: &str, event: &DetectionEvent, camera_name: &str, image: Option<&[u
         "camera_name": camera_name,
         "event": {
             "id": event.id,
+            "kind": event.kind.as_str(),
             "start_ms": event.start_ms,
             "end_ms": event.end_ms,
             "score": (f64::from(event.score) * 1000.0).round() / 1000.0,
@@ -289,6 +290,11 @@ fn discord_payload(
         .collect::<Vec<_>>()
         .join(" · ");
     let (title, color, at_ms) = match kind {
+        "motion" if event.kind == rustnvr_core::EventKind::Manual => (
+            format!("Événement manuel · {camera_name}"),
+            0xF5_9E_0B,
+            event.start_ms,
+        ),
         "motion" => (
             format!("Mouvement · {camera_name}"),
             0xF5_9E_0B,

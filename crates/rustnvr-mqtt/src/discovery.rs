@@ -1,11 +1,13 @@
 //! Home Assistant MQTT discovery messages.
 //!
 //! Each camera becomes a device with: a motion sensor, a connectivity
-//! sensor, a recording sensor, a switch for motion detection and a camera
-//! entity showing the picture of the last event (with object recognition: a
-//! person sensor and a camera entity of the last person, boxes drawn). The
-//! NVR itself is a device
-//! with the number of connected cameras and the disk usage.
+//! sensor, a recording sensor, a recording mode selector, switches for motion
+//! detection and sound, buttons creating an event and taking a picture, and
+//! camera entities showing the picture of the last event and the last picture
+//! taken (with object recognition: a person sensor and a camera entity of the
+//! last person, boxes drawn). The NVR itself is a device with the number of
+//! connected cameras, the disk usage and a switch pausing detection on every
+//! camera.
 //!
 //! Unique identifiers derive from the MQTT client identifier and the camera
 //! identifier, so they stay stable across restarts and several NVRs can
@@ -25,6 +27,10 @@ const CAMERA_ENTITIES: &[(&str, &str)] = &[
     ("binary_sensor", "person"),
     ("camera", "snapshot"),
     ("camera", "person_snapshot"),
+    ("select", "record_mode"),
+    ("button", "create_event"),
+    ("button", "take_capture"),
+    ("camera", "capture"),
 ];
 
 /// Discovery node identifier: the client identifier restricted to the
@@ -202,6 +208,44 @@ pub(crate) fn camera_configs(
     } else {
         push("camera", "person_snapshot", Value::Null, Value::Null);
     }
+    push(
+        "select",
+        "record_mode",
+        entity("record_mode", "Mode d'enregistrement"),
+        json!({
+            "icon": "mdi:record-rec",
+            "entity_category": "config",
+            "options": crate::RECORD_MODES.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            "state_topic": topics.camera(&c.id, "record_mode"),
+            "command_topic": topics.camera(&c.id, "record_mode/set"),
+        }),
+    );
+    push(
+        "button",
+        "create_event",
+        entity("create_event", "Créer un événement"),
+        json!({
+            "icon": "mdi:bookmark-plus",
+            "command_topic": topics.camera(&c.id, "event/create"),
+            "payload_press": "PRESS",
+        }),
+    );
+    push(
+        "button",
+        "take_capture",
+        entity("take_capture", "Prendre une capture"),
+        json!({
+            "icon": "mdi:camera",
+            "command_topic": topics.camera(&c.id, "capture/take"),
+            "payload_press": "PRESS",
+        }),
+    );
+    push(
+        "camera",
+        "capture",
+        entity("capture", "Capture"),
+        json!({ "topic": topics.camera(&c.id, "capture") }),
+    );
     out
 }
 
@@ -210,6 +254,22 @@ pub(crate) fn nvr_configs(prefix: &str, client_id: &str, topics: &Topics) -> Vec
     let node = node_id(client_id);
     let availability = json!([{ "topic": topics.availability() }]);
     vec![
+        (
+            config_topic(prefix, "switch", client_id, "detection"),
+            json!({
+                "name": "Détection (toutes les caméras)",
+                "unique_id": format!("{node}_detection"),
+                "object_id": format!("{node}_detection"),
+                "icon": "mdi:motion-sensor",
+                "state_topic": topics.system("detection"),
+                "command_topic": topics.system("detection/set"),
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "device": nvr_device(client_id),
+                "availability": availability,
+            })
+            .to_string(),
+        ),
         (
             config_topic(prefix, "sensor", client_id, "cameras_online"),
             json!({
@@ -402,6 +462,7 @@ mod tests {
             name: "Jardin".into(),
             online: true,
             recording: false,
+            record_mode: rustnvr_core::config::RecordMode::Continuous,
             motion_enabled: true,
             motion_active: false,
             audio_enabled: true,
@@ -467,6 +528,30 @@ mod tests {
         let picture: Value = serde_json::from_str(&configs[7].1).expect("json");
         assert_eq!(picture["topic"], "rustnvr/jardin/person/snapshot");
         assert_eq!(picture["unique_id"], "rustnvr_jardin_person_snapshot");
+        // Recording mode, manual event, picture on command.
+        assert_eq!(
+            configs[8].0,
+            "homeassistant/select/rustnvr/jardin_record_mode/config"
+        );
+        let mode: Value = serde_json::from_str(&configs[8].1).expect("json");
+        assert_eq!(
+            mode["options"],
+            json!(["Continu", "Sur mouvement", "Arrêté"])
+        );
+        assert_eq!(mode["command_topic"], "rustnvr/jardin/record_mode/set");
+        let event: Value = serde_json::from_str(&configs[9].1).expect("json");
+        assert_eq!(event["command_topic"], "rustnvr/jardin/event/create");
+        let take: Value = serde_json::from_str(&configs[10].1).expect("json");
+        assert_eq!(take["command_topic"], "rustnvr/jardin/capture/take");
+        let capture: Value = serde_json::from_str(&configs[11].1).expect("json");
+        assert_eq!(capture["topic"], "rustnvr/jardin/capture");
+        assert_ne!(take["unique_id"], capture["unique_id"]);
+        // The NVR: a switch pausing detection everywhere.
+        let nvr = nvr_configs("homeassistant", "rustnvr", &topics);
+        assert_eq!(nvr[0].0, "homeassistant/switch/rustnvr/detection/config");
+        let detection: Value = serde_json::from_str(&nvr[0].1).expect("json");
+        assert_eq!(detection["command_topic"], "rustnvr/detection/set");
+        assert_eq!(detection["state_topic"], "rustnvr/detection");
         // Without object recognition, the sensor is removed (empty payload).
         let without = CameraView {
             person_detection: false,

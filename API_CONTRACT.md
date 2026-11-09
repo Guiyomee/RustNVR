@@ -202,9 +202,10 @@ conteneur ou du service, `null` sans limite. Échantillonnés toutes les 2 s
 renseignés qu'en `online`. `recorder` est `null` si l'enregistrement est
 désactivé. 404 si la caméra n'existe pas.
 
-`motion` : `{ "enabled", "running", "active", "error" }` — détection activée
-pour cette caméra, images en cours d'analyse, événement en cours, dernière
-erreur du décodeur.
+`motion` : `{ "enabled", "paused", "running", "active", "error" }` — détection
+activée pour cette caméra, détection en pause sur toutes les caméras (voir
+`PUT /detection/pause`), images en cours d'analyse, événement en cours,
+dernière erreur du décodeur.
 
 `managed` vaut `true` pour une caméra ajoutée depuis l'interface (stockée dans
 `cameras.ui.toml`) ; `edit` donne alors ses réglages modifiables
@@ -521,11 +522,13 @@ quand personne ne regarde.
 
 Direct à faible latence par WebRTC, sans réencodage pour une caméra H.264.
 Signalisation WHEP sans « trickle » : le corps est l'offre SDP du navigateur
-(`Content-Type: application/sdp`, vidéo en réception seule, candidats ICE déjà
-rassemblés) ; la réponse est `201 Created`, `Content-Type: application/sdp`,
+(`Content-Type: application/sdp`, vidéo en réception seule, et son en réception
+seule si voulu, candidats ICE déjà rassemblés) ; la réponse est `201 Created`, `Content-Type: application/sdp`,
 avec la réponse SDP du serveur.
 
 - `stream=main|sub` : comme pour `/live` ;
+- son : envoyé en Opus quand l'offre contient une piste audio et que le son de
+  la caméra est de l'Opus (G.711 converti) ; l'AAC ne passe pas en WebRTC ;
 - caméra H.265 : la vidéo passe par la conversion H.264 (`live.transcode`),
   car les navigateurs ne reçoivent pas le H.265 en WebRTC ; 503 si la
   conversion est désactivée ;
@@ -573,6 +576,8 @@ de stockage a une limite.
 Points de stockage : le disque local (`local`, toujours présent) et des
 dossiers sur des partages réseau **montés** dans le système (NAS en SMB/CIFS
 ou NFS), écrits directement comme un disque local.
+Pour un compte lecteur, `remote` ne contient ni `access_key_id` (S3) ni
+`username` (SFTP).
 
 ```json
 [ { "id": "nas", "name": "NAS salon", "kind": "nas", "path": "/mnt/nas/rustnvr",
@@ -628,6 +633,15 @@ point de stockage est indisponible et qu'elle n'enregistre pas aussi en
 local, elle écrit sur le disque local en attendant (avertissement dans le
 journal), puis revient au NAS dès qu'il est de nouveau disponible. Le segment
 en cours au moment de la panne est perdu.
+
+### `PUT /api/v1/detection/pause`
+
+Corps `{ "paused": true }` : met la détection de mouvement en pause sur toutes
+les caméras (aucune image analysée, réglages de chaque caméra inchangés), ou
+la reprend (`false`) ; répond `{ "paused": … }`. Gardé au redémarrage (fichier
+`detection-paused` du dossier de données). Aussi par MQTT (`<p>/detection/set`,
+interrupteur Home Assistant « Détection (toutes les caméras) »). Visible dans
+`motion.paused` de chaque caméra. Administrateur seulement.
 
 ### `PUT /api/v1/cameras/{id}/audio`
 
@@ -708,13 +722,14 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   (`offline_ms` : durée sans image ; `error` : dernière erreur de connexion,
   sans identifiants). Discord : « Caméra hors ligne · Garage » avec la durée
   et l'erreur, puis « Caméra rétablie · Garage » avec la durée de la coupure.
-- Corps envoyé : `{ "type", "camera", "camera_name", "event": { "id",
+- Corps envoyé : `{ "type", "camera", "camera_name", "event": { "id", "kind",
   "start_ms", "end_ms", "score", "zones", "objects" }, "image":
   "data:image/jpeg;base64,…" | null, "rustnvr" }`.
 - Adresse Discord (`https://discord.com/api/webhooks/…`, aussi
   `discordapp.com`, `ptb.` et `canary.`) : à la place de ce JSON, que Discord
   refuse, un message Discord. Il contient un embed (titre « Mouvement ·
-  Jardin », « Personne · Jardin » ou « Fin de l'événement · Jardin », objets
+  Jardin », « Événement manuel · Jardin », « Personne · Jardin » ou « Fin de
+  l'événement · Jardin », objets
   et scores, zones, durée, heure de l'événement, numéro). L'image est envoyée
   en pièce jointe (`multipart/form-data`, champs `payload_json` et
   `files[0]` = `evenement.jpg`) et affichée dans l'embed.
@@ -765,8 +780,11 @@ lignes, masques). Ni enregistrements, ni événements, ni comptes.
 ### `GET /api/v1/updates` · `PUT /api/v1/updates` · `POST /api/v1/updates/check`
 
 Nouvelles versions : la dernière publication (« release ») du dépôt surveillé
-(Gitea, Forgejo ou GitHub) est comparée à la version en cours, au démarrage
-(30 s après) puis toutes les 12 heures. Rien n'est téléchargé ni installé.
+est comparée à la version en cours, au démarrage (30 s après) puis toutes les
+12 heures. Rien n'est téléchargé ni installé. Le dépôt est le dépôt officiel
+(`https://github.com/Guiyomee/RustNVR`) sauf si `config.toml` en donne un
+autre (`[updates] repository`, Gitea, Forgejo ou GitHub) ; `repository` vaut
+`null` quand la vérification est désactivée.
 
 ```json
 { "current": "2026.11.1", "repository": "https://gitea.example.org/owner/RustNVR",
@@ -785,10 +803,9 @@ Nouvelles versions : la dernière publication (« release ») du dépôt surveil
   `INVOCATION_ID`) ou `other`, pour la procédure affichée.
 - `error` : dépôt injoignable, accès refusé (dépôt privé : jeton par
   `[updates] token_env`), réponse illisible.
-- `PUT` (administrateur) : `{ "repository": "https://…/propriétaire/dépôt" }`
-  (`null` ou vide : aucune vérification) ; adresse vérifiée (400 sinon), écrite
-  dans `updates.ui.toml` (0600), puis vérification immédiate. `POST /check`
-  (administrateur) vérifie tout de suite.
+- `PUT` (administrateur) : `{ "check": true }` active la vérification,
+  `{ "check": false }` la coupe ; écrit dans `updates.ui.toml` (0600), puis
+  vérification immédiate. `POST /check` (administrateur) vérifie tout de suite.
 - `GET /system` porte `update_available` (version publiée plus récente, ou
   `null`), pour le bandeau de l'interface.
 
@@ -973,7 +990,9 @@ est découpé au-delà de `motion.max_event_seconds`.
 ### `GET /api/v1/events?camera=&from=&to=&limit=`
 
 Événements chevauchant `[from, to)` (par défaut les dernières 24 h), du plus
-récent au plus ancien ; `limit` 200 par défaut, 1000 au plus ; 31 jours au plus
+récent au plus ancien ; `kind` : `motion`, ou `manual` (bouton Home
+Assistant « Créer un événement », commande MQTT `<p>/<caméra>/event/create` :
+score 0, sans zones ; non compté dans les statistiques d'activité) ; `limit` 200 par défaut, 1000 au plus ; 31 jours au plus
 par requête. Un événement en cours a `end_ms: null`. 503 si la base de données
 n'a pas pu être ouverte.
 
@@ -1050,7 +1069,8 @@ est absent ou si la caméra n'a pas d'image récente.
 
 ### `GET /api/v1/mqtt` · `PUT /api/v1/mqtt`
 
-Réglages MQTT et état de la connexion, **jamais le mot de passe** :
+Réglages MQTT et état de la connexion, **jamais le mot de passe** (ni le
+compte, `username` à `null`, pour un compte lecteur) :
 
 ```json
 { "enabled": true, "host": "192.168.1.10", "port": 8883, "tls": true, "ca_file": null, "username": "rustnvr",

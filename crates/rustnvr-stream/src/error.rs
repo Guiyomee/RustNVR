@@ -63,11 +63,47 @@ impl StreamError {
         msg.lines().next().unwrap_or_default().trim().to_owned()
     }
 
+    /// The whole message on one line, for logs: Retina adds the connection
+    /// and the message position on lines of their own, which journald shows
+    /// as separate entries without date nor camera.
+    pub fn one_line(&self) -> String {
+        self.to_string()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
     /// HTTP-like status code of an RTSP error response (e.g. 401), if any.
     pub fn status_code(&self) -> Option<u16> {
         match self {
             StreamError::Rtsp { error, .. } => error.status_code(),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logs_get_one_line() {
+        let e = StreamError::ClientFailure(
+            "Error reading from RTSP peer
+
+conn: 192.168.1.211:40540(me)->192.168.1.29:554
+msg: 0"
+                .into(),
+        );
+        assert_eq!(
+            e.one_line(),
+            "RTSP client failure on the camera's packets: Error reading from RTSP peer · conn: 192.168.1.211:40540(me)->192.168.1.29:554 · msg: 0"
+        );
+        assert_eq!(
+            e.summary(),
+            "RTSP client failure on the camera's packets: Error reading from RTSP peer"
+        );
     }
 }

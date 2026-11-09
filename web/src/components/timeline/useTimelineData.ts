@@ -2,9 +2,9 @@ import { UnavailableError } from '../../api/client'
 import { useData } from '../../data/DataContext'
 import { useAsync, type AsyncState } from '../../hooks/useAsync'
 import type { NvrEvent, Recording } from '../../types/api'
+import { EVENT_KIND_LABEL } from '../events/EventCard'
 import { eventPeriods, mergeRecordings, type Period } from './periods'
 import type { TimelineMarker } from './Timeline'
-import { t } from '../../lib/i18n'
 
 export interface TimelineData {
   recordings: Record<string, Recording[]>
@@ -47,7 +47,7 @@ export function useTimelineData(cameraIds: string[], start: number, end: number)
         motion: byCamera ? Object.fromEntries(Object.entries(byCamera).map(([k, v]) => [k, eventPeriods(v)])) : null,
         markers: byCamera
           ? Object.fromEntries(
-              Object.entries(byCamera).map(([k, v]) => [k, v.map((e) => ({ id: e.id, at: e.start_ms, label: t('Mouvement', 'Motion') }))]),
+              Object.entries(byCamera).map(([k, v]) => [k, v.map((e) => ({ id: e.id, at: e.start_ms, label: EVENT_KIND_LABEL[e.kind] }))]),
             )
           : null,
       }

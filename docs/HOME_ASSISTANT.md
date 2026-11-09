@@ -37,10 +37,19 @@ l'entité. Pour une caméra nommée « Jardin » :
 | Personne | `binary_sensor.jardin_personne` (attendu ; avec l'IA optionnelle) | personne reconnue pendant le mouvement |
 | Dernier mouvement | `camera.jardin_dernier_mouvement` | image du début du dernier événement |
 | Dernière personne | `camera.jardin_derniere_personne` (attendu ; avec l'IA optionnelle) | image de la personne reconnue, avec son cadre bleu |
+| Mode d'enregistrement | `select.jardin_mode_d_enregistrement` (attendu) | « Continu », « Sur mouvement », « Arrêté » |
+| Créer un événement | `button.jardin_creer_un_evenement` (attendu) | événement manuel de 30 s (sonnette, alarme…) |
+| Prendre une capture | `button.jardin_prendre_une_capture` (attendu) | image tout de suite, sur l'entité « Capture » |
+| Capture | `camera.jardin_capture` (attendu) | dernière image prise par le bouton |
 
 Appareil « RustNVR » : `sensor.rustnvr_cameras_en_ligne`,
-`sensor.rustnvr_disque_des_enregistrements` (% utilisé) et « Espace disque
-faible » (`binary_sensor`, classe « problème »).
+`sensor.rustnvr_disque_des_enregistrements` (% utilisé), « Espace disque
+faible » (`binary_sensor`, classe « problème ») et
+`switch.rustnvr_detection_toutes_les_cameras` (attendu) : détection en marche
+ou en pause sur toutes les caméras.
+
+Les identifiants marqués « attendu » suivent la règle de Home Assistant mais
+n'ont pas encore été relevés sur une vraie installation.
 
 Toutes ces entités passent à « indisponible » quand RustNVR s'arrête.
 
@@ -130,6 +139,67 @@ actions:
       entity_id: switch.jardin_detection_de_mouvement
 ```
 
+Mettre toute la détection en pause quand quelqu'un est à la maison (mode
+« présent »), la reprendre au départ, sans toucher aux réglages des caméras :
+
+```yaml
+alias: RustNVR selon présence
+triggers:
+  - trigger: state
+    entity_id: zone.home
+actions:
+  - action: >-
+      {{ 'switch.turn_off' if states('zone.home') | int(0) > 0 else 'switch.turn_on' }}
+    target:
+      entity_id: switch.rustnvr_detection_toutes_les_cameras
+```
+
+Créer un événement et prendre une image quand on sonne (l'événement apparaît
+dans RustNVR avec son extrait vidéo ; `binary_sensor.sonnette` est à
+remplacer par votre sonnette) :
+
+```yaml
+alias: Sonnette
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.sonnette
+    to: "on"
+actions:
+  - action: button.press
+    target:
+      entity_id:
+        - button.entree_creer_un_evenement
+        - button.entree_prendre_une_capture
+  - delay: "00:00:03"
+  - action: notify.mobile_app_mon_telephone
+    data:
+      title: On sonne
+      message: "{{ now().strftime('%H:%M:%S') }}"
+      data:
+        image: /api/camera_proxy/camera.entree_capture
+mode: single
+```
+
+Pour un événement d'une autre durée, publier le nombre de secondes :
+`mqtt.publish` sur `rustnvr/entree/event/create` avec `payload: "120"`.
+
+Tout enregistrer quand l'alarme est armée (caméra en « Sur mouvement » le
+reste du temps) :
+
+```yaml
+alias: Enregistrement selon l'alarme
+triggers:
+  - trigger: state
+    entity_id: alarm_control_panel.maison
+actions:
+  - action: select.select_option
+    target:
+      entity_id: select.jardin_mode_d_enregistrement
+    data:
+      option: >-
+        {{ 'Continu' if is_state('alarm_control_panel.maison', 'armed_away') else 'Sur mouvement' }}
+```
+
 Alerte quand une caméra se déconnecte plus de 5 minutes, ou quand le disque
 est presque plein :
 
@@ -166,7 +236,8 @@ n'enregistre plus tant que la détection est coupée.
 ## 5. Limites
 
 - Pas de direct vidéo ni de relecture dans Home Assistant (voir § 3).
-- Pas de commande MQTT pour l'enregistrement continu (lecture seule).
+- Le mode d'enregistrement ne se change que pour les caméras ajoutées depuis
+  l'interface (celles de `config.toml` restent comme le fichier le dit).
 - Seules les entités « Personne » et « Dernière personne » sont fournies : les
   autres objets reconnus (véhicule, animal…) figurent dans le message MQTT
   `event`, et leur image dans `rustnvr/<caméra>/<objet>/snapshot` (à déclarer

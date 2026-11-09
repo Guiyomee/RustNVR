@@ -61,7 +61,27 @@ journal (« HTTPS enabled … sha256= »), puis acceptez. Une ancienne adresse
 `http://…:8080` est redirigée vers `https://`. Autres noms (adresse VPN, nom
 DNS) : `tls_names` dans `/config/config.toml`. Un vrai certificat : un reverse
 proxy (Nginx Proxy Manager, Caddy…) qui transmet l'en-tête `Host` et les
-WebSockets, ou `tls_cert` / `tls_key`.
+WebSockets (voir ci-dessous), ou `tls_cert` / `tls_key`.
+
+### Derrière Nginx Proxy Manager (un vrai certificat, un nom de domaine)
+
+Vérifié contre un Nginx configuré comme Nginx Proxy Manager (mêmes en-têtes) ;
+pas encore contre Nginx Proxy Manager lui-même.
+
+Hosts → Proxy Hosts → Add Proxy Host :
+
+| Champ | Valeur |
+|---|---|
+| Domain Names | le nom public, par exemple `nvr.exemple.fr` |
+| Scheme | `https` (RustNVR sert du HTTPS ; son certificat auto-signé est accepté par Nginx Proxy Manager, qui ne le vérifie pas) |
+| Forward Hostname / IP, Port | l'adresse de RustNVR, `8080` |
+| **Websockets Support** | **coché** : le direct et l'état en temps réel passent par des WebSockets ; sans, la connexion marche mais le direct reste sur « Connexion au direct… » (l'interface l'explique au bout de quelques essais) |
+| Block Common Exploits | au choix |
+| SSL | un certificat Let's Encrypt, « Force SSL » |
+
+Le direct « Faible latence » (WebRTC) ne passe pas par Nginx Proxy Manager :
+il lui faut un chemin UDP direct entre le navigateur et RustNVR (réseau local
+ou VPN) ; le direct standard, lui, passe.
 
 Installation antérieure (sans HTTPS) : `/config/config.toml` n'est créé qu'au
 premier démarrage, ajoutez la ligne une fois :
@@ -209,11 +229,13 @@ invalide, serveur bloqué). Docker ne redémarre pas seul un conteneur
 
 ### Être prévenu des nouvelles versions
 
-À propos → Mises à jour : indiquez l'adresse du dépôt (par exemple
-`https://gitea.exemple.org/proprietaire/RustNVR`) et enregistrez. RustNVR
-compare sa version à la dernière publication du dépôt (au démarrage puis
-toutes les 12 heures) ; un bandeau annonce une nouvelle version, avec ses notes
-et la procédure ci-dessus. Rien n'est installé tout seul.
+Rien à régler : RustNVR compare sa version à la dernière publication du dépôt
+officiel (`https://github.com/Guiyomee/RustNVR`), au démarrage puis toutes les
+12 heures ; un bandeau annonce une nouvelle version, avec ses notes et la
+procédure ci-dessus. Rien n'est installé tout seul. À propos → Mises à jour :
+un interrupteur coupe la vérification. Pour surveiller un autre dépôt (votre
+serveur Gitea, un fork) : `[updates] repository = "https://gitea.exemple.org/proprietaire/RustNVR"`
+dans `config.toml`.
 
 ### Publier une version (sur votre dépôt)
 

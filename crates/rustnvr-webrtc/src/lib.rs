@@ -7,7 +7,9 @@
 //! local network). Each viewer gets its own UDP socket on an ephemeral port.
 //!
 //! H.264 only (browsers do not take H.265 over WebRTC): for H.265 cameras the
-//! caller passes the tap of the H.264 conversion.
+//! caller passes the tap of the H.264 conversion. Sound when it is Opus (the
+//! G.711 of cameras, converted by `rustnvr_stream::g711`) and the browser asks
+//! for it; browsers take no AAC over WebRTC.
 
 use bytes::Bytes;
 use rustnvr_core::{VideoCodec, VideoFrame};
@@ -17,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use str0m::change::SdpOffer;
 use str0m::format::Codec;
-use str0m::media::{MediaKind, MediaTime, Mid, Pt};
+use str0m::media::{Frequency, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use tokio::net::UdpSocket;
@@ -94,6 +96,7 @@ pub async fn start_session(
     let mut rtc = RtcConfig::new()
         .clear_codecs()
         .enable_h264(true)
+        .enable_opus(true, false)
         .build(Instant::now());
     // One socket per address: str0m needs the exact local address of each
     // received packet, which a socket bound to 0.0.0.0 does not give.
@@ -126,6 +129,9 @@ pub async fn start_session(
 struct Sender {
     mid: Option<Mid>,
     pt: Option<Pt>,
+    /// Audio track and Opus payload type, when the browser asked for sound.
+    audio_mid: Option<Mid>,
+    audio_pt: Option<Pt>,
     connected: bool,
     /// Sending started (from a key frame).
     started: bool,
@@ -159,6 +165,8 @@ async fn run(
     let mut s = Sender {
         mid: None,
         pt: None,
+        audio_mid: None,
+        audio_pt: None,
         connected: false,
         started: false,
     };
@@ -187,6 +195,14 @@ async fn run(
                         s.pt = rtc.writer(m.mid).and_then(|w| {
                             w.payload_params()
                                 .find(|p| p.spec().codec == Codec::H264)
+                                .map(|p| p.pt())
+                        });
+                    }
+                    Event::MediaAdded(m) if m.kind == MediaKind::Audio => {
+                        s.audio_mid = Some(m.mid);
+                        s.audio_pt = rtc.writer(m.mid).and_then(|w| {
+                            w.payload_params()
+                                .find(|p| p.spec().codec == Codec::Opus)
                                 .map(|p| p.pt())
                         });
                     }
@@ -250,12 +266,49 @@ fn send_frame(rtc: &mut Rtc, s: &mut Sender, f: &VideoFrame) -> Result<(), Strin
     let data: Bytes = to_annex_b(&f.data, &prefix).into();
     let clock = u64::from(f.params.clock_rate.max(1));
     let rtp = MediaTime::from_90khz(u64::try_from(f.pts).unwrap_or(0) * 90_000 / clock);
+    let now = Instant::now();
     let Some(writer) = rtc.writer(mid) else {
         return Ok(());
     };
     writer
-        .write(pt, Instant::now(), rtp, data.to_vec())
-        .map_err(|e| e.to_string())
+        .write(pt, now, rtp, data.to_vec())
+        .map_err(|e| e.to_string())?;
+    send_audio(rtc, s, f, now)
+}
+
+/// The Opus sound that came with `f` (the samples received since the
+/// previous frame). The last one ends about now: each sample is dated back
+/// by its distance to that end, so that the browser lines the sound up with
+/// the picture (RTCP sender reports map RTP times to these instants).
+fn send_audio(rtc: &mut Rtc, s: &Sender, f: &VideoFrame, now: Instant) -> Result<(), String> {
+    let (Some(mid), Some(pt), Some(audio)) = (s.audio_mid, s.audio_pt, f.audio.as_ref()) else {
+        return Ok(());
+    };
+    if audio.params.rfc6381_codec != "opus" || audio.samples.is_empty() {
+        return Ok(());
+    }
+    let rate = i64::from(audio.params.clock_rate.max(1));
+    let end = audio
+        .samples
+        .iter()
+        .map(|a| a.pts + i64::from(a.duration))
+        .max()
+        .unwrap_or(0);
+    for sample in &audio.samples {
+        let Ok(pts) = u64::try_from(sample.pts) else {
+            continue;
+        };
+        let ahead = u64::try_from((end - sample.pts).max(0) * 1_000_000 / rate).unwrap_or(0);
+        let at = now.checked_sub(Duration::from_micros(ahead)).unwrap_or(now);
+        let rtp = MediaTime::new(pts, Frequency::FORTY_EIGHT_KHZ);
+        let Some(writer) = rtc.writer(mid) else {
+            return Ok(());
+        };
+        writer
+            .write(pt, at, rtp, sample.data.to_vec())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

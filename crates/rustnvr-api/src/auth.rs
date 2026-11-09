@@ -41,7 +41,12 @@ use std::time::{Duration, Instant, SystemTime};
 pub(crate) const SESSION_COOKIE: &str = "rustnvr_session";
 /// Sessions last this long.
 const SESSION_DAYS: i64 = 30;
+/// Failures allowed from one address before it waits.
 const MAX_FAILURES: u32 = 5;
+/// Failures allowed on one account, from all addresses together: higher, so
+/// that a stranger cannot lock the administrator out with a few tries, low
+/// enough to slow down guessing from many addresses.
+const MAX_ACCOUNT_FAILURES: u32 = 20;
 const FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
 const MIN_PASSWORD: usize = 8;
 
@@ -58,6 +63,11 @@ impl Principal {
     pub(crate) fn admin(&self) -> bool {
         self.role == "admin"
     }
+}
+
+/// True for a viewer account (open access, without accounts, is not one).
+pub(crate) fn is_viewer(principal: Option<&axum::Extension<Principal>>) -> bool {
+    principal.is_some_and(|p| !p.admin())
 }
 
 fn role_name(role: &str) -> &'static str {
@@ -78,6 +88,27 @@ pub fn hash_password(password: &str) -> Result<String, String> {
         .hash_password(password.as_bytes())
         .map(|h| h.to_string())
         .map_err(|e| e.to_string())
+}
+
+/// Password hashes computed at a time. Each Argon2 computation takes about
+/// 19 MiB and a core: without a bound, many requests at once (logins, Basic
+/// credentials on any route, even without an account) exhaust the memory.
+const PASSWORD_CHECKS: usize = 4;
+
+fn password_slots() -> &'static tokio::sync::Semaphore {
+    static SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
+        std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(PASSWORD_CHECKS));
+    &SLOTS
+}
+
+/// [`verify_password`] on a blocking thread, a few at a time.
+async fn check_password(hash: String, password: String) -> bool {
+    let Ok(_slot) = password_slots().acquire().await else {
+        return false;
+    };
+    tokio::task::spawn_blocking(move || verify_password(&hash, &password))
+        .await
+        .unwrap_or(false)
 }
 
 /// Checks a password against its stored hash. CPU-bound.
@@ -128,6 +159,15 @@ fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
     Some((u.to_owned(), p.to_owned()))
 }
 
+/// How many failures `key` (`ip:…` or `user:…`) may have.
+fn limit(key: &str) -> u32 {
+    if key.starts_with("user:") {
+        MAX_ACCOUNT_FAILURES
+    } else {
+        MAX_FAILURES
+    }
+}
+
 /// Failed login attempts, by client address and by account.
 #[derive(Default)]
 pub(crate) struct LoginGuard {
@@ -144,9 +184,9 @@ impl LoginGuard {
         let mut map = self.lock();
         map.retain(|_, (_, since)| since.elapsed() < FAILURE_WINDOW);
         keys.iter()
-            .filter_map(|k| map.get(k))
-            .filter(|(n, _)| *n >= MAX_FAILURES)
-            .map(|(_, since)| {
+            .filter_map(|k| map.get(k).map(|v| (k, v)))
+            .filter(|(k, (n, _))| *n >= limit(k))
+            .map(|(_, (_, since))| {
                 FAILURE_WINDOW
                     .saturating_sub(since.elapsed())
                     .as_secs()
@@ -208,9 +248,7 @@ async fn identify(state: &ApiState, headers: &HeaderMap) -> Option<Principal> {
         && state.has_users.load(std::sync::atomic::Ordering::Relaxed)
     {
         let (hash, role) = db.user_secret(&user).await.ok()??;
-        let ok = tokio::task::spawn_blocking(move || verify_password(&hash, &password))
-            .await
-            .unwrap_or(false);
+        let ok = check_password(hash, password).await;
         return ok.then(|| Principal {
             username: Some(user),
             role: role_name(&role),
@@ -254,17 +292,52 @@ fn viewer_may(method: &Method, path: &str) -> bool {
                 .is_some_and(|id| !id.is_empty() && !id.contains('/')))
 }
 
-/// True when a state-changing request comes from another site.
+/// True when a state-changing request (or a WebSocket) comes from a page of
+/// another origin.
+///
+/// The page's origin must name this server as the browser reached it (the
+/// `Host` header). Behind a reverse proxy, which says so with its
+/// `X-Forwarded-*` headers (a page cannot add them itself), the host may
+/// come without its port: Nginx Proxy Manager forwards `Host: $host`, the
+/// name only, so only names are compared there (or `X-Forwarded-Host`, when
+/// the proxy gives it).
 fn cross_origin(headers: &HeaderMap) -> bool {
-    let (Some(origin), Some(host)) = (
-        headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
-        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
-    ) else {
+    let get = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    let (Some(origin), Some(host)) = (get(header::ORIGIN), get(header::HOST)) else {
         return false; // non-browser clients send no Origin
     };
-    origin
-        .split_once("://")
-        .is_none_or(|(_, rest)| rest.trim_end_matches('/') != host)
+    let Some((_, origin)) = origin.split_once("://") else {
+        return true; // "null" (sandboxed page, local file)
+    };
+    let origin = origin.trim_end_matches('/');
+    if origin.eq_ignore_ascii_case(host) {
+        return false;
+    }
+    let proxied = [
+        "x-forwarded-for",
+        "x-forwarded-proto",
+        "x-forwarded-host",
+        "x-real-ip",
+    ]
+    .iter()
+    .any(|h| headers.contains_key(*h));
+    if !proxied {
+        return true;
+    }
+    if let Some(forwarded) = get(header::HeaderName::from_static("x-forwarded-host")) {
+        return !origin.eq_ignore_ascii_case(forwarded.split(',').next().unwrap_or("").trim());
+    }
+    !hostname(origin).eq_ignore_ascii_case(hostname(host))
+}
+
+/// `name` of `name:port` (`[v6]:port` too).
+fn hostname(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    authority
+        .rsplit_once(':')
+        .map_or(authority, |(name, _)| name)
 }
 
 /// Middleware: authenticates `/api/` requests and enforces roles.
@@ -275,7 +348,14 @@ pub(crate) async fn require_auth(
 ) -> Response {
     let path = req.uri().path().to_owned();
     let mutating = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
-    if mutating && path.starts_with("/api/") && cross_origin(req.headers()) {
+    // A WebSocket (live view, real-time state) is not bound by the browser's
+    // same-origin rule, and the session cookie goes with it to any page of
+    // the same site (another port of the same address): checked like a change.
+    let websocket = req
+        .headers()
+        .get(header::UPGRADE)
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
+    if (mutating || websocket) && path.starts_with("/api/") && cross_origin(req.headers()) {
         return ApiError::new(
             StatusCode::FORBIDDEN,
             "forbidden",
@@ -291,7 +371,44 @@ pub(crate) async fn require_auth(
     if public(&path) && state.database.get().is_some() {
         return next.run(req).await;
     }
-    let Some(principal) = identify(&state, req.headers()).await else {
+    // Basic credentials, accepted on every route, are guessed like the login
+    // page: same lockout (by address and by account).
+    let basic_keys = basic_credentials(req.headers()).map(|(user, _)| {
+        let ip = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0.ip().to_string())
+            .unwrap_or_default();
+        [format!("ip:{ip}"), format!("user:{user}")]
+    });
+    if let Some(keys) = &basic_keys
+        && state.auth_required()
+        && let Some(wait) = state.login_guard.blocked(keys)
+    {
+        return ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_attempts",
+            format!(
+                "trop de tentatives : réessayez dans {} min",
+                wait.div_ceil(60)
+            ),
+        )
+        .into_response();
+    }
+    let identified = identify(&state, req.headers()).await;
+    if let Some(keys) = &basic_keys
+        && state.auth_required()
+    {
+        match &identified {
+            // A session cookie may come with stale Basic credentials.
+            Some(_) => state.login_guard.succeeded(keys),
+            None => {
+                state.login_guard.failed(keys);
+                tracing::warn!(client = %keys[0].trim_start_matches("ip:"), "failed Basic authentication");
+            }
+        }
+    }
+    let Some(principal) = identified else {
         tracing::debug!(%path, "rejected unauthenticated request");
         let mut response = ApiError::new(
             StatusCode::UNAUTHORIZED,
@@ -437,14 +554,10 @@ pub(crate) async fn login(
         .map_err(|e| ApiError::unavailable(e.to_string()))?;
     let password = input.password.clone();
     let verified = match secret {
-        Some((hash, role)) => {
-            tokio::task::spawn_blocking(move || verify_password(&hash, &password))
-                .await
-                .unwrap_or(false)
-                .then_some(role)
-        }
+        Some((hash, role)) => check_password(hash, password).await.then_some(role),
         None => {
             // Same cost as a real check: do not reveal which accounts exist.
+            let _slot = password_slots().acquire().await;
             let _ = tokio::task::spawn_blocking(move || hash_password(&password)).await;
             None
         }
@@ -500,6 +613,10 @@ fn check_username(name: &str) -> Result<(), ApiError> {
 }
 
 async fn hash(password: String) -> Result<String, ApiError> {
+    let _slot = password_slots()
+        .acquire()
+        .await
+        .map_err(|e| ApiError::unavailable(e.to_string()))?;
     tokio::task::spawn_blocking(move || hash_password(&password))
         .await
         .map_err(|e| ApiError::unavailable(e.to_string()))?
@@ -576,9 +693,7 @@ pub(crate) async fn change_password(
         .map_err(|e| ApiError::unavailable(e.to_string()))?
         .ok_or_else(|| ApiError::bad_request("ce compte n'existe pas dans la base"))?;
     let current = input.current;
-    let ok = tokio::task::spawn_blocking(move || verify_password(&stored, &current))
-        .await
-        .unwrap_or(false);
+    let ok = check_password(stored, current).await;
     if !ok {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -606,9 +721,18 @@ pub(crate) struct UserDto {
 }
 
 /// `GET /users` (admin).
+/// `GET /users` (administrators: the interface lists accounts to them only).
 pub(crate) async fn users(
     State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<Principal>>,
 ) -> Result<Json<Vec<UserDto>>, ApiError> {
+    if is_viewer(principal.as_ref()) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "la liste des comptes est réservée aux administrateurs",
+        ));
+    }
     let db = state
         .database
         .get()
@@ -775,6 +899,84 @@ pub(crate) async fn delete_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                *k,
+                HeaderValue::from_str(v).unwrap_or(HeaderValue::from_static("")),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn origins_are_checked_strictly_unless_a_proxy_dropped_the_port() {
+        let direct = |origin: &str, host: &str| {
+            cross_origin(&headers(&[("origin", origin), ("host", host)]))
+        };
+        assert!(!direct("https://192.168.1.211:8080", "192.168.1.211:8080"));
+        assert!(!direct("https://NVR.lan", "nvr.lan"));
+        // Another service of the same address: refused.
+        assert!(direct("https://192.168.1.211:9443", "192.168.1.211:8080"));
+        assert!(direct("https://evil.example", "192.168.1.211:8080"));
+        assert!(direct("null", "192.168.1.211:8080"));
+        // No Origin (scripts, curl): not a browser page.
+        assert!(!cross_origin(&headers(&[("host", "nvr.lan")])));
+        // Nginx Proxy Manager: `Host: $host`, without the port.
+        let npm = |origin: &str, host: &str| {
+            cross_origin(&headers(&[
+                ("origin", origin),
+                ("host", host),
+                ("x-forwarded-proto", "https"),
+                ("x-forwarded-for", "192.168.1.20"),
+            ]))
+        };
+        assert!(!npm("https://nvr.example.org:8443", "nvr.example.org"));
+        assert!(!npm("https://nvr.example.org", "nvr.example.org"));
+        assert!(npm("https://evil.example", "nvr.example.org"));
+        // A proxy giving X-Forwarded-Host: that one, exactly.
+        let fwd = |origin: &str| {
+            cross_origin(&headers(&[
+                ("origin", origin),
+                ("host", "127.0.0.1:8080"),
+                ("x-forwarded-host", "nvr.example.org:8443"),
+            ]))
+        };
+        assert!(!fwd("https://nvr.example.org:8443"));
+        assert!(fwd("https://nvr.example.org:9000"));
+        assert_eq!(hostname("[::1]:8080"), "::1");
+        assert_eq!(hostname("nvr.lan"), "nvr.lan");
+    }
+
+    /// One address waits after 5 failures; the account itself only after
+    /// 20 failures from all addresses, so a stranger cannot lock it with 5.
+    #[test]
+    fn addresses_lock_sooner_than_accounts() {
+        let guard = LoginGuard::default();
+        let from = |ip: u8| [format!("ip:10.0.0.{ip}"), "user:admin".to_owned()];
+        for _ in 0..5 {
+            guard.failed(&from(1));
+        }
+        assert!(
+            guard.blocked(&from(1)).is_some(),
+            "the guessing address waits"
+        );
+        assert!(
+            guard.blocked(&from(2)).is_none(),
+            "the owner elsewhere does not"
+        );
+        for ip in 2..=4 {
+            for _ in 0..5 {
+                guard.failed(&from(ip));
+            }
+        }
+        assert!(
+            guard.blocked(&from(9)).is_some(),
+            "20 failures: the account waits"
+        );
+    }
 
     #[test]
     fn compares_bytes() {

@@ -50,7 +50,6 @@ import type {
 export const getCapabilities = () => apiGet<Capabilities>('/capabilities')
 export const getSystem = () => apiGet<SystemInfo>('/system')
 export const getCameras = () => apiGet<Camera[]>('/cameras')
-export const getCamera = (id: string) => apiGet<Camera>(`/cameras/${encodeURIComponent(id)}`)
 // Camera management (only when capabilities.camera_management is true).
 export const createCamera = (input: CameraInput) => apiSend<Camera>('POST', '/cameras', input, 20_000)
 export const updateCamera = (id: string, input: CameraInput) =>
@@ -155,6 +154,7 @@ export const updateUser = (name: string, change: { password?: string; role?: 'ad
 export const deleteUser = (name: string) => apiSend<null>('DELETE', `/users/${encodeURIComponent(name)}`)
 
 // Sound recording of a camera (camera_management).
+export const setDetectionPaused = (paused: boolean) => apiSend<{ paused: boolean }>('PUT', '/detection/pause', { paused }, 30_000)
 export const setAudio = (id: string, enabled: boolean) => apiSend<Camera>('PUT', `/cameras/${encodeURIComponent(id)}/audio`, { enabled }, 30_000)
 
 // Object recognition settings (capabilities.settings_write).
@@ -180,7 +180,7 @@ export const exportClip = (id: string, q: { fromMs: number; toMs: number; h264: 
 // New versions published on the watched repository (Gitea, Forgejo, GitHub).
 export const getUpdates = () => apiGet<UpdateStatus>('/updates')
 export const checkUpdates = () => apiSend<UpdateStatus>('POST', '/updates/check', {}, 30_000)
-export const setUpdates = (repository: string | null) => apiSend<UpdateStatus>('PUT', '/updates', { repository }, 30_000)
+export const setUpdates = (check: boolean) => apiSend<UpdateStatus>('PUT', '/updates', { check }, 30_000)
 
 // Protected recordings (capabilities.protect): kept whatever the retention.
 export const getProtected = () => apiGet<ProtectedRange[]>('/protected')

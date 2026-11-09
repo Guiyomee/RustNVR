@@ -28,7 +28,10 @@ vérifie son empreinte, puis fait tout ce que décrivent les § 3 à 5 ci-dessou
 compte `rustnvr`, dossiers `/etc/rustnvr` et `/var/lib/rustnvr`, configuration
 de départ (HTTPS, compte `admin`, mot de passe tiré au hasard et affiché une
 fois, gardé dans `/etc/rustnvr/rustnvr.env`), service démarré. Options :
-`--version v2026.11.03`, `--port 8081`, `--no-start`.
+`--version v2026.11.03`, `--port 8081`, `--no-start`. Un port sous 1024 (80,
+443) marche aussi : le service a ce seul droit (`CAP_NET_BIND_SERVICE`), aucun
+autre. À la fin, `install.sh` vérifie que l'interface répond et affiche sinon
+les dernières lignes du journal.
 
 **Mettre à jour** : `sudo rustnvr-update` (la même commande, installée au
 passage). Seuls le programme et l'interface sont remplacés : la configuration,
@@ -155,9 +158,11 @@ menu du profil.
   fingerprint`) avant d'accepter.
 - Ou votre certificat : `web.tls_cert` et `web.tls_key` (fichiers PEM lisibles
   par le compte `rustnvr`).
-- Ou un proxy inverse (Caddy, nginx) devant RustNVR resté sur `127.0.0.1` ;
-  il doit transmettre les WebSocket (`/api/v1/cameras/{id}/live`,
-  `/api/v1/ws`).
+- Ou un proxy inverse (Caddy, nginx, Nginx Proxy Manager) devant RustNVR ; il
+  doit transmettre l'en-tête `Host` et les WebSocket (`/api/v1/cameras/{id}/live`,
+  `/api/v1/ws`). Nginx Proxy Manager : case « Websockets Support » cochée,
+  scheme `https` vers le port de RustNVR (détails dans
+  [DOCKER.md](DOCKER.md#derrière-nginx-proxy-manager-un-vrai-certificat-un-nom-de-domaine)).
 
 ## 8. Pare-feu
 
@@ -240,7 +245,8 @@ sont des fichiers MP4 ordinaires, lisibles sans RustNVR.
 ```sh
 sudo systemctl disable --now rustnvr
 sudo rm /etc/systemd/system/rustnvr.service && sudo systemctl daemon-reload
-sudo rm -rf /usr/local/bin/rustnvr /usr/local/share/rustnvr
+sudo rm -rf /usr/local/bin/rustnvr /usr/local/bin/rustnvr-update /usr/local/share/rustnvr
+sudo rm -f /usr/bin/rustnvr /usr/bin/rustnvr-update   # liens (depuis 2026.11.06)
 sudo rm -rf /etc/rustnvr /var/lib/rustnvr     # supprime aussi les enregistrements
 sudo userdel rustnvr
 ```
@@ -328,6 +334,12 @@ var_cpu=4 var_ram=4096 bash -c "$(curl -fsSL https://raw.githubusercontent.com/G
 | `--smb '\\IP\partage\dossier'`, `--smb-user`, `--smb-domain` | — | partage SMB pour les enregistrements (mot de passe : `RUSTNVR_SMB_PASSWORD` ou `--smb-password`) |
 | `--archive FICHIER` | — | une archive de l'hôte (son `.sha256` à côté) au lieu du téléchargement |
 | `-y` | — | aucun menu, même dans un terminal |
+
+**Mots de passe** : passés en option (`--root-password`, `--password`,
+`--smb-password`), ils restent dans l'historique du shell et se voient dans la
+liste des processus pendant l'installation ; le script le signale. Le menu les
+demande sans les afficher ; sans menu, préférez l'environnement :
+`RUSTNVR_ROOT_PASSWORD`, `RUSTNVR_WEB_PASSWORD`, `RUSTNVR_SMB_PASSWORD`.
 
 **Partage SMB.** Un conteneur non privilégié ne peut pas monter un partage
 lui-même : le script le monte **sur l'hôte**. Il essaie d'abord le partage en

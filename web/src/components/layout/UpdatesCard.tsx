@@ -1,4 +1,4 @@
-import { ExternalLink, RefreshCw, Save } from 'lucide-react'
+import { ExternalLink, RefreshCw } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { describeError } from '../../api/client'
 import { checkUpdates, getUpdates, setUpdates } from '../../api/endpoints'
@@ -9,6 +9,7 @@ import { formatDateTime } from '../../lib/format'
 import type { UpdateStatus } from '../../types/api'
 import { Button } from '../ui/Button'
 import { Badge, Card, CardHeader } from '../ui/Card'
+import { Switch } from '../ui/Switch'
 import { ErrorState, LoadingState } from '../ui/States'
 import { t } from '../../lib/i18n'
 
@@ -31,7 +32,7 @@ const INSTALL: Record<UpdateStatus['install'], { title: string; steps: string }>
 }
 
 function Status({ u }: { u: UpdateStatus }) {
-  if (!u.repository) return <Badge>{t('Non configurée', 'Not configured')}</Badge>
+  if (!u.repository) return <Badge>{t('Désactivée', 'Off')}</Badge>
   if (u.error) return <Badge tone="err">{t('Vérification impossible', 'Check failed')}</Badge>
   if (u.checked_at_ms === null) return <Badge>{t('Pas encore vérifiée', 'Not checked yet')}</Badge>
   if (!u.latest) return <Badge>{t('Aucune version publiée', 'No version published')}</Badge>
@@ -45,14 +46,10 @@ export function UpdatesCard() {
   const readOnly = useReadOnly()
   const loaded = useAsync(() => (demo ? Promise.resolve(null) : getUpdates()), [demo])
   const [u, setU] = useState<UpdateStatus | null>(null)
-  const [repository, setRepository] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
-    if (loaded.data) {
-      setU(loaded.data)
-      setRepository(loaded.data.repository ?? '')
-    }
+    if (loaded.data) setU(loaded.data)
   }, [loaded.data])
 
   if (demo) return null
@@ -62,14 +59,12 @@ export function UpdatesCard() {
     try {
       const next = await action()
       setU(next)
-      setRepository(next.repository ?? '')
     } catch (e) {
       setError(describeError(e))
     } finally {
       setBusy(false)
     }
   }
-  const changed = u !== null && repository.trim() !== (u.repository ?? '')
   const install = u ? INSTALL[u.install] : null
 
   return (
@@ -116,27 +111,30 @@ export function UpdatesCard() {
             </div>
           )}
 
-          <div className="flex flex-wrap items-end gap-2">
-            <label className="min-w-72 flex-1">
-              <span className="mb-1 block text-xs text-muted">{t('Dépôt surveillé (Gitea, Forgejo ou GitHub)', 'Watched repository (Gitea, Forgejo or GitHub)')}</span>
-              <input
-                className="h-9 w-full rounded-md border border-line bg-bg-2 px-3 text-sm disabled:opacity-60"
-                placeholder="https://gitea.exemple.org/proprietaire/RustNVR"
-                value={repository}
-                disabled={busy || readOnly !== null}
-                onChange={(e) => setRepository(e.target.value)}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <label className="flex items-center gap-2">
+              <Switch
+                checked={u.repository !== null}
+                onChange={(on) => void run(() => setUpdates(on))}
+                label={t('Vérifier les nouvelles versions', 'Check for new versions')}
+                busy={busy}
+                disabledReason={readOnly}
               />
+              <span>{t('Vérifier les nouvelles versions', 'Check for new versions')}</span>
             </label>
-            <Button icon={<Save className="size-4" />} disabledReason={readOnly ?? (busy ? t('En cours…', 'In progress…') : !changed ? t('Aucun changement', 'No change') : null)} onClick={() => void run(() => setUpdates(repository.trim() || null))}>
-              {t('Enregistrer', 'Save')}
-            </Button>
-            <Button icon={<RefreshCw className={`size-4 ${busy ? 'animate-spin' : ''}`} />} disabledReason={readOnly ?? (busy ? t('En cours…', 'In progress…') : !u.repository ? t('Indiquez d’abord un dépôt', 'First enter a repository') : null)} onClick={() => void run(checkUpdates)}>
+            {u.repository && (
+              <a className="inline-flex items-center gap-1 text-xs text-muted hover:text-fg hover:underline" href={u.repository} target="_blank" rel="noopener noreferrer">
+                {u.repository.replace(/^https?:\/\//, '')}
+                <ExternalLink className="size-3" aria-hidden />
+              </a>
+            )}
+            <Button icon={<RefreshCw className={`size-4 ${busy ? 'animate-spin' : ''}`} />} disabledReason={readOnly ?? (busy ? t('En cours…', 'In progress…') : !u.repository ? t('Vérification désactivée', 'Check turned off') : null)} onClick={() => void run(checkUpdates)}>
               {t('Vérifier maintenant', 'Check now')}
             </Button>
           </div>
           {error && <p className="text-err">{error}</p>}
           <p className="text-xs text-muted">
-            {t('RustNVR ne télécharge ni n’installe rien : il compare sa version à la dernière publication (« release ») du dépôt et indique comment mettre à jour. Laissez vide pour ne rien vérifier. Dépôt privé : jeton dans une variable d’environnement, ', 'RustNVR neither downloads nor installs anything: it compares its version with the latest release of the repository and tells how to update. Leave empty to check nothing. Private repository: token in an environment variable, ')}<code className="font-mono">[updates] token_env</code>{t(' de config.toml.', ' of config.toml.')}
+            {t('RustNVR ne télécharge ni n’installe rien : il compare sa version à la dernière publication (« release ») du dépôt officiel et indique comment mettre à jour. Un autre dépôt (fork, serveur Gitea) se règle dans config.toml : ', 'RustNVR neither downloads nor installs anything: it compares its version with the latest release of the official repository and tells how to update. Another repository (fork, Gitea server) is set in config.toml: ')}<code className="font-mono">[updates] repository</code>{t(' (jeton d’un dépôt privé : ', ' (token of a private repository: ')}<code className="font-mono">token_env</code>{t(').', ').')}
           </p>
         </div>
       )}

@@ -118,7 +118,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }, [refresh])
   const signOut = useCallback(async () => {
     await logout().catch(() => undefined)
-    window.location.assign('/')
+    window.location.assign(import.meta.env.BASE_URL)
   }, [])
 
   // Servers without accounts answer the status route only with Basic

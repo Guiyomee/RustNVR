@@ -42,7 +42,14 @@ export const CameraPlayer = memo(function CameraPlayer({
   if (live && camera.status === 'online') {
     if (!active || !pageVisible) return <Paused large={large} />
     const player = lowLatency ? (
-      <WebrtcPlayer key={camera.online_since_ms ?? 0} cameraId={camera.id} stream={stream} large={large} />
+      <WebrtcPlayer
+        key={`${camera.online_since_ms ?? 0}:${camera.record_audio}`}
+        cameraId={camera.id}
+        stream={stream}
+        large={large}
+        // WebRTC carries the sound when it is Opus (G.711 converted), not AAC.
+        audio={large && camera.record_audio && (camera.audio?.startsWith('opus') ?? false)}
+      />
     ) : (
       <LivePlayer
         // Reconnects when the camera restarts, or when its sound is switched.

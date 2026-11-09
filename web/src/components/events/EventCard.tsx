@@ -11,6 +11,7 @@ import { t } from '../../lib/i18n'
 
 export const EVENT_KIND_LABEL: Record<EventKind, string> = {
   motion: t('Mouvement', 'Motion'),
+  manual: t('Manuel', 'Manual'),
   person: t('Personne', 'Person'),
   vehicle: t('Véhicule', 'Vehicle'),
   animal: t('Animal', 'Animal'),

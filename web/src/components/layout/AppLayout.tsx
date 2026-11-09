@@ -1,5 +1,8 @@
-import { CircleArrowUp, FlaskConical, RefreshCw, ShieldAlert, X } from 'lucide-react'
+import { CircleArrowUp, CirclePause, FlaskConical, RefreshCw, ShieldAlert, X } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
+import { describeError } from '../../api/client'
+import { setDetectionPaused } from '../../api/endpoints'
+import { useReadOnly } from '../../auth/AuthGate'
 import { useData, useLive } from '../../data/DataContext'
 import { useStoredFlag } from '../../hooks/useUi'
 import { Link } from '../../lib/router'
@@ -8,14 +11,13 @@ import { Topbar } from './Topbar'
 import { t } from '../../lib/i18n'
 
 function DemoBanner() {
-  const { setMode } = useData()
   return (
     <div role="status" className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 bg-warn px-4 py-1.5 text-center text-xs font-semibold text-bg-2">
       <FlaskConical className="size-4" aria-hidden />
-      {t("MODE DÉMO — caméras, images et événements fictifs. Aucune donnée réelle n'est affichée.", "DEMO MODE — fictional cameras, pictures and events. No real data is shown.")}
-      <button type="button" className="underline underline-offset-2" onClick={() => setMode('live')}>
-        {t('Quitter le mode démo', 'Leave demo mode')}
-      </button>
+      {t("DÉMO — caméras, images et événements fictifs : rien n'est enregistré ni envoyé.", 'DEMO — fictional cameras, pictures and events: nothing is saved or sent.')}
+      <a className="underline underline-offset-2" href="https://github.com/Guiyomee/RustNVR" target="_blank" rel="noreferrer">
+        {t('Installer RustNVR', 'Install RustNVR')}
+      </a>
     </div>
   )
 }
@@ -27,6 +29,38 @@ function NoAuthBanner() {
     <div role="alert" className="flex items-center justify-center gap-2 border-b border-warn/40 bg-warn/10 px-4 py-1.5 text-center text-xs text-warn">
       <ShieldAlert className="size-4 shrink-0" aria-hidden />
       {t("Interface accessible sans authentification. Configurez web.username et web.password_env avant de l'exposer au réseau.", "Interface reachable without authentication. Set web.username and web.password_env before exposing it to the network.")}
+    </div>
+  )
+}
+
+/** Motion detection paused on every camera (Home Assistant « Détection » switch). */
+function PausedBanner() {
+  const paused = useLive((s) => s.cameras.some((c) => c.motion.paused))
+  const readOnly = useReadOnly()
+  const { source } = useData()
+  const [busy, setBusy] = useState(false)
+  if (!paused) return null
+  const resume = async () => {
+    setBusy(true)
+    try {
+      await setDetectionPaused(false)
+    } catch (e) {
+      source.store.notify('error', describeError(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div role="status" className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-b border-warn/40 bg-warn/10 px-4 py-1.5 text-center text-xs text-warn">
+      <CirclePause className="size-4 shrink-0" aria-hidden />
+      {t('Détection de mouvement en pause sur toutes les caméras : pas d’événements, et rien n’est enregistré par les caméras « sur mouvement ».', 'Motion detection paused on every camera: no events, and cameras recording « on motion » record nothing.')}
+      {readOnly ? (
+        <span>{t('Un administrateur peut la reprendre.', 'An administrator can resume it.')}</span>
+      ) : (
+        <button type="button" className="rounded border border-warn/60 px-2 py-0.5 font-medium hover:bg-warn/20" onClick={() => void resume()}>
+          {busy ? t('Reprise…', 'Resuming…') : t('Reprendre', 'Resume')}
+        </button>
+      )}
     </div>
   )
 }
@@ -99,6 +133,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
           <>
             <RestartBanner />
             <UpdateBanner />
+            <PausedBanner />
             <NoAuthBanner />
           </>
         )}

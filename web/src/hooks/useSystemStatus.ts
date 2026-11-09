@@ -26,6 +26,7 @@ export function useGlobalStatus(): GlobalStatus {
   if (online === 0) return { tone: 'err', label: t('Aucune caméra en ligne', 'No camera online'), detail: t(`${enabled.length} caméra(s) hors ligne`, `${enabled.length} camera(s) offline`) }
   if (online < enabled.length) return { tone: 'warn', label: t('Dégradé', 'Degraded'), detail: t(`${enabled.length - online} caméra(s) hors ligne`, `${enabled.length - online} camera(s) offline`) }
   if (writeErrors) return { tone: 'warn', label: t('Dégradé', 'Degraded'), detail: t("Des erreurs d'écriture ont eu lieu depuis le démarrage.", "Write errors happened since startup.") }
+  if (enabled.some((c) => c.motion.paused)) return { tone: 'warn', label: t('Détection en pause', 'Detection paused'), detail: t('La détection de mouvement est en pause sur toutes les caméras.', 'Motion detection is paused on every camera.') }
   if (connection === 'polling') return { tone: 'warn', label: t('Opérationnel', 'Operational'), detail: t('Temps réel interrompu : actualisation toutes les 10 s.', 'Real time interrupted: refreshed every 10 s.') }
   return { tone: 'ok', label: t('Opérationnel', 'Operational'), detail: t('Toutes les caméras activées sont en ligne.', 'All cameras that are on are online.') }
 }

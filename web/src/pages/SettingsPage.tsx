@@ -8,7 +8,6 @@ import { MqttSettings } from '../components/settings/MqttSettings'
 import { StorageSettings } from '../components/settings/StorageSettings'
 import { UsersSettings } from '../components/settings/UsersSettings'
 import { WebhooksSettings } from '../components/settings/WebhooksSettings'
-import { Button } from '../components/ui/Button'
 import { PageHeader } from '../components/ui/Card'
 import { useData, useLive } from '../data/DataContext'
 import { formatBytes, formatDuration, formatNumber, formatPercent } from '../lib/format'
@@ -69,7 +68,7 @@ function ThemeSetting() {
 const FILE_NOTE = t('Ces réglages se modifient dans config.toml (redémarrage requis).', 'These settings are changed in config.toml (restart required).')
 
 function Section({ category }: { category: Category }) {
-  const { mode, setMode, capabilities } = useData()
+  const { capabilities } = useData()
   const system = useLive((s) => s.system)
   const cameras = useLive((s) => s.cameras)
   const cap = (k: keyof NonNullable<typeof capabilities>) => (capabilities ? Boolean(capabilities[k]) : null)
@@ -79,11 +78,6 @@ function Section({ category }: { category: Category }) {
     case 'general':
       return (
         <SettingsSection title={t('Général', 'General')} description={t('Préférences de cette interface, enregistrées dans le navigateur.', 'Preferences of this interface, saved in the browser.')}>
-          <SettingRow label={t('Mode démo', 'Demo mode')} help={t('Affiche des caméras, images et événements fictifs, sans jamais les mélanger aux données réelles.', 'Shows fictional cameras, pictures and events, never mixed with real data.')}>
-            <Button variant={mode === 'demo' ? 'primary' : 'secondary'} onClick={() => setMode(mode === 'demo' ? 'live' : 'demo')} aria-pressed={mode === 'demo'}>
-              {mode === 'demo' ? t('Désactiver le mode démo', 'Turn demo mode off') : t('Activer le mode démo', 'Turn demo mode on')}
-            </Button>
-          </SettingRow>
           <SettingRow label={t('Thème', 'Theme')} help={t('Retenu par ce navigateur. « Système » suit le réglage clair ou sombre de l’appareil.', 'Kept by this browser. « System » follows the light or dark setting of the device.')}>
             <ThemeSetting />
           </SettingRow>

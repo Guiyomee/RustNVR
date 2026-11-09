@@ -1,4 +1,4 @@
-import { LoaderCircle, TriangleAlert } from 'lucide-react'
+import { LoaderCircle, TriangleAlert, Volume2, VolumeX } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { API_BASE, UNAUTHORIZED_EVENT } from '../../api/client'
 import type { LiveStream } from '../../api/endpoints'
@@ -10,10 +10,16 @@ type Status = { kind: 'connecting' } | { kind: 'playing' } | { kind: 'error'; me
  * Low-latency live view over WebRTC (WHEP): the browser sends its offer, the
  * server answers and sends H.264 over UDP (H.265 cameras go through the
  * H.264 conversion). Needs a direct UDP path to the server (local network).
+ * `audio`: also ask for the sound, sent when it is Opus (G.711 cameras).
  */
-export function WebrtcPlayer({ cameraId, stream, large = false }: { cameraId: string; stream?: LiveStream; large?: boolean }) {
+export function WebrtcPlayer({ cameraId, stream, large = false, audio = false }: { cameraId: string; stream?: LiveStream; large?: boolean; audio?: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [status, setStatus] = useState<Status>({ kind: 'connecting' })
+  // Muted until the viewer turns the sound on (browsers block autoplay with sound).
+  const [muted, setMuted] = useState(true)
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.muted = muted
+  }, [muted])
 
   useEffect(() => {
     const video = videoRef.current
@@ -25,6 +31,7 @@ export function WebrtcPlayer({ cameraId, stream, large = false }: { cameraId: st
     let closed = false
     const pc = new RTCPeerConnection()
     pc.addTransceiver('video', { direction: 'recvonly' })
+    if (audio) pc.addTransceiver('audio', { direction: 'recvonly' })
     pc.ontrack = (e) => {
       video.srcObject = e.streams[0] ?? new MediaStream([e.track])
       void video.play().catch(() => undefined)
@@ -79,7 +86,7 @@ export function WebrtcPlayer({ cameraId, stream, large = false }: { cameraId: st
       window.clearTimeout(timer)
       pc.close()
     }
-  }, [cameraId, stream])
+  }, [cameraId, stream, audio])
 
   return (
     <div className="relative h-full w-full bg-black">
@@ -92,6 +99,17 @@ export function WebrtcPlayer({ cameraId, stream, large = false }: { cameraId: st
         onPlaying={() => setStatus({ kind: 'playing' })}
       />
       <span className="pointer-events-none absolute top-2 right-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-ok">WEBRTC</span>
+      {status.kind === 'playing' && audio && (
+        <button
+          type="button"
+          onClick={() => setMuted((m) => !m)}
+          aria-label={muted ? t('Activer le son du direct', 'Turn live sound on') : t('Couper le son du direct', 'Mute live sound')}
+          title={muted ? t('Activer le son', 'Turn sound on') : t('Couper le son', 'Mute')}
+          className="absolute right-2 bottom-2 rounded bg-black/60 p-1.5 text-white hover:bg-black/80"
+        >
+          {muted ? <VolumeX className="size-4" /> : <Volume2 className="size-4" />}
+        </button>
+      )}
       {status.kind === 'connecting' && (
         <div className="absolute inset-0 flex items-center justify-center text-muted">
           <LoaderCircle className={`${large ? 'size-8' : 'size-5'} animate-spin`} aria-label={t('Connexion WebRTC', 'WebRTC connection')} />

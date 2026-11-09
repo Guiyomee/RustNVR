@@ -151,6 +151,11 @@ export function MotionPanel({ camera }: { camera: Camera }) {
           {t('Enregistrer', 'Save')}
         </Button>
       </div>
+      {camera.motion.paused && (
+        <p className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn">
+          {t('La détection est en pause sur toutes les caméras (Home Assistant ou le bandeau en haut de la page) : ces réglages s’appliqueront à la reprise.', 'Detection is paused on every camera (Home Assistant or the banner at the top of the page): these settings apply once it resumes.')}
+        </p>
+      )}
       {camera.recording_enabled && camera.record_mode === 'motion' && !s.enabled && (
         <p className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn">
           {t("Cette caméra enregistre « seulement sur mouvement » : sans détection, rien n'est enregistré.", "This camera records « only on motion »: without detection, nothing is recorded.")}
