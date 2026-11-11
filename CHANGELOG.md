@@ -7,7 +7,31 @@ précautions) sont sur la page de chaque
 
 ## Non publiée
 
-Rien pour l'instant.
+### Nouveautés
+- **Republication RTSP** (Paramètres → Réseau, désactivée par défaut) : Home
+  Assistant, Frigate ou VLC lisent les caméras depuis RustNVR
+  (`rtsp://machine:8554/<caméra>`, `/<caméra>/sub` pour le sous-flux) : une
+  seule connexion à la caméra. Flux renvoyés tels quels (H.264 / H.265, son
+  AAC ou Opus), sans conversion ; RTSP sur TCP. Identifiant et mot de passe
+  facultatifs, généraux ou propres à une caméra ; écoute sur `127.0.0.1` par
+  défaut.
+
+### Sécurité
+- **Derrière un reverse proxy** : `web.trusted_proxies` déclare le proxy ;
+  les échecs de connexion bloquent alors le client réel, et non plus tout le
+  monde derrière le proxy.
+- `settings.ui.toml` est désormais écrit lisible par son seul propriétaire.
+- **Dépendances** : audit automatique (`cargo audit`, `npm audit`) à chaque
+  changement et chaque semaine, mises à jour proposées par Dependabot,
+  actions GitHub épinglées par empreinte.
+
+### Corrections
+- La recherche de caméras ne liste plus la republication RTSP de RustNVR
+  comme une caméra.
+- Un sous-flux ajouté (ou remis) à une caméra existante sans retaper le mot
+  de passe utilise maintenant celui qui est enregistré, comme le formulaire
+  l'annonce (« inchangé ») ; il partait sans mot de passe et la caméra le
+  refusait indéfiniment.
 
 ## 2026.11.05 (2026-11-09)
 

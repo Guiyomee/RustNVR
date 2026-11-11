@@ -43,6 +43,22 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   elle sert aux conversions) ou copiées quand elles envoient du H.264 ;
   enregistrées, vues en direct et analysées comme une caméra RTSP (vérifié
   avec une webcam sous Docker ; ⚠ pas encore dans un LXC ; pas de son).
+- Republication RTSP (désactivée par défaut) : Home Assistant, Frigate, VLC…
+  lisent les caméras depuis RustNVR (`rtsp://machine:8554/<caméra>`, et
+  `/<caméra>/sub` pour le sous-flux) au lieu de s'y connecter : la caméra ne
+  voit qu'une connexion par flux. Images renvoyées telles quelles (H.264,
+  H.265 ; son AAC, ou l'Opus tiré du G.711), sans conversion ; rien ne
+  tourne sans client. RTP dans la connexion RTSP (TCP) seulement, pas d'UDP ;
+  identifiant et mot de passe facultatifs (Digest ou Basic), généraux ou
+  propres à une caméra ; cinq erreurs bloquent l'adresse 15 minutes, et une
+  adresse ne peut pas prendre toutes les places. Écoute sur `127.0.0.1` par
+  défaut ; le réseau avec un mot de passe, ou après un accord explicite.
+  Réglée dans Paramètres → Réseau et dans la fiche des caméras, sans
+  redémarrage. Coût mesuré (`cargo run --release -p rustnvr-restream
+  --example cost`, flux de synthèse à 4 Mbit/s, clients sur la même
+  machine) : environ 0,1 % d'un cœur et 0,5 Mio par client ; 1,4 % d'un cœur
+  et 12 Mio pour 16 clients (vérifié avec Retina et FFmpeg contre une caméra
+  simulée ; ⚠ pas encore avec Home Assistant ni Frigate).
 - Points de stockage : chaque caméra enregistre sur le disque local et/ou sur
   un partage NAS (SMB/CIFS, NFS) monté dans le système, écrit directement.
   Contrôle que le partage est bien monté (sinon le disque système se

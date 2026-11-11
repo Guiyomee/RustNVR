@@ -25,9 +25,13 @@ services:
     network_mode: host
     # ports:
     #   - "8080:8080"
+    #   - "8554:8554"   # RTSP republication, if enabled (Paramètres → Réseau)
     environment:
       TZ: Europe/Paris
       RUSTNVR_WEB_PASSWORD: ${RUSTNVR_WEB_PASSWORD:?set RUSTNVR_WEB_PASSWORD in .env}
+      # Password of the RTSP republication, if set that way in config.toml
+      # ([restream] password_env); it can also be typed in Paramètres → Réseau.
+      # RUSTNVR_RTSP_PASSWORD: ${RUSTNVR_RTSP_PASSWORD}
       # Another port on the host network (`ports` has no effect there):
       # RUSTNVR_WEB_LISTEN: "0.0.0.0:8082"
     volumes:

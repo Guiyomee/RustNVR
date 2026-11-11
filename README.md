@@ -31,6 +31,8 @@ fictional cameras and events, nothing to install.
   NAS is away.
 - **Home Assistant** over MQTT, with no integration to install: motion,
   recognized objects, status, recording, last picture, PTZ position.
+- **One connection to the camera**: RustNVR can republish its streams over
+  RTSP, without converting them, for Home Assistant, Frigate or VLC.
 - **Wherever you like**: Docker, a Proxmox LXC container in one command, or a
   service on Debian / Ubuntu.
 

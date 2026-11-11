@@ -75,6 +75,13 @@ pub struct CameraInput {
     /// Port of the ONVIF service, for PTZ (`null`: none).
     #[serde(default)]
     pub onvif_port: Option<u16>,
+    /// User name RTSP clients must give for this camera, instead of the
+    /// general one of the republication (`null` or empty: the general one).
+    #[serde(default)]
+    pub restream_username: Option<String>,
+    /// Its password; absent keeps the stored one.
+    #[serde(default)]
+    pub restream_password: Option<Secret>,
 }
 
 /// A storage destination as entered in the interface. For `local`, only the
@@ -449,6 +456,54 @@ pub struct SettingsInput {
     /// `storage.default_destination`; absent keeps the current one.
     #[serde(default)]
     pub default_destination: Option<String>,
+    /// `[restream]` (RTSP republication); absent keeps the current one.
+    #[serde(default)]
+    pub restream: Option<RestreamInput>,
+}
+
+/// RTSP republication settings sent by the interface.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestreamInput {
+    /// Serve the cameras over RTSP.
+    pub enabled: bool,
+    /// Listening address.
+    pub listen: String,
+    /// Most clients at a time.
+    pub max_clients: u32,
+    /// Most clients at a time from one address; absent keeps the current one.
+    #[serde(default)]
+    pub max_clients_per_address: Option<u32>,
+    /// Listen on the network without credentials.
+    #[serde(default)]
+    pub allow_unauthenticated_remote: bool,
+    /// User name asked to RTSP clients (`null` or empty: none).
+    #[serde(default)]
+    pub username: Option<String>,
+    /// New password; absent or `null` keeps the stored one, `""` removes it.
+    #[serde(default)]
+    pub password: Option<Secret>,
+}
+
+/// RTSP republication settings shown by the interface. Never contains the
+/// password.
+#[derive(Clone, Debug, Serialize)]
+pub struct RestreamView {
+    /// Serve the cameras over RTSP.
+    pub enabled: bool,
+    /// Listening address.
+    pub listen: String,
+    /// Most clients at a time.
+    pub max_clients: u32,
+    /// Most clients at a time from one address.
+    pub max_clients_per_address: u32,
+    /// Listen on the network without credentials.
+    pub allow_unauthenticated_remote: bool,
+    /// User name asked to RTSP clients.
+    pub username: Option<String>,
+    /// Whether a password is configured (directly or through an environment
+    /// variable).
+    pub has_password: bool,
 }
 
 /// General settings shown by the interface (`GET /api/v1/settings`).
@@ -469,6 +524,10 @@ pub struct SettingsView {
     /// `storage.default_destination`: destination of cameras whose recording
     /// is enabled without choosing one.
     pub default_destination: String,
+    /// `[restream]`: RTSP republication of the cameras.
+    pub restream: RestreamView,
+    /// Why the republication is enabled but not served (address in use…).
+    pub restream_error: Option<String>,
     /// Read-only here: `live.ffmpeg`.
     pub ffmpeg: String,
     /// Settings were changed from the interface (`settings.ui.toml`).

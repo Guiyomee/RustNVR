@@ -71,14 +71,28 @@ cards:
       - sensor.rustnvr_disque_des_enregistrements
 ```
 
-**Direct vidéo dans Home Assistant : non fourni.** L'entité `camera` est
-l'image fixe du dernier mouvement ; RustNVR ne republie pas les flux en RTSP.
-Pour un direct dans Home Assistant, ajoutez la caméra directement à Home
-Assistant (intégration « Generic Camera » avec l'URL RTSP de la caméra, de
-préférence son sous-flux) : c'est une connexion de plus à la caméra,
-indépendante de RustNVR. Pour le direct, la relecture et les événements
-complets, ouvrez l'interface RustNVR (par exemple avec une carte bouton et
-une action `url`).
+**Direct vidéo dans Home Assistant : par la republication RTSP.** L'entité
+`camera` créée par MQTT est l'image fixe du dernier mouvement. Pour un direct,
+activez la republication RTSP dans RustNVR (Paramètres → Réseau, ou
+`[restream]` dans `config.toml`), puis ajoutez dans Home Assistant
+l'intégration « Generic Camera » avec l'adresse affichée sur la page de la
+caméra (onglet Configuration) :
+
+```
+rtsp://<machine-rustnvr>:8554/jardin/sub     (sous-flux, plus léger)
+rtsp://<machine-rustnvr>:8554/jardin         (flux principal)
+```
+
+Transport RTSP : **TCP**. Identifiant et mot de passe : ceux de la
+republication (Paramètres → Réseau), ou ceux de la caméra si elle a les siens
+(dans sa fiche) ; Home Assistant les demande dans des champs à part. Home
+Assistant lit alors le flux que RustNVR reçoit déjà : la caméra ne voit
+toujours qu'une connexion, et RustNVR ne convertit rien (une caméra H.265 est
+republiée en H.265). Si Home Assistant tourne sur une autre machine,
+l'adresse d'écoute doit être `0.0.0.0:8554` : donnez un identifiant et un mot
+de passe à la republication, et ne l'exposez pas sur Internet. Pour la
+relecture et les événements complets, ouvrez l'interface RustNVR (par exemple
+avec une carte bouton et une action `url`).
 
 ## 4. Automatisations
 

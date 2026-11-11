@@ -1,0 +1,25 @@
+# cargo audit (.github/workflows/audit.yml). Each advisory below is in a
+# dependency whose latest release still carries it, and was judged not to
+# expose RustNVR; remove the line as soon as an update is possible, so that
+# the audit speaks again. Checked 2026-11-11.
+[advisories]
+ignore = [
+    # rustls-webpki 0.102.8 (five advisories), pulled by rumqttc 0.25.1 for
+    # one variant of its error type only. Certificates of the MQTT broker are
+    # verified by rustls 0.23 with rustls-webpki 0.103.16 (patched), through
+    # the ClientConfig RustNVR builds itself (crates/rustnvr-mqtt).
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0382",
+    # rsa 0.10.0-rc.18 (Marvin attack: timing of RSA private key operations),
+    # pinned by russh 0.65.1. Only reached when an SFTP destination
+    # authenticates with an RSA key (config.example.toml advises Ed25519).
+    "RUSTSEC-2023-0071",
+    # SQLite before 3.54 bundled by libsqlite3-sys 0.37.0 (sqlx 0.9.0 allows
+    # nothing newer): a crafted database + WAL pair makes queries return
+    # memory of the process. RustNVR only opens the database it wrote itself
+    # in its data directory; who can write there already owns the data.
+    "RUSTSEC-2026-0459",
+]

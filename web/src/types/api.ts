@@ -27,9 +27,13 @@ export interface Capabilities {
   ptz?: boolean
   /** USB webcams (V4L2) can be added as cameras (`usb` in the camera input, `/devices/video` lists them). */
   usb_cameras?: boolean
+  /** Port of the RTSP republication (`rtsp://host:port/<camera>`, `/<camera>/sub`), while it is served. */
+  restream_port?: number | null
+  /** The republication only listens on the server itself (127.0.0.1). */
+  restream_local_only?: boolean
 }
 
-export type CapabilityKey = Exclude<keyof Capabilities, 'api_version'>
+export type CapabilityKey = Exclude<keyof Capabilities, 'api_version' | 'restream_port' | 'restream_local_only'>
 
 export interface SystemInfo {
   version: string
@@ -355,6 +359,10 @@ export interface CameraEdit {
   onvif_port?: number | null
   /** USB webcam settings (`main_url` empty), null for an RTSP camera. */
   usb?: UsbSettings | null
+  /** User name of the RTSP republication for this camera, when it has its own. */
+  restream_username?: string | null
+  /** Whether its republication password is stored (never returned). Absent on an older server. */
+  restream_has_password?: boolean
 }
 
 export interface StreamInput {
@@ -385,6 +393,10 @@ export interface CameraInput {
   record_audio?: boolean
   /** Port of the ONVIF service, for PTZ (null: none). */
   onvif_port?: number | null
+  /** User name RTSP clients give for this camera instead of the general one (null: the general one). */
+  restream_username?: string | null
+  /** Its password; omit to keep the stored one. */
+  restream_password?: string
 }
 
 /** A USB webcam (V4L2) read by FFmpeg (`usb` of a camera). */
@@ -608,6 +620,25 @@ export interface MotionGlobalSettings {
   events_retention_days: number
 }
 
+/** `[restream]`: RTSP republication of the cameras. */
+export interface RestreamSettings {
+  enabled: boolean
+  /** Listening address, `127.0.0.1:8554` or `0.0.0.0:8554`. */
+  listen: string
+  max_clients: number
+  /** Most clients from one address. */
+  max_clients_per_address: number
+  /** Agreement to listen on the network without a password. */
+  allow_unauthenticated_remote: boolean
+  /** User name asked to RTSP clients (null: none). */
+  username: string | null
+  /** Whether a password is stored (never returned). */
+  has_password: boolean
+}
+
+/** `restream` of PUT /settings: `password` absent keeps the stored one, `""` removes it. */
+export type RestreamInput = Omit<RestreamSettings, 'has_password'> & { password?: string }
+
 /** GET /api/v1/settings. */
 export interface GeneralSettings {
   recording: RecordingSettings
@@ -619,14 +650,18 @@ export interface GeneralSettings {
   low_space_percent: number
   /** Destination of cameras whose recording is enabled without choosing one. */
   default_destination: string
+  /** RTSP republication (absent on an older server). */
+  restream?: RestreamSettings
+  /** Why the republication is enabled but not served (address in use…). */
+  restream_error?: string | null
   /** Read-only here. */
   ffmpeg: string
   /** Changed from the interface (settings.ui.toml). */
   managed: boolean
 }
 
-/** PUT /api/v1/settings; `default_destination` absent keeps the current one. */
-export type GeneralSettingsInput = Omit<GeneralSettings, 'ffmpeg' | 'managed' | 'default_destination'> & { default_destination?: string }
+/** PUT /api/v1/settings; `default_destination` and `restream` absent keep the current ones. */
+export type GeneralSettingsInput = Omit<GeneralSettings, 'ffmpeg' | 'managed' | 'default_destination' | 'restream_error' | 'restream'> & { default_destination?: string; restream?: RestreamInput }
 
 /** Severity of a log message. */
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace'

@@ -140,6 +140,11 @@ pub struct CameraEditInfo {
     pub onvif_port: Option<u16>,
     /// USB webcam settings (`main_url` is then empty).
     pub usb: Option<rustnvr_core::config::UsbConfig>,
+    /// User name of the RTSP republication for this camera, when it has
+    /// its own.
+    pub restream_username: Option<String>,
+    /// Whether a republication password is stored for this camera.
+    pub restream_has_password: bool,
 }
 
 #[derive(Default)]
@@ -190,12 +195,18 @@ pub struct ApiState {
     pub(crate) updates: RwLock<crate::dto::UpdateStatus>,
     /// `storage.low_space_percent`.
     low_space_percent: std::sync::atomic::AtomicU8,
+    /// Port of the RTSP republication while it is served (0: not served).
+    restream_port: std::sync::atomic::AtomicU16,
+    /// The republication only listens on this machine (loopback).
+    restream_local: std::sync::atomic::AtomicBool,
     /// Served over HTTPS (session cookies get `Secure`).
     pub(crate) https: std::sync::atomic::AtomicBool,
     /// Accounts exist in the database (authentication required).
     pub(crate) has_users: std::sync::atomic::AtomicBool,
     /// Failed login attempts.
     pub(crate) login_guard: crate::auth::LoginGuard,
+    /// Reverse proxies whose `X-Forwarded-For` names the client.
+    pub(crate) trusted_proxies: OnceLock<Vec<rustnvr_core::config::TrustedProxy>>,
     /// Names of the destinations short of space (updated every minute).
     low_space: RwLock<Vec<String>>,
     /// Destinations that cannot be used: name, problem (every minute).
@@ -259,9 +270,12 @@ impl ApiState {
                 ..Default::default()
             }),
             low_space_percent: std::sync::atomic::AtomicU8::new(90),
+            restream_port: std::sync::atomic::AtomicU16::new(0),
+            restream_local: std::sync::atomic::AtomicBool::new(false),
             https: std::sync::atomic::AtomicBool::new(false),
             has_users: std::sync::atomic::AtomicBool::new(false),
             login_guard: crate::auth::LoginGuard::default(),
+            trusted_proxies: OnceLock::new(),
             low_space: RwLock::new(Vec::new()),
             storage_problems: RwLock::new(Vec::new()),
             config_restored: std::sync::atomic::AtomicBool::new(false),
@@ -465,9 +479,33 @@ impl ApiState {
         *self.ai_provider.write().unwrap_or_else(|e| e.into_inner()) = provider;
     }
 
+    /// Declares the reverse proxies in front of the interface
+    /// (`web.trusted_proxies`), once, before serving.
+    pub fn set_trusted_proxies(&self, proxies: Vec<rustnvr_core::config::TrustedProxy>) {
+        let _ = self.trusted_proxies.set(proxies);
+    }
+
     /// Usage (percent) above which a destination is short of space.
     pub fn set_low_space_percent(&self, percent: u8) {
         self.low_space_percent.store(percent, Ordering::Relaxed);
+    }
+
+    /// Says where the cameras are republished over RTSP (`None`: they
+    /// are not).
+    pub fn set_restream(&self, addr: Option<std::net::SocketAddr>) {
+        self.restream_local.store(
+            addr.is_some_and(|a| a.ip().is_loopback()),
+            Ordering::Relaxed,
+        );
+        self.restream_port
+            .store(addr.map_or(0, |a| a.port()), Ordering::Relaxed);
+    }
+
+    /// Port of the RTSP republication while it is served, and whether it
+    /// only listens on this machine.
+    pub(crate) fn restream(&self) -> Option<(u16, bool)> {
+        let port = self.restream_port.load(Ordering::Relaxed);
+        (port != 0).then(|| (port, self.restream_local.load(Ordering::Relaxed)))
     }
 
     pub(crate) fn low_space_percent(&self) -> u8 {
@@ -652,6 +690,8 @@ impl ApiState {
                 },
                 onvif_port: e.onvif_port,
                 usb: e.usb.clone(),
+                restream_username: e.restream_username.clone(),
+                restream_has_password: e.restream_has_password,
             }),
             record_destinations: c.record_destinations.clone(),
             record_mode: c.record_mode.as_str(),

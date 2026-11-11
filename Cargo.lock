@@ -3769,6 +3769,7 @@ dependencies = [
  "rustnvr-mqtt",
  "rustnvr-recorder",
  "rustnvr-remote",
+ "rustnvr-restream",
  "rustnvr-storage",
  "rustnvr-stream",
  "rustnvr-testkit",
@@ -3862,6 +3863,23 @@ dependencies = [
  "russh-sftp",
  "rustnvr-core",
  "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "rustnvr-restream"
+version = "2026.11.5"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "futures",
+ "getrandom 0.4.3",
+ "md-5 0.10.6",
+ "rustnvr-core",
+ "rustnvr-stream",
+ "rustnvr-testkit",
  "tokio",
  "tokio-util",
  "tracing",

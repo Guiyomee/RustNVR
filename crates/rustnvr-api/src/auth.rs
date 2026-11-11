@@ -265,6 +265,68 @@ async fn identify(state: &ApiState, headers: &HeaderMap) -> Option<Principal> {
     })
 }
 
+/// The address a request comes from: the peer of the connection, or, when
+/// that peer is a declared reverse proxy, the client it names.
+///
+/// `X-Forwarded-For` lists the client then each proxy passed, each proxy
+/// appending the address it received the request from: read from the right,
+/// the first address that is not a trusted proxy is the client (anything
+/// further left was written by that client, or by proxies not trusted).
+/// From any other peer the header is ignored: a client could name anyone
+/// and never be locked out.
+pub(crate) fn client_ip(
+    proxies: &[rustnvr_core::config::TrustedProxy],
+    peer: std::net::IpAddr,
+    headers: &HeaderMap,
+) -> std::net::IpAddr {
+    let trusted = |ip: std::net::IpAddr| proxies.iter().any(|p| p.contains(ip));
+    let peer = peer.to_canonical();
+    if !trusted(peer) {
+        return peer;
+    }
+    let named = |name: &str| {
+        headers
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .map(|a| {
+                a.trim()
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.to_canonical())
+            })
+            .collect::<Vec<_>>()
+    };
+    for address in named("x-forwarded-for").into_iter().rev() {
+        match address {
+            Ok(ip) if trusted(ip) => {}
+            Ok(ip) => return ip,
+            // Not an address: nothing left of it can be believed.
+            Err(_) => return peer,
+        }
+    }
+    // Nginx's `X-Real-IP`, when it is the only one given.
+    match named("x-real-ip").pop() {
+        Some(Ok(ip)) => ip,
+        _ => peer,
+    }
+}
+
+impl ApiState {
+    /// [`client_ip`] with the proxies of `web.trusted_proxies`.
+    pub(crate) fn client_ip(
+        &self,
+        peer: std::net::IpAddr,
+        headers: &HeaderMap,
+    ) -> std::net::IpAddr {
+        client_ip(
+            self.trusted_proxies.get().map_or(&[], Vec::as_slice),
+            peer,
+            headers,
+        )
+    }
+}
+
 /// Routes reachable without credentials.
 /// Path of the health check, always reachable without authentication.
 const HEALTH_PATH: &str = "/api/v1/health";
@@ -377,7 +439,7 @@ pub(crate) async fn require_auth(
         let ip = req
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
-            .map(|c| c.0.ip().to_string())
+            .map(|c| state.client_ip(c.0.ip(), req.headers()).to_string())
             .unwrap_or_default();
         [format!("ip:{ip}"), format!("user:{user}")]
     });
@@ -534,10 +596,8 @@ pub(crate) async fn login(
         .database
         .get()
         .ok_or_else(|| ApiError::unavailable("accounts need the database"))?;
-    let keys = [
-        format!("ip:{}", peer.ip()),
-        format!("user:{}", input.username),
-    ];
+    let client = state.client_ip(peer.ip(), &headers);
+    let keys = [format!("ip:{client}"), format!("user:{}", input.username)];
     if let Some(wait) = state.login_guard.blocked(&keys) {
         return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
@@ -564,7 +624,7 @@ pub(crate) async fn login(
     };
     let Some(role) = verified else {
         state.login_guard.failed(&keys);
-        tracing::warn!(user = %input.username, client = %peer.ip(), "failed login");
+        tracing::warn!(user = %input.username, %client, "failed login");
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "bad_credentials",
@@ -572,7 +632,7 @@ pub(crate) async fn login(
         ));
     };
     state.login_guard.succeeded(&keys);
-    tracing::info!(user = %input.username, client = %peer.ip(), "login");
+    tracing::info!(user = %input.username, %client, "login");
     open_session(&state, &input.username, &role, &headers).await
 }
 
@@ -975,6 +1035,93 @@ mod tests {
         assert!(
             guard.blocked(&from(9)).is_some(),
             "20 failures: the account waits"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn the_client_behind_a_declared_proxy_is_the_one_it_names() {
+        use rustnvr_core::config::TrustedProxy;
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        let proxies = [
+            TrustedProxy::parse("192.168.1.5").unwrap(),
+            TrustedProxy::parse("10.0.0.0/8").unwrap(),
+        ];
+        let from = |peer: &str, pairs: &[(&'static str, &str)]| {
+            client_ip(&proxies, ip(peer), &headers(pairs))
+        };
+        // No proxy involved.
+        assert_eq!(from("203.0.113.7", &[]), ip("203.0.113.7"));
+        // A client naming itself someone else is not believed.
+        assert_eq!(
+            from("203.0.113.7", &[("x-forwarded-for", "198.51.100.1")]),
+            ip("203.0.113.7")
+        );
+        // Through the declared proxy: the client it names.
+        assert_eq!(
+            from("192.168.1.5", &[("x-forwarded-for", "203.0.113.7")]),
+            ip("203.0.113.7")
+        );
+        // What the client itself wrote on the left is not believed either.
+        assert_eq!(
+            from(
+                "192.168.1.5",
+                &[("x-forwarded-for", "198.51.100.1, 203.0.113.7")]
+            ),
+            ip("203.0.113.7")
+        );
+        // A chain of declared proxies; IPv4 seen through an IPv6 socket.
+        assert_eq!(
+            from(
+                "::ffff:192.168.1.5",
+                &[("x-forwarded-for", "203.0.113.7, 10.1.2.3")]
+            ),
+            ip("203.0.113.7")
+        );
+        // Only proxies named, garbage, or nothing: the proxy itself.
+        assert_eq!(
+            from("192.168.1.5", &[("x-forwarded-for", "10.1.2.3")]),
+            ip("192.168.1.5")
+        );
+        assert_eq!(
+            from(
+                "192.168.1.5",
+                &[("x-forwarded-for", "203.0.113.7, pas-une-adresse")]
+            ),
+            ip("192.168.1.5")
+        );
+        assert_eq!(from("192.168.1.5", &[]), ip("192.168.1.5"));
+        assert_eq!(
+            from("192.168.1.5", &[("x-real-ip", "203.0.113.9")]),
+            ip("203.0.113.9")
+        );
+
+        // Two clients behind the proxy no longer share one lockout.
+        let guard = LoginGuard::default();
+        let key = |client: &str| {
+            vec![format!(
+                "ip:{}",
+                from("192.168.1.5", &[("x-forwarded-for", client)])
+            )]
+        };
+        for _ in 0..MAX_FAILURES {
+            guard.failed(&key("203.0.113.7"));
+        }
+        assert!(guard.blocked(&key("203.0.113.7")).is_some());
+        assert!(guard.blocked(&key("203.0.113.8")).is_none());
+
+        assert!(TrustedProxy::parse("0.0.0.0/0").is_err());
+        assert!(TrustedProxy::parse("192.168.1.0/33").is_err());
+        assert!(TrustedProxy::parse("proxy.lan").is_err());
+        assert!(
+            TrustedProxy::parse("fd00::/8")
+                .unwrap()
+                .contains(ip("fd12::1"))
+        );
+        assert!(
+            !TrustedProxy::parse("192.168.1.0/24")
+                .unwrap()
+                .contains(ip("192.168.2.1"))
         );
     }
 

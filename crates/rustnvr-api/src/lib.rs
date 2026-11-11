@@ -36,7 +36,7 @@ pub use control::{
     AiModelView, AiProbeInput, AiProbeResult, AiTestObject, AiTestResult, AiView, BackupCamera,
     BackupFile, BackupPreview, BackupRestored, CameraInput, CaptureDay, CapturePicture,
     ControlError, DestinationInput, MqttInput, MqttView, NvrControl, ReplayPicture, ReplayResult,
-    SettingsInput, SettingsView, StreamInput, WebhookTestResult,
+    RestreamInput, RestreamView, SettingsInput, SettingsView, StreamInput, WebhookTestResult,
 };
 pub use routes::router;
 pub use state::{ApiState, CameraEditInfo, CameraSource, DestinationInfo, StreamSource};

@@ -34,6 +34,7 @@ import { recordingToggleBlocker, setRecording } from '../lib/recording'
 import type { LiveStream } from '../api/endpoints'
 import type { Camera } from '../types/api'
 import { t } from '../lib/i18n'
+import { restreamHost } from '../lib/restream'
 
 type TabKey = 'live' | 'recordings' | 'detection' | 'config' | 'tech'
 
@@ -123,7 +124,7 @@ export function CameraDetailPage({ id }: { id: string }) {
   const snapshots = useCapability('snapshots')
   const canManage = useCapability('camera_management') === true
   const readOnly = useReadOnly()
-  const { source } = useData()
+  const { source, capabilities } = useData()
   const [toggling, setToggling] = useState(false)
   const [tab, setTab] = useState<TabKey>('live')
   const [editing, setEditing] = useState(false)
@@ -155,6 +156,15 @@ export function CameraDetailPage({ id }: { id: string }) {
   }
 
   const noLive = demo ? t('Aucune vidéo à agrandir en mode démo.', 'No video to enlarge in demo mode.') : live ? (camera.status === 'online' ? null : t('Caméra hors ligne.', 'Camera offline.')) : t("Le direct vidéo n'est pas encore disponible.", "Live video is not available yet.")
+  // Addresses other programs read this camera at, while RustNVR republishes it.
+  const restreamPort = capabilities?.restream_port
+  const restreamBase = restreamPort ? `rtsp://${restreamHost(capabilities?.restream_local_only === true)}:${restreamPort}/${camera.id}` : null
+  const restreamRows: [string, ReactNode][] = restreamBase
+    ? [
+        [t('Republication RTSP', 'RTSP republication'), <code key="main" className="select-all">{restreamBase}</code>],
+        ...(camera.has_sub_stream ? [[t('Republication RTSP (sous-flux)', 'RTSP republication (sub stream)'), <code key="sub" className="select-all">{`${restreamBase}/sub`}</code>] as [string, ReactNode]] : []),
+      ]
+    : []
   const tech: [string, ReactNode][] = [
     [t('Codec', 'Codec'), camera.codec?.toUpperCase() ?? '—'],
     [t('Résolution', 'Resolution'), formatResolution(camera.width, camera.height)],
@@ -324,9 +334,17 @@ export function CameraDetailPage({ id }: { id: string }) {
                   [t('Flux principal', 'Main stream'), camera.endpoint],
                   [t('Sous-flux', 'Sub stream'), camera.has_sub_stream ? t(`Connecté pour le direct (${camera.sub_status ?? '—'})`, `Connected for the live view (${camera.sub_status ?? '—'})`) : t('Aucun', 'None')],
                   [t('Enregistrement continu', 'Continuous recording'), camera.recording_enabled ? t('Oui', 'Yes') : t('Non', 'No')],
+                  ...restreamRows,
                 ]}
               />
-              <p className="py-3 text-xs text-muted">{t("Le chemin RTSP et les identifiants ne sont jamais renvoyés par l'API.", "The RTSP path and the credentials are never returned by the API.")}</p>
+              <p className="py-3 text-xs text-muted">
+                {t("Le chemin RTSP et les identifiants ne sont jamais renvoyés par l'API.", "The RTSP path and the credentials are never returned by the API.")}
+                {restreamBase &&
+                  t(
+                    ' Les adresses de republication sont à donner à Home Assistant, Frigate ou VLC à la place de celle de la caméra (RTSP sur TCP ; identifiant et mot de passe de la republication s’il y en a)',
+                    ' Give the republication addresses to Home Assistant, Frigate or VLC instead of the address of the camera (RTSP over TCP; user name and password of the republication if any)',
+                  ) + (capabilities?.restream_local_only ? t(' ; utilisables depuis la machine de RustNVR seulement.', '; usable from the machine running RustNVR only.') : '.')}
+              </p>
             </div>
           </Card>
         )}

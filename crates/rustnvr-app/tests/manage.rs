@@ -460,3 +460,109 @@ async fn general_settings_are_applied_and_kept() {
     assert_eq!(reloaded.ai.labels, ["person", "car"]);
     assert_eq!(reloaded.ai.max_pictures, 3);
 }
+
+/// State of a camera's streams: (main, sub).
+async fn stream_states(addr: SocketAddr, id: &str) -> (String, Option<String>) {
+    let (_, cam) = http(addr, "GET", &format!("/api/v1/cameras/{id}"), None).await;
+    (
+        cam["status"].as_str().unwrap_or_default().to_owned(),
+        cam["sub_status"].as_str().map(str::to_owned),
+    )
+}
+
+/// The form has one user name and one password for both streams, and sends
+/// no password when it was not typed again: a sub stream added (or put back)
+/// later must use the stored one, as the form says (« unchanged »).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sub_stream_added_later_uses_the_stored_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = MockServerConfig::new(Fixture::h264());
+    cfg.frame_interval = Duration::from_millis(20);
+    cfg.credentials = Some(("u".into(), "s3cret".into()));
+    let camera = MockRtspServer::start(cfg).await.unwrap();
+    let url = camera.url();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+            [storage]
+            recordings_dir = "{rec}"
+            [reconnect]
+            initial_millis = 50
+            max_seconds = 1
+            [metrics]
+            log_interval_seconds = 0
+            [web]
+            listen = "127.0.0.1:0"
+            static_dir = "/nonexistent-rustnvr-web"
+            "#,
+            rec = dir.path().join("rec").display()
+        ),
+    )
+    .unwrap();
+    let config = Config::load_with_env(&config_path, |_| None).unwrap();
+    let nvr = Nvr::start(&config, event_bus(64)).await.unwrap();
+    let addr = nvr.web_addr().unwrap();
+    let online = |want_sub: bool| async move {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let (main, sub) = stream_states(addr, "cam").await;
+                if main == "online" && (!want_sub || sub.as_deref() == Some("online")) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .is_ok()
+    };
+    let put = |body: String| async move {
+        let (status, cam) = http(addr, "PUT", "/api/v1/cameras/cam", Some(&body)).await;
+        assert_eq!(status, 200, "{cam}");
+        cam
+    };
+    // What the form sends for each stream when the password is not retyped.
+    let stream = format!(r#"{{"url":"{url}","username":"u","password":null,"transport":"tcp"}}"#);
+
+    // Main and sub streams, with the password.
+    let typed = format!(r#"{{"url":"{url}","username":"u","password":"s3cret"}}"#);
+    let new = format!(r#"{{"id":"cam","name":"Cam","record":false,"main":{typed},"sub":{typed}}}"#);
+    let (status, cam) = http(addr, "POST", "/api/v1/cameras", Some(&new)).await;
+    assert_eq!(status, 201, "{cam}");
+    assert!(online(true).await, "both streams connect");
+
+    // The sub stream removed: the main stream comes back.
+    let cam = put(format!(
+        r#"{{"name":"Cam","record":false,"main":{stream},"sub":null}}"#
+    ))
+    .await;
+    assert_eq!(cam["has_sub_stream"], false);
+    assert!(online(false).await, "main stream alone");
+
+    // Put back without typing the password again: it connects.
+    let cam = put(format!(
+        r#"{{"name":"Cam","record":false,"main":{stream},"sub":{stream}}}"#
+    ))
+    .await;
+    assert_eq!(cam["has_sub_stream"], true);
+    assert!(
+        online(true).await,
+        "the sub stream put back connects: {:?}",
+        stream_states(addr, "cam").await
+    );
+
+    // Another user name is another account: its password must be typed.
+    let other = format!(r#"{{"url":"{url}","username":"autre","password":null}}"#);
+    put(format!(
+        r#"{{"name":"Cam","record":false,"main":{stream},"sub":null}}"#
+    ))
+    .await;
+    put(format!(
+        r#"{{"name":"Cam","record":false,"main":{stream},"sub":{other}}}"#
+    ))
+    .await;
+    let stored = std::fs::read_to_string(dir.path().join(MANAGED_CAMERAS_FILE)).unwrap();
+    assert_eq!(stored.matches("s3cret").count(), 1, "{stored}");
+    assert!(nvr.shutdown().await);
+}

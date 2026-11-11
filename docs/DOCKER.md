@@ -79,6 +79,18 @@ Hosts → Proxy Hosts → Add Proxy Host :
 | Block Common Exploits | au choix |
 | SSL | un certificat Let's Encrypt, « Force SSL » |
 
+**Déclarez le proxy à RustNVR.** Sans cela, RustNVR ne voit que l'adresse du
+proxy : cinq mots de passe faux, de n'importe qui, bloquent la connexion de
+tout le monde pendant 15 minutes. Dans `/config/config.toml`, section
+`[web]`, l'adresse (ou le réseau) de la machine du proxy, puis redémarrez :
+
+```toml
+trusted_proxies = ["192.168.1.5"]
+```
+
+RustNVR croit alors l'adresse que ce proxy lui donne (`X-Forwarded-For`), et
+seulement lui : ne déclarez que des machines que vous maîtrisez.
+
 Le direct « Faible latence » (WebRTC) ne passe pas par Nginx Proxy Manager :
 il lui faut un chemin UDP direct entre le navigateur et RustNVR (réseau local
 ou VPN) ; le direct standard, lui, passe.
@@ -97,6 +109,12 @@ docker restart rustnvr
 joint les caméras comme l'hôte et le direct WebRTC (UDP) fonctionne. En réseau
 « bridge » (retirez `network_mode`, décommentez `ports`), le direct standard
 marche mais pas le WebRTC (adresses du conteneur non joignables).
+
+**Republication RTSP** (Paramètres → Réseau, désactivée par défaut) : port
+8554 en TCP. En réseau de l'hôte, rien à ajouter ; en « bridge », ajoutez
+`"8554:8554"` à `ports`. Dans les deux cas l'adresse d'écoute doit être
+`0.0.0.0:8554` pour être jointe depuis une autre machine ou un autre
+conteneur ; donnez-lui alors un identifiant et un mot de passe (même page).
 
 **Autre port.** En réseau de l'hôte, `ports` n'a aucun effet : RustNVR écoute
 sur `listen` de `/config/config.toml` (8080). Pour un autre port, sans toucher
