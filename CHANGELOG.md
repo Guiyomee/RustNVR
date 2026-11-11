@@ -7,6 +7,10 @@ précautions) sont sur la page de chaque
 
 ## Non publiée
 
+Rien pour l'instant.
+
+## 2026.11.06 (2026-11-11)
+
 ### Nouveautés
 - **Republication RTSP** (Paramètres → Réseau, désactivée par défaut) : Home
   Assistant, Frigate ou VLC lisent les caméras depuis RustNVR
@@ -14,7 +18,7 @@ précautions) sont sur la page de chaque
   seule connexion à la caméra. Flux renvoyés tels quels (H.264 / H.265, son
   AAC ou Opus), sans conversion ; RTSP sur TCP. Identifiant et mot de passe
   facultatifs, généraux ou propres à une caméra ; écoute sur `127.0.0.1` par
-  défaut.
+  défaut. Merci cddu33 (#5) !
 
 ### Sécurité
 - **Derrière un reverse proxy** : `web.trusted_proxies` déclare le proxy ;
@@ -28,6 +32,12 @@ précautions) sont sur la page de chaque
 ### Corrections
 - La recherche de caméras ne liste plus la republication RTSP de RustNVR
   comme une caméra.
+- **PTZ** : une caméra non motorisée qui a un port ONVIF (sonnette, caméra
+  fixe) n'affiche plus de panneau « Pilotage PTZ » en erreur.
+
+### Autres
+- Dépendances à jour (jiff, toml, md-5, lucide-react, tailwindcss), proposées
+  par Dependabot ; quatre bibliothèques devenues inutiles disparaissent.
 - Un sous-flux ajouté (ou remis) à une caméra existante sans retaper le mot
   de passe utilise maintenant celui qui est enregistré, comme le formulaire
   l'annonce (« inchangé ») ; il partait sans mot de passe et la caméra le

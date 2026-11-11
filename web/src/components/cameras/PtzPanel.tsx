@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useReadOnly } from '../../auth/AuthGate'
-import { describeError } from '../../api/client'
+import { ApiError, describeError } from '../../api/client'
 import { getPtz, ptzDeletePreset, ptzGoto, ptzMove, ptzSavePreset, ptzStop } from '../../api/endpoints'
 import { useData, useIsDemo } from '../../data/DataContext'
 import { useAsync } from '../../hooks/useAsync'
@@ -115,6 +115,9 @@ export function PtzPanel({ camera }: { camera: Camera }) {
     />
   )
 
+  // An ONVIF port on a camera without motor (a doorbell, a fixed camera):
+  // the server says 404, and there is nothing to drive.
+  if (loaded.error instanceof ApiError && loaded.error.status === 404) return null
   const presets = loaded.data?.presets ?? []
   return (
     <Card>

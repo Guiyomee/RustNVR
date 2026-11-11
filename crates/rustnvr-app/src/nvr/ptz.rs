@@ -76,6 +76,10 @@ fn control_error(e: OnvifError) -> ControlError {
         OnvifError::NotOnvif => ControlError::Invalid(
             "la caméra ne répond pas en ONVIF à cette adresse (vérifiez le port ONVIF)".into(),
         ),
+        // ONVIF answers, without a PTZ service: a fixed camera or a doorbell
+        // (the port is there for something else). Not a failure: the
+        // interface shows no PTZ panel.
+        OnvifError::NoPtz => ControlError::NotFound(OnvifError::NoPtz.to_string()),
         other => ControlError::Invalid(other.to_string()),
     }
 }
@@ -293,6 +297,11 @@ mod tests {
         assert!(matches!(
             control_error(OnvifError::NotOnvif),
             ControlError::Invalid(m) if m.contains("port ONVIF")
+        ));
+        // A camera without motor: « not found » (404), the panel is hidden.
+        assert!(matches!(
+            control_error(OnvifError::NoPtz),
+            ControlError::NotFound(_)
         ));
     }
 }

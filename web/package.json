@@ -1,7 +1,7 @@
 {
   "name": "rustnvr-web",
   "private": true,
-  "version": "2026.11.5",
+  "version": "2026.11.6",
   "type": "module",
   "description": "RustNVR web interface (static files served by the Rust/Axum server)",
   "scripts": {
@@ -14,16 +14,16 @@
   },
   "dependencies": {
     "hls.js": "^1.7.4",
-    "lucide-react": "1.69.0",
+    "lucide-react": "1.70.0",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "4.3.4",
+    "@tailwindcss/vite": "4.3.5",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.2.1",
-    "tailwindcss": "4.3.4",
+    "tailwindcss": "4.3.5",
     "typescript": "7.0.2",
     "vite": "8.3.6"
   }

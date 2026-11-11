@@ -674,9 +674,10 @@ Lire est permis à tous les comptes ; bouger et changer les positions sont des
 
 - `GET …/ptz` → `{ "presets": [{ "token": "1", "name": "Portail" }] }` :
   les positions enregistrées sur la caméra (`GetPresets`). 400 si aucun
-  port ONVIF n'est réglé, si la caméra ne répond pas en ONVIF, refuse les
-  identifiants ou n'annonce pas de PTZ (le message le dit) ; 404 caméra
-  inconnue.
+  port ONVIF n'est réglé, si la caméra ne répond pas en ONVIF ou refuse les
+  identifiants (le message le dit) ; 404 caméra inconnue, ou caméra qui
+  répond en ONVIF sans annoncer de PTZ (caméra fixe, sonnette) : l'interface
+  n'affiche alors pas le panneau de pilotage.
 - `POST …/ptz/move` `{ "pan": 0.5, "tilt": 0, "zoom": 0 }` : déplacement
   continu (`ContinuousMove`), vitesses de -1 à 1 (pan : droite > 0 ; tilt :
   haut > 0 ; zoom : avant > 0 ; absentes : 0 ; au-delà : ramenées à ±1),
