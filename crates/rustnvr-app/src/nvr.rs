@@ -1153,10 +1153,27 @@ fn config_from_input(
         (Some(_), _) => (StreamConfig::default(), None),
         (None, Some(main)) => (
             stream_from_input(main, previous.map(|p| &p.main)),
-            input
-                .sub
-                .filter(|s| !s.url.trim().is_empty())
-                .map(|s| stream_from_input(s, previous.and_then(|p| p.sub.as_ref()))),
+            // The form has one user name and one password for both streams:
+            // a sub stream added (or put back) later without typing the
+            // password again takes the stored one of the main stream, when
+            // it is the same account.
+            input.sub.filter(|s| !s.url.trim().is_empty()).map(|s| {
+                let stored = previous.and_then(|p| {
+                    p.sub.as_ref().or_else(|| {
+                        let same =
+                            s.username.as_deref().map(str::trim) == p.main.username.as_deref();
+                        same.then_some(&p.main)
+                    })
+                });
+                let mut sub = stream_from_input(s, stored);
+                // Timeouts of the main stream are not those of the sub.
+                if previous.is_none_or(|p| p.sub.is_none()) {
+                    let defaults = StreamConfig::default();
+                    sub.connect_timeout_seconds = defaults.connect_timeout_seconds;
+                    sub.stall_timeout_seconds = defaults.stall_timeout_seconds;
+                }
+                sub
+            }),
         ),
         (None, None) => {
             return Err(ControlError::Invalid(

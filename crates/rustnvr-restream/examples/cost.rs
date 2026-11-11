@@ -55,9 +55,10 @@ async fn camera(tap: LiveTap, bits_per_second: u64) {
     let (key, other) = (picture(small * 10, true), picture(small, false));
     let params = params();
     let mut tick = tokio::time::interval(Duration::from_millis(1000 / FPS));
-    for seq in 0.. {
+    let mut seq: u64 = 0;
+    loop {
         tick.tick().await;
-        let is_key = seq % GOP == 0;
+        let is_key = seq.is_multiple_of(GOP);
         tap.publish(&VideoFrame {
             session: 1,
             seq,
@@ -69,6 +70,7 @@ async fn camera(tap: LiveTap, bits_per_second: u64) {
             data: if is_key { key.clone() } else { other.clone() },
             audio: None,
         });
+        seq += 1;
     }
 }
 

@@ -28,6 +28,10 @@ précautions) sont sur la page de chaque
 ### Corrections
 - La recherche de caméras ne liste plus la republication RTSP de RustNVR
   comme une caméra.
+- Un sous-flux ajouté (ou remis) à une caméra existante sans retaper le mot
+  de passe utilise maintenant celui qui est enregistré, comme le formulaire
+  l'annonce (« inchangé ») ; il partait sans mot de passe et la caméra le
+  refusait indéfiniment.
 
 ## 2026.11.05 (2026-11-09)
 
