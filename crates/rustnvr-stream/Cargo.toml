@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 bytes.workspace = true
 futures.workspace = true
-h264-reader = "0.8"
+h264-reader = "0.9"
 opus.workspace = true
 retina.workspace = true
 rustnvr-core.workspace = true
