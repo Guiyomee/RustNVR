@@ -104,6 +104,23 @@ max_bitrate_kbps = 2000
 # processor.
 hwaccel = "auto"
 
+[restream]
+# RTSP republication: Home Assistant, Frigate, VLC… read the cameras from
+# RustNVR instead of opening their own connection to them (many cameras take
+# few clients). rtsp://<this machine>:8554/<camera id> is the main stream,
+# rtsp://<this machine>:8554/<camera id>/sub the sub stream. The pictures
+# already received are sent as they are (H.264 / H.265; AAC sound, or the
+# Opus RustNVR makes of G.711), as RTP inside the RTSP connection (TCP): no
+# conversion, nothing running while nobody reads. Also editable in the web
+# interface (Settings > Network), applied without restart.
+enabled = false
+# No authentication: loopback by default (programs on this machine). To serve
+# the local network, "0.0.0.0:8554" and allow_unauthenticated_remote = true:
+# anyone who can reach this address then watches the cameras.
+listen = "127.0.0.1:8554"
+allow_unauthenticated_remote = false
+max_clients = 16              # each client receives the camera's bit rate
+
 [motion]
 # Motion detection is enabled camera by camera in the web interface (camera
 # page, "Détection" tab; settings stored in the database). These values are

@@ -14,6 +14,7 @@ members = [
     "crates/rustnvr-webrtc",
     "crates/rustnvr-ai",
     "crates/rustnvr-discovery",
+    "crates/rustnvr-restream",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ rustnvr-remote = { path = "crates/rustnvr-remote" }
 rustnvr-webrtc = { path = "crates/rustnvr-webrtc" }
 rustnvr-ai = { path = "crates/rustnvr-ai" }
 rustnvr-discovery = { path = "crates/rustnvr-discovery" }
+rustnvr-restream = { path = "crates/rustnvr-restream" }
 
 anyhow = "1.0.104"
 base64 = "0.23"

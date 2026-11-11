@@ -18,6 +18,12 @@ pub struct CapabilitiesDto {
     pub discovery: bool,
     /// Low-latency live view over WebRTC (WHEP, `POST /cameras/{id}/live/webrtc`), prototype.
     pub live_webrtc: bool,
+    /// Port of the RTSP republication (`rtsp://host:port/<camera>`, and
+    /// `/<camera>/sub`), while it is served.
+    pub restream_port: Option<u16>,
+    /// The republication only listens on this machine (`127.0.0.1`): the
+    /// addresses work from programs running on it only.
+    pub restream_local_only: bool,
     /// Still images from cameras.
     pub snapshots: bool,
     /// Motion or other events.

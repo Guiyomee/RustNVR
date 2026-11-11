@@ -3,6 +3,7 @@ import { ConfigKey, SettingRow, SettingsSection } from '../components/settings/S
 import { AiSettings } from '../components/settings/AiSettings'
 import { BackupSettings } from '../components/settings/BackupSettings'
 import { GeneralSettingsForm } from '../components/settings/GeneralSettingsForm'
+import { RestreamSettings } from '../components/settings/RestreamSettings'
 import { LogsViewer } from '../components/settings/LogsViewer'
 import { MqttSettings } from '../components/settings/MqttSettings'
 import { StorageSettings } from '../components/settings/StorageSettings'
@@ -174,6 +175,7 @@ function Section({ category }: { category: Category }) {
             {window.location.protocol === 'https:' ? 'HTTPS' : t('HTTP (non chiffré)', 'HTTP (not encrypted)')}
           </SettingRow>
           <GeneralSettingsForm section="live" />
+          <RestreamSettings />
         </SettingsSection>
       )
     case 'webhooks':

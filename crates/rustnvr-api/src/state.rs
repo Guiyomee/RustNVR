@@ -190,6 +190,10 @@ pub struct ApiState {
     pub(crate) updates: RwLock<crate::dto::UpdateStatus>,
     /// `storage.low_space_percent`.
     low_space_percent: std::sync::atomic::AtomicU8,
+    /// Port of the RTSP republication while it is served (0: not served).
+    restream_port: std::sync::atomic::AtomicU16,
+    /// The republication only listens on this machine (loopback).
+    restream_local: std::sync::atomic::AtomicBool,
     /// Served over HTTPS (session cookies get `Secure`).
     pub(crate) https: std::sync::atomic::AtomicBool,
     /// Accounts exist in the database (authentication required).
@@ -259,6 +263,8 @@ impl ApiState {
                 ..Default::default()
             }),
             low_space_percent: std::sync::atomic::AtomicU8::new(90),
+            restream_port: std::sync::atomic::AtomicU16::new(0),
+            restream_local: std::sync::atomic::AtomicBool::new(false),
             https: std::sync::atomic::AtomicBool::new(false),
             has_users: std::sync::atomic::AtomicBool::new(false),
             login_guard: crate::auth::LoginGuard::default(),
@@ -468,6 +474,24 @@ impl ApiState {
     /// Usage (percent) above which a destination is short of space.
     pub fn set_low_space_percent(&self, percent: u8) {
         self.low_space_percent.store(percent, Ordering::Relaxed);
+    }
+
+    /// Says where the cameras are republished over RTSP (`None`: they
+    /// are not).
+    pub fn set_restream(&self, addr: Option<std::net::SocketAddr>) {
+        self.restream_local.store(
+            addr.is_some_and(|a| a.ip().is_loopback()),
+            Ordering::Relaxed,
+        );
+        self.restream_port
+            .store(addr.map_or(0, |a| a.port()), Ordering::Relaxed);
+    }
+
+    /// Port of the RTSP republication while it is served, and whether it
+    /// only listens on this machine.
+    pub(crate) fn restream(&self) -> Option<(u16, bool)> {
+        let port = self.restream_port.load(Ordering::Relaxed);
+        (port != 0).then(|| (port, self.restream_local.load(Ordering::Relaxed)))
     }
 
     pub(crate) fn low_space_percent(&self) -> u8 {

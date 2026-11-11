@@ -7,7 +7,13 @@ précautions) sont sur la page de chaque
 
 ## Non publiée
 
-Rien pour l'instant.
+### Nouveautés
+- **Republication RTSP** (Paramètres → Réseau, désactivée par défaut) : Home
+  Assistant, Frigate ou VLC lisent les caméras depuis RustNVR
+  (`rtsp://machine:8554/<caméra>`, `/<caméra>/sub` pour le sous-flux) : une
+  seule connexion à la caméra. Flux renvoyés tels quels (H.264 / H.265, son
+  AAC ou Opus), sans conversion ; RTSP sur TCP, sans mot de passe (écoute sur
+  `127.0.0.1` par défaut, le réseau après accord explicite).
 
 ## 2026.11.05 (2026-11-09)
 
