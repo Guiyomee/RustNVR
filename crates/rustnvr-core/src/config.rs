@@ -34,6 +34,9 @@ pub struct Config {
     /// Live view options.
     #[serde(default)]
     pub live: LiveConfig,
+    /// RTSP republication of the cameras (disabled by default).
+    #[serde(default)]
+    pub restream: RestreamConfig,
     /// Motion detection (shared settings; each camera is configured in the web interface).
     #[serde(default)]
     pub motion: MotionConfig,
@@ -109,6 +112,9 @@ pub struct ManagedSettings {
     /// Replaces `live.hwaccel`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_hwaccel: Option<HwAccelMode>,
+    /// Replaces `[restream]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restream: Option<RestreamConfig>,
     /// Replaces `storage.low_space_percent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low_space_percent: Option<u8>,
@@ -134,6 +140,9 @@ impl ManagedSettings {
         }
         if let Some(h) = self.live_hwaccel {
             c.live.hwaccel = h;
+        }
+        if let Some(r) = &self.restream {
+            c.restream = r.clone();
         }
         if let Some(p) = self.low_space_percent {
             c.storage.low_space_percent = p;
@@ -696,6 +705,77 @@ impl Default for LiveConfig {
             max_bitrate_kbps: 2000,
             hwaccel: HwAccelMode::Auto,
         }
+    }
+}
+
+/// RTSP republication: other programs (Home Assistant, Frigate, VLC…) read
+/// the cameras from RustNVR (`rtsp://host:8554/<camera>`, and
+/// `/<camera>/sub` for the sub stream) instead of opening their own
+/// connection to them.
+///
+/// The frames already received are sent as they are (no conversion), as RTP
+/// inside the RTSP connection. There is no authentication: for that reason
+/// the default address is loopback, and listening on another address needs
+/// an explicit agreement.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RestreamConfig {
+    /// Serve the cameras over RTSP.
+    pub enabled: bool,
+    /// Listening address, e.g. `127.0.0.1:8554` or `0.0.0.0:8554`.
+    pub listen: String,
+    /// Most clients served at a time.
+    pub max_clients: u32,
+    /// Allow listening on a non-loopback address: anyone who can reach it
+    /// can watch the cameras.
+    pub allow_unauthenticated_remote: bool,
+}
+
+impl Default for RestreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "127.0.0.1:8554".to_owned(),
+            max_clients: 16,
+            allow_unauthenticated_remote: false,
+        }
+    }
+}
+
+impl RestreamConfig {
+    /// Parsed listening address.
+    pub fn listen_addr(&self) -> Result<std::net::SocketAddr, String> {
+        self.listen.trim().parse().map_err(|_| {
+            format!(
+                "restream.listen {:?} is not an address like 127.0.0.1:8554",
+                self.listen
+            )
+        })
+    }
+
+    /// Every invalid value (empty when valid).
+    pub fn problems(&self) -> Vec<String> {
+        let mut p = Vec::new();
+        if !(1..=256).contains(&self.max_clients) {
+            p.push("restream.max_clients must be between 1 and 256".to_owned());
+        }
+        match self.listen_addr() {
+            Err(e) => p.push(e),
+            Ok(addr)
+                if self.enabled
+                    && !addr.ip().is_loopback()
+                    && !self.allow_unauthenticated_remote =>
+            {
+                p.push(format!(
+                    "restream.listen {addr} is reachable from the network and RTSP \
+                     republication has no authentication: set \
+                     restream.allow_unauthenticated_remote = true to accept that anyone who \
+                     can reach this address watches the cameras"
+                ));
+            }
+            Ok(_) => {}
+        }
+        p
     }
 }
 
@@ -2115,6 +2195,7 @@ impl Config {
         }
         problems.extend(self.web.problems(&env));
         problems.extend(self.live.problems());
+        problems.extend(self.restream.problems());
         problems.extend(self.motion.problems());
         problems.extend(self.mqtt.problems(&env));
         problems.extend(self.ai.problems(&env));

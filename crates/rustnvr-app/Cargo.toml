@@ -26,6 +26,7 @@ rustnvr-mqtt.workspace = true
 rustnvr-storage.workspace = true
 rustnvr-recorder.workspace = true
 rustnvr-remote.workspace = true
+rustnvr-restream.workspace = true
 rustnvr-stream.workspace = true
 serde.workspace = true
 tokio.workspace = true

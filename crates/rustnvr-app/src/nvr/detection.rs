@@ -11,7 +11,7 @@ use rustnvr_api::{
 };
 use rustnvr_core::config::{
     AiConfig, Config, HwAccelMode, MANAGED_SETTINGS_FILE, ManagedSettings, MotionConfig,
-    MqttConfig, RecordMode, RecordingConfig, RemoteConfig,
+    MqttConfig, RecordMode, RecordingConfig, RemoteConfig, RestreamConfig,
 };
 use rustnvr_core::{
     CameraId, DetectedObject, DetectionEvent, EventKind, MotionSettings, NvrEvent, Secret,
@@ -1240,6 +1240,7 @@ pub(super) struct GeneralSettings {
     pub(super) live_hwaccel: HwAccelMode,
     pub(super) low_space_percent: u8,
     pub(super) default_destination: String,
+    pub(super) restream: RestreamConfig,
     /// Changed from the interface (`settings.ui.toml` exists).
     pub(super) managed: bool,
 }
@@ -1254,6 +1255,7 @@ impl GeneralSettings {
             live_hwaccel: c.live.hwaccel,
             low_space_percent: c.storage.low_space_percent,
             default_destination: c.storage.default_destination.clone(),
+            restream: c.restream.clone(),
             managed: c
                 .managed_settings_file
                 .as_ref()
@@ -1272,6 +1274,12 @@ pub(super) fn settings_view(shared: &Arc<Shared>) -> SettingsView {
         live_hwaccel: g.live_hwaccel,
         low_space_percent: g.low_space_percent,
         default_destination: g.default_destination,
+        restream: g.restream,
+        restream_error: shared
+            .restream_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
         ffmpeg: shared.ffmpeg.clone(),
         managed: g.managed,
     }
@@ -1319,6 +1327,7 @@ pub(super) async fn set_settings(
         live_hwaccel: input.live_hwaccel.unwrap_or(previous.live_hwaccel),
         low_space_percent: input.low_space_percent,
         default_destination,
+        restream: input.restream.unwrap_or_else(|| previous.restream.clone()),
         managed: true,
     };
     save_settings(
@@ -1331,6 +1340,7 @@ pub(super) async fn set_settings(
             live_hwaccel: Some(next.live_hwaccel),
             low_space_percent: Some(next.low_space_percent),
             default_destination: Some(next.default_destination.clone()),
+            restream: Some(next.restream.clone()),
         },
     )
     .map_err(|e| ControlError::Internal(format!("cannot write {}: {e}", path.display())))?;
@@ -1349,6 +1359,9 @@ pub(super) async fn set_settings(
             // A test conversion: in the background.
             tokio::spawn(api.clone().configure_hwaccel(next.live_hwaccel));
         }
+    }
+    if next.restream != previous.restream {
+        super::restream::restart(shared).await;
     }
     let recording_changed = next.recording != previous.recording;
     let motion_changed = next.motion != previous.motion;

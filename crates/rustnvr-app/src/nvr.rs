@@ -7,6 +7,7 @@ mod detection;
 mod index;
 mod ptz;
 mod replay;
+mod restream;
 mod updates;
 mod usb;
 mod webhooks;
@@ -548,6 +549,10 @@ struct Shared {
     /// low-space threshold), editable from the interface.
     general: std::sync::Mutex<detection::GeneralSettings>,
     managed_settings_file: Option<PathBuf>,
+    /// RTSP republication server, while it is served.
+    restream: tokio::sync::Mutex<Option<rustnvr_restream::RestreamServer>>,
+    /// Why the republication is enabled but not served.
+    restream_error: std::sync::Mutex<Option<String>>,
     /// Destinations short of space (names), updated every minute.
     low_space: std::sync::Mutex<Vec<String>>,
     /// Destinations that cannot be used (name, problem), updated every
@@ -821,6 +826,8 @@ impl Nvr {
             low_space: std::sync::Mutex::new(Vec::new()),
             storage_problems: std::sync::Mutex::new(Vec::new()),
             captures_root: std::sync::Mutex::new(None),
+            restream: tokio::sync::Mutex::new(None),
+            restream_error: std::sync::Mutex::new(None),
             data_dir: data_dir.clone(),
             manual: database.is_some().then_some(manual_tx),
             uploaders: tokio::sync::Mutex::new(HashMap::new()),
@@ -881,6 +888,8 @@ impl Nvr {
             info!("web interface disabled");
             None
         };
+        // After the web interface: it shows the port.
+        restream::restart(&shared).await;
         Ok(Self {
             shared,
             background,
@@ -894,6 +903,11 @@ impl Nvr {
         self.web.as_ref().map(ApiServer::local_addr)
     }
 
+    /// Address of the RTSP republication, while it is served.
+    pub async fn restream_addr(&self) -> Option<std::net::SocketAddr> {
+        restream::addr(&self.shared).await
+    }
+
     /// Stops every stream, waits for recorders to close their segments, and
     /// returns false if some component did not stop in time.
     pub async fn shutdown(self) -> bool {
@@ -901,6 +915,7 @@ impl Nvr {
         if let Some(web) = self.web {
             web.shutdown().await;
         }
+        restream::stop(&self.shared).await;
         self.shared.engine.cancel.cancel();
         let running: Vec<CameraRuntime> = self
             .shared

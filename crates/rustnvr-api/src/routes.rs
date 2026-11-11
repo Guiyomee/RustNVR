@@ -84,6 +84,7 @@ async fn capabilities(State(state): State<Arc<ApiState>>) -> Json<CapabilitiesDt
         live_transcode: state.live_settings().transcode,
         discovery: true,
         live_webrtc: true,
+        restream_port: state.restream_port(),
         snapshots: state.ffmpeg_ok(),
         events: state.database.get().is_some(),
         motion_detection: state.database.get().is_some()

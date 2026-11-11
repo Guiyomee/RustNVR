@@ -449,6 +449,9 @@ pub struct SettingsInput {
     /// `storage.default_destination`; absent keeps the current one.
     #[serde(default)]
     pub default_destination: Option<String>,
+    /// `[restream]` (RTSP republication); absent keeps the current one.
+    #[serde(default)]
+    pub restream: Option<rustnvr_core::config::RestreamConfig>,
 }
 
 /// General settings shown by the interface (`GET /api/v1/settings`).
@@ -469,6 +472,10 @@ pub struct SettingsView {
     /// `storage.default_destination`: destination of cameras whose recording
     /// is enabled without choosing one.
     pub default_destination: String,
+    /// `[restream]`: RTSP republication of the cameras.
+    pub restream: rustnvr_core::config::RestreamConfig,
+    /// Why the republication is enabled but not served (address in use…).
+    pub restream_error: Option<String>,
     /// Read-only here: `live.ffmpeg`.
     pub ffmpeg: String,
     /// Settings were changed from the interface (`settings.ui.toml`).

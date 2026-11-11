@@ -3769,6 +3769,7 @@ dependencies = [
  "rustnvr-mqtt",
  "rustnvr-recorder",
  "rustnvr-remote",
+ "rustnvr-restream",
  "rustnvr-storage",
  "rustnvr-stream",
  "rustnvr-testkit",
