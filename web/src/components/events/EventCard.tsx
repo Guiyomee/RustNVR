@@ -3,6 +3,7 @@ import { memo } from 'react'
 import { useIsDemo } from '../../data/DataContext'
 import { demoPicture, demoSpec } from '../../data/demo/fixtures'
 import { useInView } from '../../hooks/useUi'
+import { withBase } from '../../lib/build'
 import { formatDate, formatDuration, formatTime } from '../../lib/format'
 import { objectLabel } from '../../lib/objects'
 import type { DetectedObject, EventKind, NvrEvent } from '../../types/api'
@@ -35,7 +36,7 @@ function Thumbnail({ event, className }: { event: NvrEvent; className: string })
     <div ref={ref} className={`relative overflow-hidden bg-bg-2 ${className}`}>
       {visible && event.thumbnail_url ? (
         <>
-          <img src={event.thumbnail_url} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" />
+          <img src={withBase(event.thumbnail_url)} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" />
           {event.objects.map((o, i) =>
             o.bbox ? (
               <div

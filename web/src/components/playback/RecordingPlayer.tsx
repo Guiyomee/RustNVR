@@ -1,6 +1,8 @@
 import { Film, LoaderCircle, Volume2, VolumeX } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useCapability } from '../../data/DataContext'
+import { API_BASE } from '../../api/client'
+import { withBase } from '../../lib/build'
 import { formatTime } from '../../lib/format'
 import type { Recording } from '../../types/api'
 import { MaskOverlay } from '../cameras/MaskOverlay'
@@ -111,10 +113,10 @@ export function RecordingPlayer({ camera, name, codec, recordings, position, pla
   const seg = recordingAt(recordings, position)
   const allRuns = useMemo(() => runs(recordings), [recordings])
   const run = allRuns.find((r) => position >= r.start && position < r.end) ?? null
-  const playlist = run ? `/api/v1/cameras/${encodeURIComponent(camera)}/playlist.m3u8?from=${Math.floor(run.start)}&to=${Math.ceil(run.end)}` : ''
+  const playlist = run ? `${API_BASE}/cameras/${encodeURIComponent(camera)}/playlist.m3u8?from=${Math.floor(run.start)}&to=${Math.ceil(run.end)}` : ''
   // One file at a time: without HLS, or with converted copies.
   const files = mode === 'files' || mode === 'converted'
-  const src = mode === 'converted' ? (seg?.url ? `${seg.url}?transcode=h264` : '') : files ? (seg?.url ?? '') : playlist
+  const src = mode === 'converted' ? (seg?.url ? `${withBase(seg.url)}?transcode=h264` : '') : files ? (seg?.url ? withBase(seg.url) : '') : playlist
   const unsupported = t(`Ce navigateur ne sait pas décoder ce flux${codec ? ` (${codec.toUpperCase()})` : ''}. Le H.265 dépend du navigateur et du matériel.`, `This browser cannot decode this stream${codec ? ` (${codec.toUpperCase()})` : ''}. H.265 depends on the browser and the hardware.`)
   const media = files ? (seg ? (position - seg.start_ms) / 1000 : 0) : run ? toMedia(run, position) : 0
   const wall = (t: number) => (files ? (seg ? seg.start_ms + t * 1000 : position) : run ? toWall(run, t) : position)
@@ -242,7 +244,7 @@ export function RecordingPlayer({ camera, name, codec, recordings, position, pla
           // Prepare the next file while this one plays.
           if (mode === 'converted') {
             const next = recordings.filter((r) => r.url && r.start_ms >= seg.end_ms).sort((a, b) => a.start_ms - b.start_ms)[0]
-            if (next?.url) void fetch(`${next.url}?transcode=h264`, { method: 'HEAD' }).catch(() => undefined)
+            if (next?.url) void fetch(`${withBase(next.url)}?transcode=h264`, { method: 'HEAD' }).catch(() => undefined)
           }
         }}
         onLoadedData={() => setConverting(false)}

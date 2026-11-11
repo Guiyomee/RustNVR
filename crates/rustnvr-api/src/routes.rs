@@ -7,10 +7,11 @@ use crate::dto::{
 };
 use crate::recordings::{self, MAX_RANGE_MS, parse_segment_name, valid_day};
 use crate::state::ApiState;
-use crate::{auth, detection, live, storage, ws};
+use crate::{auth, detection, ingress, live, storage, ws};
 use axum::Json;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::handler::HandlerWithoutStateExt as _;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Router, middleware};
@@ -515,12 +516,20 @@ async fn interface_cache(req: Request, next: middleware::Next) -> Response {
 /// What the interface may load: only this server (a script injected some
 /// day could neither load code nor send data elsewhere). Video uses `blob:`
 /// URLs (media sources, the HLS worker); React sets style attributes.
-const CONTENT_SECURITY_POLICY: &str = concat!(
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
-    "img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; ",
-    "connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'none'; ",
-    "form-action 'self'; frame-ancestors 'none'"
-);
+macro_rules! content_security_policy {
+    ($frame_ancestors:literal) => {
+        concat!(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
+            "img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; ",
+            "connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'none'; ",
+            "form-action 'self'; frame-ancestors ",
+            $frame_ancestors
+        )
+    };
+}
+const CONTENT_SECURITY_POLICY: &str = content_security_policy!("'none'");
+/// The same under Home Assistant ingress, shown in a frame of its own origin.
+pub(crate) const CONTENT_SECURITY_POLICY_INGRESS: &str = content_security_policy!("'self'");
 
 /// Builds the application: `/api/v1/*`, then the static interface with a
 /// fallback to `index.html` for client-side routes. Everything requires
@@ -652,7 +661,17 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
     let index = static_dir.join("index.html");
     let app = Router::new().nest("/api/v1", api);
     let app = if index.is_file() {
-        app.fallback_service(ServeDir::new(static_dir).fallback(ServeFile::new(index)))
+        // The page itself always goes through `index_page`, which writes its
+        // addresses (with the Home Assistant ingress prefix, if any).
+        let page =
+            move |headers: HeaderMap| async move { ingress::index_page(&index, &headers).await };
+        app.route("/", get(page.clone()))
+            .route("/index.html", get(page.clone()))
+            .fallback_service(
+                ServeDir::new(static_dir)
+                    .append_index_html_on_directories(false)
+                    .fallback(page.into_service()),
+            )
             .layer(middleware::from_fn(interface_cache))
     } else {
         app.fallback(frontend_missing)
@@ -661,6 +680,7 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         state.clone(),
         auth::require_auth,
     ))
+    .layer(middleware::from_fn(ingress::framing))
     .layer(SetResponseHeaderLayer::if_not_present(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),

@@ -2,6 +2,7 @@ import { Download } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { describeError } from '../../api/client'
 import { exportClip } from '../../api/endpoints'
+import { withBase } from '../../lib/build'
 import { formatBytes, formatDuration } from '../../lib/format'
 import type { ExportResult } from '../../types/api'
 import { Button } from '../ui/Button'
@@ -86,7 +87,7 @@ export function ExportDialog({ open, onClose, cameras, initialCamera, day, posit
       setResult(r)
       // Starts the download right away; the link stays for another try.
       const a = document.createElement('a')
-      a.href = r.url
+      a.href = withBase(r.url)
       a.download = r.name
       document.body.append(a)
       a.click()
@@ -175,7 +176,7 @@ export function ExportDialog({ open, onClose, cameras, initialCamera, day, posit
         {result && (
           <p>
             {t('Prêt :', 'Ready:')}{' '}
-            <a className="text-accent underline" href={result.url} download={result.name}>
+            <a className="text-accent underline" href={withBase(result.url)} download={result.name}>
               {result.name}
             </a>{' '}
             <span className="text-muted">

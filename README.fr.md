@@ -31,7 +31,9 @@ caméras et des événements fictifs, sans rien installer.
   caméra, avec une rétention par destination et un repli sur le disque local
   quand le NAS manque.
 - **Home Assistant** par MQTT, sans intégration à installer : mouvement,
-  objets reconnus, état, enregistrement, dernière image, position PTZ.
+  objets reconnus, état, enregistrement, dernière image, position PTZ ; et
+  toute l'interface dans la barre latérale de Home Assistant (app « RustNVR
+  Proxy »).
 - **Une seule connexion à la caméra** : RustNVR peut republier ses flux en
   RTSP, sans les convertir, pour Home Assistant, Frigate ou VLC.
 - **Où vous voulez** : Docker, conteneur LXC Proxmox en une commande, ou

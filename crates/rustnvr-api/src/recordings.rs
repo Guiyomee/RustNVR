@@ -211,6 +211,10 @@ pub(crate) fn init_length(path: &Path) -> Option<u64> {
 /// HLS media playlist (VOD) of the given segments, oldest first: one media
 /// segment per file, addressed by byte ranges of the file (no copy). Files
 /// restart their timestamps, hence a discontinuity before each.
+///
+/// Segment addresses are relative to the playlist
+/// (`/api/v1/cameras/<id>/playlist.m3u8`), so it also works when the
+/// interface is served under a prefix (Home Assistant ingress).
 pub(crate) fn hls_playlist(segments: &[(RecordingDto, u64)]) -> String {
     use std::fmt::Write as _;
     let target = segments
@@ -246,7 +250,7 @@ pub(crate) fn hls_playlist(segments: &[(RecordingDto, u64)]) -> String {
 #EXT-X-BYTERANGE:{len}@{init}
 {url}
 ",
-            url = r.url,
+            url = relative_to_playlist(&r.url),
             dur = r.duration_ms as f64 / 1000.0,
             len = r.bytes.saturating_sub(*init),
         );
@@ -256,6 +260,14 @@ pub(crate) fn hls_playlist(segments: &[(RecordingDto, u64)]) -> String {
 ",
     );
     m
+}
+
+/// `/api/v1/recordings/…` seen from `/api/v1/cameras/<id>/playlist.m3u8`.
+fn relative_to_playlist(url: &str) -> std::borrow::Cow<'_, str> {
+    match url.strip_prefix("/api/v1/") {
+        Some(rest) => format!("../../{rest}").into(),
+        None => url.into(),
+    }
 }
 
 #[cfg(test)]
@@ -297,8 +309,14 @@ mod tests {
             url: url.into(),
         };
         let m = hls_playlist(&[
-            (rec(1_793_613_600_000, "/r/1.mp4"), 100),
-            (rec(1_793_613_660_000, "/r/2.mp4"), 120),
+            (
+                rec(1_793_613_600_000, "/api/v1/recordings/d/a/2026-11-02/1.mp4"),
+                100,
+            ),
+            (
+                rec(1_793_613_660_000, "/api/v1/recordings/d/a/2026-11-02/2.mp4"),
+                120,
+            ),
         ]);
         assert!(m.starts_with(
             "#EXTM3U
@@ -306,10 +324,10 @@ mod tests {
 #EXT-X-PLAYLIST-TYPE:VOD"
         ));
         assert!(m.contains(
-            "#EXT-X-MAP:URI=\"/r/1.mp4\",BYTERANGE=\"100@0\"
+            "#EXT-X-MAP:URI=\"../../recordings/d/a/2026-11-02/1.mp4\",BYTERANGE=\"100@0\"
 #EXTINF:60.000,
 #EXT-X-BYTERANGE:900@100
-/r/1.mp4"
+../../recordings/d/a/2026-11-02/1.mp4"
         ));
         assert!(m.contains("#EXT-X-PROGRAM-DATE-TIME:2026-11-02T10:00:00.000Z"));
         assert_eq!(m.matches("#EXT-X-DISCONTINUITY").count(), 1);

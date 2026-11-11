@@ -58,6 +58,14 @@ inconnue sous `/api/v1` renvoie toujours un 404 JSON (jamais l'interface).
 **En-têtes de sécurité** sur toutes les réponses : `X-Content-Type-Options:
 nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`.
 
+**Ingress Home Assistant.** Une requête avec `X-Ingress-Path:
+/api/hassio_ingress/<jeton>` (chemin simple : `/segment/…`, caractères
+`[A-Za-z0-9._~-]`, 256 caractères au plus ; sinon ignoré) reçoit
+`X-Frame-Options: SAMEORIGIN` et `frame-ancestors 'self'`, et l'interface
+(`index.html`) y est servie avec ses adresses sous ce préfixe et `<meta
+name="rustnvr-base">`. Les URL des réponses JSON (`url`, `thumbnail_url`,
+`preview`) restent en `/api/v1/…` : l'interface y ajoute le préfixe.
+
 **Secrets.** Aucune réponse ne contient de chemin RTSP, d'identifiant ni de
 mot de passe de caméra : seul `rtsp://hôte:port` est exposé.
 
@@ -416,6 +424,8 @@ d'octets (`EXT-X-MAP` = `ftyp`+`moov`, `EXT-X-BYTERANGE` = fragments), sans
 copie ni réencodage ; `EXT-X-DISCONTINUITY` entre fichiers (horodatages
 remis à zéro), `EXT-X-PROGRAM-DATE-TIME` = début réel de chaque fichier.
 Mêmes limites de période que la liste ci-dessus ; 404 s'il n'y a rien.
+Les fichiers y sont désignés relativement à la playlist
+(`../../recordings/…`) : elle fonctionne aussi derrière un préfixe.
 
 ### `GET /api/v1/recordings/{destination}/{camera}/{day}/{file}`
 
