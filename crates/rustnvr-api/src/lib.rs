@@ -16,6 +16,7 @@ mod detection;
 mod devices;
 mod discovery;
 mod export;
+mod ingress;
 mod live;
 pub mod logs;
 mod playback;

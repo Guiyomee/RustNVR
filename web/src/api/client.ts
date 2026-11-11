@@ -2,9 +2,10 @@
 // Every API call goes through `apiGet`; components never call fetch directly.
 
 import type { ApiErrorBody } from '../types/api'
+import { BASE_PATH } from '../lib/build'
 import { t } from '../lib/i18n'
 
-export const API_BASE = '/api/v1'
+export const API_BASE = `${BASE_PATH}/api/v1`
 const DEFAULT_TIMEOUT_MS = 10_000
 
 /** Dispatched on `window` when the server answers 401 (session over). */

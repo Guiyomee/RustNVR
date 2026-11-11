@@ -41,7 +41,10 @@ const backend = process.env.RUSTNVR_URL ?? 'http://127.0.0.1:8080'
 export default defineConfig(({ mode }) => {
   const demo = mode === 'demo'
   return {
-    base: demo ? (process.env.RUSTNVR_DEMO_BASE ?? '/RustNVR/') : '/',
+    // Served by RustNVR: relative addresses, made absolute by the server in
+    // index.html (with the Home Assistant ingress prefix, if any); the code
+    // loads its parts relative to itself.
+    base: demo ? (process.env.RUSTNVR_DEMO_BASE ?? '/RustNVR/') : './',
     define: { 'import.meta.env.VITE_DEMO_SITE': JSON.stringify(demo ? '1' : '') },
     plugins: [react(), tailwindcss(), demo ? pagesFallback : withoutDemoPictures],
     server: {

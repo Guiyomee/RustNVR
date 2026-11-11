@@ -5,6 +5,7 @@ import { useReadOnly } from '../../auth/AuthGate'
 import { createCamera, getDestinations, getSettings, getVideoDevices, probeCamera, probeStream, updateCamera, usbPreview } from '../../api/endpoints'
 import { useAsync } from '../../hooks/useAsync'
 import { useCapability, useData, useIsDemo } from '../../data/DataContext'
+import { withBase } from '../../lib/build'
 import { formatResolution } from '../../lib/format'
 import type { Camera, CameraInput, ProbeResult, RecordMode, Transport } from '../../types/api'
 import { Button } from '../ui/Button'
@@ -447,7 +448,7 @@ function LivePreview({ src }: { src: string }) {
     <figure className="mt-2">
       <div className="relative aspect-video overflow-hidden rounded-md bg-black">
         <img
-          src={src}
+          src={withBase(src)}
           alt={t('Aperçu en direct de la caméra', 'Live preview of the camera')}
           className="size-full object-contain"
           onLoad={() => setState('playing')}
