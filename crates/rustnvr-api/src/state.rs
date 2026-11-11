@@ -205,6 +205,8 @@ pub struct ApiState {
     pub(crate) has_users: std::sync::atomic::AtomicBool,
     /// Failed login attempts.
     pub(crate) login_guard: crate::auth::LoginGuard,
+    /// Reverse proxies whose `X-Forwarded-For` names the client.
+    pub(crate) trusted_proxies: OnceLock<Vec<rustnvr_core::config::TrustedProxy>>,
     /// Names of the destinations short of space (updated every minute).
     low_space: RwLock<Vec<String>>,
     /// Destinations that cannot be used: name, problem (every minute).
@@ -273,6 +275,7 @@ impl ApiState {
             https: std::sync::atomic::AtomicBool::new(false),
             has_users: std::sync::atomic::AtomicBool::new(false),
             login_guard: crate::auth::LoginGuard::default(),
+            trusted_proxies: OnceLock::new(),
             low_space: RwLock::new(Vec::new()),
             storage_problems: RwLock::new(Vec::new()),
             config_restored: std::sync::atomic::AtomicBool::new(false),
@@ -474,6 +477,12 @@ impl ApiState {
     /// Records the object recognition provider in use, if any.
     pub fn set_ai_provider(&self, provider: Option<String>) {
         *self.ai_provider.write().unwrap_or_else(|e| e.into_inner()) = provider;
+    }
+
+    /// Declares the reverse proxies in front of the interface
+    /// (`web.trusted_proxies`), once, before serving.
+    pub fn set_trusted_proxies(&self, proxies: Vec<rustnvr_core::config::TrustedProxy>) {
+        let _ = self.trusted_proxies.set(proxies);
     }
 
     /// Usage (percent) above which a destination is short of space.

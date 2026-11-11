@@ -1942,6 +1942,7 @@ async fn start_web(
         bootstrap_accounts(db, config_auth.as_ref(), &state).await;
     }
     state.set_ffmpeg_available(shared.ffmpeg_ok);
+    state.set_trusted_proxies(web.proxies().map_err(anyhow::Error::msg)?);
     // Test conversion on the graphics card (live.hwaccel), in the background.
     tokio::spawn(
         state
