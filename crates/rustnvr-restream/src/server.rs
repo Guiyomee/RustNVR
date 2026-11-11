@@ -2,22 +2,25 @@
 //!
 //! `rtsp://host:port/<camera>` is the main stream of a camera,
 //! `rtsp://host:port/<camera>/sub` its sub stream. RTP is sent interleaved in
-//! the RTSP connection only (`RTP/AVP/TCP`); there is no authentication.
+//! the RTSP connection only (`RTP/AVP/TCP`). A stream may require credentials
+//! (Digest or Basic); addresses that keep sending wrong ones are refused.
 //!
 //! A client costs one task and one copy of the stream into RTP packets. A
 //! client that reads too slowly starts again at the next key frame, and is
 //! dropped when it stops reading: it never slows ingestion or recording.
 
+use crate::auth::{self, Credentials, FailureGuard};
 use crate::describe::{AUDIO_PAYLOAD_TYPE, Description, VIDEO_CLOCK, VIDEO_PAYLOAD_TYPE};
 use crate::rtp::{Timeline, Track, audio_packets, video_packets};
 use bytes::{Buf, BytesMut};
 use futures::future::BoxFuture;
 use rustnvr_core::VideoFrame;
 use rustnvr_stream::LiveTap;
+use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -27,9 +30,65 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-/// Finds the live frames of a camera (`true`: its sub stream); `None` when
-/// the camera is unknown, disabled or has no such stream.
-pub type Lookup = Arc<dyn Fn(String, bool) -> BoxFuture<'static, Option<LiveTap>> + Send + Sync>;
+/// What the application knows about a stream asked for.
+#[derive(Clone, Default)]
+pub struct Source {
+    /// Its live frames; `None` when the camera is unknown, disabled or has
+    /// no such stream.
+    pub tap: Option<LiveTap>,
+    /// What a client must present to read it (`None`: nothing). Also given
+    /// for unknown cameras, so that only authenticated clients learn which
+    /// cameras exist.
+    pub credentials: Option<Credentials>,
+}
+
+/// Finds a stream of a camera (`true`: its sub stream).
+pub type Lookup = Arc<dyn Fn(String, bool) -> BoxFuture<'static, Source> + Send + Sync>;
+
+/// Limits of a server.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Most clients served at a time.
+    pub max_clients: usize,
+    /// Most clients served at a time from one address.
+    pub max_clients_per_address: usize,
+}
+
+/// What the connections of a server share.
+struct Shared {
+    lookup: Lookup,
+    options: Options,
+    failures: FailureGuard,
+    /// Connections open, by client address.
+    per_address: Mutex<HashMap<IpAddr, usize>>,
+}
+
+/// One connection counted for its address, until dropped.
+struct AddressSlot(Arc<Shared>, IpAddr);
+
+impl AddressSlot {
+    fn take(shared: &Arc<Shared>, address: IpAddr) -> Option<Self> {
+        let mut map = shared.per_address.lock().unwrap_or_else(|e| e.into_inner());
+        let count = map.entry(address).or_insert(0);
+        if *count >= shared.options.max_clients_per_address.max(1) {
+            return None;
+        }
+        *count += 1;
+        Some(Self(shared.clone(), address))
+    }
+}
+
+impl Drop for AddressSlot {
+    fn drop(&mut self) {
+        let mut map = self.0.per_address.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = map.get_mut(&self.1) {
+            *count -= 1;
+            if *count == 0 {
+                map.remove(&self.1);
+            }
+        }
+    }
+}
 
 /// Largest request accepted.
 const MAX_REQUEST: usize = 64 * 1024;
@@ -42,6 +101,8 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// Interval between RTCP sender reports.
 const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
+const UNAUTHORIZED: (u16, &str) = (401, "Unauthorized");
+
 const SERVER: &str = concat!("RustNVR/", env!("CARGO_PKG_VERSION"));
 const METHODS: &str = "OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN, GET_PARAMETER";
 
@@ -53,15 +114,19 @@ pub struct RestreamServer {
 }
 
 impl RestreamServer {
-    /// Listens on `addr` and serves at most `max_clients` clients at a time.
-    pub async fn start(addr: SocketAddr, lookup: Lookup, max_clients: usize) -> io::Result<Self> {
+    /// Listens on `addr` and serves the streams found by `lookup`.
+    pub async fn start(addr: SocketAddr, lookup: Lookup, options: Options) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let addr = listener.local_addr()?;
         let cancel = CancellationToken::new();
         let task = tokio::spawn(accept_loop(
             listener,
-            lookup,
-            Arc::new(Semaphore::new(max_clients.max(1))),
+            Arc::new(Shared {
+                lookup,
+                options,
+                failures: FailureGuard::default(),
+                per_address: Mutex::new(HashMap::new()),
+            }),
             cancel.clone(),
         ));
         Ok(Self {
@@ -91,12 +156,8 @@ impl Drop for RestreamServer {
     }
 }
 
-async fn accept_loop(
-    listener: TcpListener,
-    lookup: Lookup,
-    slots: Arc<Semaphore>,
-    cancel: CancellationToken,
-) {
+async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, cancel: CancellationToken) {
+    let slots = Arc::new(Semaphore::new(shared.options.max_clients.max(1)));
     let counter = Arc::new(AtomicU32::new(0));
     loop {
         let accepted = tokio::select! {
@@ -116,11 +177,20 @@ async fn accept_loop(
             tracing::warn!(%peer, "RTSP republication: too many clients, connection refused (restream.max_clients)");
             continue;
         };
+        // Too many wrong passwords from this address: not even a 401.
+        if shared.failures.blocked(peer.ip()) {
+            tracing::debug!(%peer, "RTSP republication: address refused after wrong passwords");
+            continue;
+        }
+        let Some(address_slot) = AddressSlot::take(&shared, peer.ip()) else {
+            tracing::warn!(%peer, "RTSP republication: too many clients from this address, connection refused (restream.max_clients_per_address)");
+            continue;
+        };
         let _ = stream.set_nodelay(true);
         let id = counter.fetch_add(1, Ordering::Relaxed);
-        let (lookup, cancel) = (lookup.clone(), cancel.clone());
+        let (shared, cancel) = (shared.clone(), cancel.clone());
         tokio::spawn(async move {
-            let mut conn = Connection::new(lookup, peer, id);
+            let mut conn = Connection::new(shared, peer, id);
             let result = tokio::select! {
                 _ = cancel.cancelled() => Ok(()),
                 r = conn.run(stream) => r,
@@ -131,7 +201,7 @@ async fn accept_loop(
             if let Err(e) = result {
                 tracing::debug!(%peer, error = %e, "RTSP client connection ended with an error");
             }
-            drop(slot);
+            drop((slot, address_slot));
         });
     }
 }
@@ -306,9 +376,13 @@ enum Event {
 }
 
 struct Connection {
-    lookup: Lookup,
+    shared: Arc<Shared>,
     peer: SocketAddr,
     session: String,
+    /// Nonce of the Digest challenges of this connection.
+    nonce: String,
+    /// The address sent too many wrong passwords: close after answering.
+    refused: bool,
     /// Seed of the sequence numbers and timestamps.
     seed: u32,
     selected: Option<Selected>,
@@ -320,7 +394,7 @@ struct Connection {
 }
 
 impl Connection {
-    fn new(lookup: Lookup, peer: SocketAddr, id: u32) -> Self {
+    fn new(shared: Arc<Shared>, peer: SocketAddr, id: u32) -> Self {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -330,9 +404,11 @@ impl Connection {
             .wrapping_mul(2_654_435_761)
             .wrapping_add(id.wrapping_mul(40_503));
         Self {
-            lookup,
+            shared,
             peer,
             session: format!("{seed:08x}{id:04x}"),
+            nonce: auth::new_nonce(),
+            refused: false,
             seed,
             selected: None,
             video: None,
@@ -352,7 +428,7 @@ impl Connection {
                 out.clear();
                 let outcome = self.handle(&req, &mut out).await;
                 write(&mut stream, &out).await?;
-                if matches!(outcome, Outcome::Close) {
+                if matches!(outcome, Outcome::Close) || self.refused {
                     return Ok(());
                 }
             }
@@ -391,16 +467,35 @@ impl Connection {
         }
     }
 
-    /// Finds the stream of `path` and waits for its description, unless it
-    /// is the one already selected.
-    async fn select(&mut self, path: &StreamPath) -> Result<(), (u16, &'static str)> {
+    /// Finds the stream of `path`, checks that `req` may read it and waits
+    /// for its description, unless it is the one already selected (and
+    /// authorized) on this connection.
+    async fn select(
+        &mut self,
+        req: &Request,
+        path: &StreamPath,
+    ) -> Result<(), (u16, &'static str)> {
         let name = path.name();
         if self.selected.as_ref().is_some_and(|s| s.name == name) {
             return Ok(());
         }
-        let tap = (self.lookup)(path.camera.clone(), path.sub)
-            .await
-            .ok_or((404, "Not Found"))?;
+        let source = (self.shared.lookup)(path.camera.clone(), path.sub).await;
+        if let Some(credentials) = &source.credentials {
+            let address = self.peer.ip();
+            match req.header("Authorization") {
+                // The first request of a client carries none: not a failure.
+                None => return Err(UNAUTHORIZED),
+                Some(h) if auth::authorized(h, &req.method, credentials, &self.nonce) => {
+                    self.shared.failures.succeeded(address);
+                }
+                Some(_) => {
+                    self.refused = self.shared.failures.failed(address);
+                    tracing::warn!(client = %address, stream = %name, refused = self.refused, "RTSP republication: wrong user name or password");
+                    return Err(UNAUTHORIZED);
+                }
+            }
+        }
+        let tap = source.tap.ok_or((404, "Not Found"))?;
         let (backlog, mut frames) = tap.subscribe();
         let first = match backlog.into_iter().next() {
             Some(f) => Some(f),
@@ -434,8 +529,17 @@ impl Connection {
     async fn handle(&mut self, req: &Request, out: &mut Vec<u8>) -> Outcome {
         let cseq = req.cseq.as_str();
         let session = ("Session", format!("{};timeout=60", self.session));
+        let challenges = auth::challenges(&self.nonce);
         let fail = |out: &mut Vec<u8>, (code, reason): (u16, &str)| {
-            out.extend(response(code, reason, cseq, &[], ""));
+            let extra: Vec<(&str, String)> = if code == UNAUTHORIZED.0 {
+                challenges
+                    .iter()
+                    .map(|c| ("WWW-Authenticate", c.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            out.extend(response(code, reason, cseq, &extra, ""));
             Outcome::Continue
         };
         match req.method.as_str() {
@@ -450,7 +554,7 @@ impl Connection {
                 let Some(path) = parse_path(&req.uri) else {
                     return fail(out, (404, "Not Found"));
                 };
-                if let Err(e) = self.select(&path).await {
+                if let Err(e) = self.select(req, &path).await {
                     return fail(out, e);
                 }
                 let Some(selected) = &self.selected else {
@@ -484,7 +588,7 @@ impl Connection {
                 else {
                     return fail(out, (461, "Unsupported Transport"));
                 };
-                if let Err(e) = self.select(&path).await {
+                if let Err(e) = self.select(req, &path).await {
                     return fail(out, e);
                 }
                 let has_audio = self

@@ -12,8 +12,22 @@ précautions) sont sur la page de chaque
   Assistant, Frigate ou VLC lisent les caméras depuis RustNVR
   (`rtsp://machine:8554/<caméra>`, `/<caméra>/sub` pour le sous-flux) : une
   seule connexion à la caméra. Flux renvoyés tels quels (H.264 / H.265, son
-  AAC ou Opus), sans conversion ; RTSP sur TCP, sans mot de passe (écoute sur
-  `127.0.0.1` par défaut, le réseau après accord explicite).
+  AAC ou Opus), sans conversion ; RTSP sur TCP. Identifiant et mot de passe
+  facultatifs, généraux ou propres à une caméra ; écoute sur `127.0.0.1` par
+  défaut.
+
+### Sécurité
+- **Derrière un reverse proxy** : `web.trusted_proxies` déclare le proxy ;
+  les échecs de connexion bloquent alors le client réel, et non plus tout le
+  monde derrière le proxy.
+- `settings.ui.toml` est désormais écrit lisible par son seul propriétaire.
+- **Dépendances** : audit automatique (`cargo audit`, `npm audit`) à chaque
+  changement et chaque semaine, mises à jour proposées par Dependabot,
+  actions GitHub épinglées par empreinte.
+
+### Corrections
+- La recherche de caméras ne liste plus la republication RTSP de RustNVR
+  comme une caméra.
 
 ## 2026.11.05 (2026-11-09)
 

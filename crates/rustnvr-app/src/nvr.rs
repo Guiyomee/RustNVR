@@ -508,6 +508,11 @@ impl State {
                         transport: cam.main.transport,
                         onvif_port: cam.onvif.as_ref().map(|o| o.port),
                         usb: cam.usb.clone(),
+                        restream_username: cam.restream.as_ref().map(|r| r.username.clone()),
+                        restream_has_password: cam.restream.as_ref().is_some_and(|r| {
+                            r.password.as_ref().is_some_and(|p| !p.is_empty())
+                                || r.password_env.is_some()
+                        }),
                     }),
                 }
             })
@@ -1159,6 +1164,27 @@ fn config_from_input(
             ));
         }
     };
+    // Credentials of the republication for this camera: none without a user
+    // name; no password in the input keeps the stored one.
+    let restream = input
+        .restream_username
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+        .map(|username| {
+            let stored = previous.and_then(|p| p.restream.as_ref());
+            let (password, password_env) = match input.restream_password {
+                Some(p) => (Some(p), None),
+                None => (
+                    stored.and_then(|s| s.password.clone()),
+                    stored.and_then(|s| s.password_env.clone()),
+                ),
+            };
+            rustnvr_core::config::CameraRestreamConfig {
+                username,
+                password,
+                password_env,
+            }
+        });
     let cam = CameraConfig {
         id,
         name: Some(name),
@@ -1191,6 +1217,7 @@ fn config_from_input(
             onvif.port = port;
             onvif
         }),
+        restream,
         managed: true,
     };
     let mut problems = cam.problems(|_| None);
@@ -1915,6 +1942,7 @@ async fn start_web(
         bootstrap_accounts(db, config_auth.as_ref(), &state).await;
     }
     state.set_ffmpeg_available(shared.ffmpeg_ok);
+    state.set_trusted_proxies(web.proxies().map_err(anyhow::Error::msg)?);
     // Test conversion on the graphics card (live.hwaccel), in the background.
     tokio::spawn(
         state

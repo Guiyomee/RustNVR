@@ -26,14 +26,19 @@ password_env = "RUSTNVR_WEB_PASSWORD"
 # A real certificate instead: tls_cert = "/config/cert.pem" and
 # tls_key = "/config/key.pem", without tls_self_signed.
 tls_self_signed = true
+# Behind a reverse proxy (Nginx Proxy Manager…): its address, so that failed
+# logins lock out the real client and not everyone behind the proxy.
+# trusted_proxies = ["192.168.1.5"]
 
 # RTSP republication (Home Assistant, Frigate, VLC… read the cameras from
-# RustNVR: rtsp://<machine>:8554/<camera id>, and /<camera id>/sub). No
-# password: for a trusted local network. Also in Paramètres → Réseau.
+# RustNVR: rtsp://<machine>:8554/<camera id>, and /<camera id>/sub), with a
+# user name and a password (RUSTNVR_RTSP_PASSWORD in the stack). Also in
+# Paramètres → Réseau, where the password can be typed instead.
 # [restream]
 # enabled = true
 # listen = "0.0.0.0:8554"
-# allow_unauthenticated_remote = true
+# username = "nvr"
+# password_env = "RUSTNVR_RTSP_PASSWORD"
 
 # Built-in object recognition: download yolox_nano.onnx into the config
 # volume, then choose it in Paramètres → Intelligence artificielle, or here:

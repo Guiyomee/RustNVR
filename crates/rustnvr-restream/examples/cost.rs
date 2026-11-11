@@ -10,7 +10,7 @@
 use bytes::Bytes;
 use futures::FutureExt as _;
 use rustnvr_core::{VideoCodec, VideoFrame, VideoParams};
-use rustnvr_restream::{Lookup, RestreamServer};
+use rustnvr_restream::{Lookup, Options, RestreamServer, Source};
 use rustnvr_stream::LiveTap;
 use std::io::{Read as _, Write as _};
 use std::sync::Arc;
@@ -134,11 +134,24 @@ fn main() {
         let source = tap.clone();
         let lookup: Lookup = Arc::new(move |camera: String, sub: bool| {
             let tap = (camera == "cam" && !sub).then(|| source.clone());
-            async move { tap }.boxed()
+            async move {
+                Source {
+                    tap,
+                    credentials: None,
+                }
+            }
+            .boxed()
         });
-        let server = RestreamServer::start("127.0.0.1:0".parse().unwrap(), lookup, 64)
-            .await
-            .unwrap();
+        let server = RestreamServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            lookup,
+            Options {
+                max_clients: 64,
+                max_clients_per_address: 64,
+            },
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr().to_string();
         println!(
             "camera: {mbits} Mbit/s, {FPS} pictures per second, key frame every {} s",

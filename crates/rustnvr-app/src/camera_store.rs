@@ -39,6 +39,17 @@ struct StoredCamera<'a> {
     usb: Option<&'a rustnvr_core::config::UsbConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     onvif: Option<StoredOnvif<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restream: Option<StoredRestream<'a>>,
+}
+
+#[derive(Serialize)]
+struct StoredRestream<'a> {
+    username: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password_env: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -121,6 +132,11 @@ pub fn save<'a>(
                     username: o.username.as_deref(),
                     password: o.password.as_ref().map(|p| p.expose()),
                     password_env: o.password_env.as_deref(),
+                }),
+                restream: c.restream.as_ref().map(|r| StoredRestream {
+                    username: &r.username,
+                    password: r.password.as_ref().map(|p| p.expose()),
+                    password_env: r.password_env.as_deref(),
                 }),
             })
             .collect(),

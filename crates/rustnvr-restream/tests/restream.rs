@@ -4,8 +4,8 @@
 
 use futures::FutureExt as _;
 use rustnvr_core::events::event_bus;
-use rustnvr_core::{CameraId, RtspTarget, StreamRole, VideoCodec};
-use rustnvr_restream::{Lookup, RestreamServer};
+use rustnvr_core::{CameraId, RtspTarget, Secret, StreamRole, VideoCodec};
+use rustnvr_restream::{Credentials, Lookup, Options, RestreamServer, Source};
 use rustnvr_stream::{
     BackoffConfig, FrameFanout, LiveTap, RtspSession, SessionOptions, StreamHandle,
     SupervisorConfig, spawn_supervisor,
@@ -36,7 +36,22 @@ struct Rig {
 
 impl Rig {
     /// A mock camera read once by a supervisor and republished as `cam`.
-    async fn start(mut config: MockServerConfig, audio: bool, max_clients: usize) -> Self {
+    async fn start(config: MockServerConfig, audio: bool, max_clients: usize) -> Self {
+        let options = Options {
+            max_clients,
+            max_clients_per_address: max_clients,
+        };
+        Self::with(config, audio, options, None).await
+    }
+
+    /// Like [`Self::start`]; with `credentials`, every stream (existing or
+    /// not) requires them.
+    async fn with(
+        mut config: MockServerConfig,
+        audio: bool,
+        options: Options,
+        credentials: Option<Credentials>,
+    ) -> Self {
         // Real time: clients must not fall behind a camera faster than life.
         config.frame_interval = Duration::from_millis(40);
         let camera = MockRtspServer::start(config).await.unwrap();
@@ -62,9 +77,10 @@ impl Rig {
         let source = tap.clone();
         let lookup: Lookup = Arc::new(move |camera: String, sub: bool| {
             let tap = (camera == "cam" && !sub).then(|| source.clone());
-            async move { tap }.boxed()
+            let credentials = credentials.clone();
+            async move { Source { tap, credentials } }.boxed()
         });
-        let server = RestreamServer::start("127.0.0.1:0".parse().unwrap(), lookup, max_clients)
+        let server = RestreamServer::start("127.0.0.1:0".parse().unwrap(), lookup, options)
             .await
             .unwrap();
         Self {
@@ -295,4 +311,167 @@ async fn ffmpeg_reads_picture_and_sound() {
     let streams = ffprobe(&rig.url("cam")).await.unwrap();
     assert!(streams.contains("hevc,video,320,240"), "{streams}");
     assert!(!streams.contains("audio"), "{streams}");
+}
+
+fn credentials() -> Credentials {
+    Credentials {
+        username: "nvr".to_owned(),
+        password: Secret::new("s3cret pass"),
+    }
+}
+
+async fn protected(max_clients_per_address: usize) -> Rig {
+    let options = Options {
+        max_clients: 8,
+        max_clients_per_address,
+    };
+    Rig::with(
+        MockServerConfig::new(Fixture::h264()),
+        false,
+        options,
+        Some(credentials()),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn protected_streams_need_the_right_password() {
+    let rig = protected(8).await;
+    let with = |user: Option<&str>, password: Option<&str>| {
+        RtspTarget::parse(&rig.url("cam"), user, password.map(Secret::new)).unwrap()
+    };
+    // The right account: Retina answers the Digest challenge and plays.
+    let mut session =
+        RtspSession::connect(&with(Some("nvr"), Some("s3cret pass")), &opts(false), 1)
+            .await
+            .unwrap();
+    let f = timeout(Duration::from_secs(5), session.next_frame())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(f.is_key);
+    drop(session);
+    // No account, a wrong password.
+    assert!(
+        RtspSession::connect(&with(None, None), &opts(false), 2)
+            .await
+            .is_err()
+    );
+    assert!(
+        RtspSession::connect(&with(Some("nvr"), Some("nope")), &opts(false), 3)
+            .await
+            .is_err()
+    );
+
+    let addr = rig.server.local_addr();
+    let base = format!("rtsp://{addr}");
+    let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+    // Both challenges, Digest first; nothing said about which cameras exist.
+    for path in ["cam", "nope"] {
+        let r = request(
+            &mut c,
+            &format!("DESCRIBE {base}/{path} RTSP/1.0\r\nCSeq: 1\r\n\r\n"),
+        )
+        .await;
+        assert!(r.starts_with("RTSP/1.0 401 "), "{path}: {r}");
+        let digest = r
+            .find("WWW-Authenticate: Digest realm=\"RustNVR\", nonce=\"")
+            .unwrap();
+        let basic = r.find("WWW-Authenticate: Basic realm=\"RustNVR\"").unwrap();
+        assert!(digest < basic, "{r}");
+    }
+    // Basic works too; an unknown camera is then said so.
+    let basic = "Authorization: Basic bnZyOnMzY3JldCBwYXNz"; // nvr:s3cret pass
+    let r = request(
+        &mut c,
+        &format!("DESCRIBE {base}/nope RTSP/1.0\r\nCSeq: 2\r\n{basic}\r\n\r\n"),
+    )
+    .await;
+    assert!(r.starts_with("RTSP/1.0 404 "), "{r}");
+    let r = request(
+        &mut c,
+        &format!("DESCRIBE {base}/cam RTSP/1.0\r\nCSeq: 3\r\n{basic}\r\n\r\n"),
+    )
+    .await;
+    assert!(r.starts_with("RTSP/1.0 200 OK"), "{r}");
+
+    if ffprobe_available() {
+        let url = format!("rtsp://nvr:s3cret%20pass@{addr}/cam");
+        let streams = ffprobe(&url).await.unwrap();
+        assert!(streams.contains("h264,video,320,240"), "{streams}");
+    }
+}
+
+/// True when the server closes `stream` without answering.
+async fn closed(stream: &mut tokio::net::TcpStream) -> bool {
+    let mut buf = [0u8; 16];
+    timeout(Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .unwrap()
+        .unwrap_or(0)
+        == 0
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_passwords_get_the_address_refused() {
+    let rig = protected(8).await;
+    let addr = rig.server.local_addr();
+    let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let wrong = "Authorization: Basic bnZyOm5vcGU="; // nvr:nope
+    for i in 1..=5 {
+        let r = request(
+            &mut c,
+            &format!("DESCRIBE rtsp://{addr}/cam RTSP/1.0\r\nCSeq: {i}\r\n{wrong}\r\n\r\n"),
+        )
+        .await;
+        assert!(r.starts_with("RTSP/1.0 401 "), "{r}");
+    }
+    // The connection is closed, and the address no longer answered, even
+    // with the right password.
+    assert!(closed(&mut c).await);
+    let mut again = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let _ = again
+        .write_all(
+            format!("DESCRIBE rtsp://{addr}/cam RTSP/1.0\r\nCSeq: 1\r\nAuthorization: Basic bnZyOnMzY3JldCBwYXNz\r\n\r\n")
+                .as_bytes(),
+        )
+        .await;
+    assert!(closed(&mut again).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_address_cannot_take_every_place() {
+    let rig = protected(2).await;
+    let addr = rig.server.local_addr();
+    let options = "OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n";
+    let mut first = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut second = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert!(
+        request(&mut first, options)
+            .await
+            .starts_with("RTSP/1.0 200")
+    );
+    assert!(
+        request(&mut second, options)
+            .await
+            .starts_with("RTSP/1.0 200")
+    );
+    // The third connection of this address is closed, with places left
+    // (8) for other addresses.
+    let mut third = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert!(closed(&mut third).await);
+    drop(first);
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+            c.write_all(options.as_bytes()).await.unwrap();
+            let mut buf = [0u8; 16];
+            if c.read(&mut buf).await.unwrap_or(0) > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
 }

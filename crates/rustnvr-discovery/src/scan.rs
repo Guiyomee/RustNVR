@@ -112,6 +112,14 @@ async fn rtsp_options(addr: SocketAddr, timeout: Duration) -> Option<Option<Stri
     }))
 }
 
+/// Whether a `Server` header is the one of RustNVR's RTSP republication
+/// (`RustNVR/<version>`).
+fn is_rustnvr(server: &str) -> bool {
+    server
+        .get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case("rustnvr/"))
+}
+
 /// RTSP servers on `hosts` × `ports`, `concurrency` connections at a time.
 pub async fn scan(
     hosts: &[Ipv4Addr],
@@ -135,6 +143,12 @@ pub async fn scan(
         })
         .buffer_unordered(concurrency.max(1))
         .filter_map(|r| async move { r })
+        // The RTSP republication of RustNVR (this one or another) serves
+        // cameras already known to it: not a camera to add.
+        .filter(|s| {
+            let own = s.server.as_deref().is_some_and(is_rustnvr);
+            async move { !own }
+        })
         .collect()
         .await;
     found.sort_by_key(|s| (s.address, s.port));
@@ -179,6 +193,18 @@ mod tests {
                     .await;
             }
         });
+        // RustNVR's own republication: answers RTSP, but is not a camera.
+        let own = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let own_port = own.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = own.accept().await {
+                let mut buf = [0u8; 512];
+                let _ = s.read(&mut buf).await;
+                let _ = s
+                    .write_all(b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nServer: RustNVR/2026.11.5\r\n\r\n")
+                    .await;
+            }
+        });
         tokio::spawn(async move {
             while let Ok((mut s, _)) = other.accept().await {
                 let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
@@ -186,7 +212,7 @@ mod tests {
         });
         let found = scan(
             &[Ipv4Addr::LOCALHOST],
-            &[rtsp_port, other_port, 9],
+            &[rtsp_port, other_port, own_port, 9],
             Duration::from_millis(500),
             8,
         )

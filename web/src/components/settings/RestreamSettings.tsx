@@ -8,6 +8,9 @@ import { useAsync } from '../../hooks/useAsync'
 import { t } from '../../lib/i18n'
 import { restreamHost } from '../../lib/restream'
 import type { GeneralSettings, RestreamSettings as Restream } from '../../types/api'
+
+/** What is being edited: the settings, and a new password (empty: unchanged). */
+type Draft = Restream & { password: string }
 import { Button } from '../ui/Button'
 import { ErrorState, LoadingState } from '../ui/States'
 import { ConfigKey } from './SettingsSection'
@@ -35,7 +38,7 @@ export function RestreamSettings() {
   const { reloadCapabilities } = useData()
   const loaded = useAsync(() => (demo || !writable ? Promise.resolve(null) : getSettings()), [demo, writable])
   const [saved, setSaved] = useState<GeneralSettings | null>(null)
-  const [draft, setDraft] = useState<Restream | null>(null)
+  const [draft, setDraft] = useState<Draft | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -47,22 +50,31 @@ export function RestreamSettings() {
   const current = s.restream
   if (!current) return <p className="px-5 py-4 text-sm text-muted">{t('Ce serveur ne sait pas republier les flux en RTSP.', 'This server cannot republish the streams over RTSP.')}</p>
 
-  const r = draft ?? current
-  const edit = (patch: Partial<Restream>) => {
+  const r: Draft = draft ?? { ...current, password: '' }
+  // A server from before passwords: fields absent.
+  const user = (r.username ?? '').trim()
+  const withPassword = user !== '' && (r.password !== '' || (current.has_password === true && user === (current.username ?? '')))
+  const edit = (patch: Partial<Draft>) => {
     setDraft({ ...r, ...patch })
     setError(null)
   }
   const local = isLocal(r.listen)
   const port = portOf(r.listen)
-  const changed = draft !== null && JSON.stringify(draft) !== JSON.stringify(current)
+  const changed = draft !== null && JSON.stringify(draft) !== JSON.stringify({ ...current, password: '' })
   const invalid =
     port === null
       ? t("Adresse d'écoute : de la forme 127.0.0.1:8554 ou 0.0.0.0:8554.", 'Listening address: like 127.0.0.1:8554 or 0.0.0.0:8554.')
       : !Number.isInteger(r.max_clients) || r.max_clients < 1 || r.max_clients > 256
         ? t('Clients simultanés : entre 1 et 256.', 'Simultaneous clients: between 1 and 256.')
-        : r.enabled && !local && !r.allow_unauthenticated_remote
-          ? t('Cochez la case d’accès sans mot de passe pour écouter sur le réseau.', 'Tick the box about access without a password to listen on the network.')
-          : null
+        : !Number.isInteger(r.max_clients_per_address ?? 8) || (r.max_clients_per_address ?? 8) < 1 || (r.max_clients_per_address ?? 8) > r.max_clients
+          ? t('Clients par adresse : entre 1 et le nombre de clients simultanés.', 'Clients per address: between 1 and the number of simultaneous clients.')
+          : /[:"]/.test(user)
+            ? t('Identifiant : sans « : » ni guillemet.', 'User name: without « : » or quotation mark.')
+            : user !== '' && !withPassword
+              ? t('Un mot de passe est requis avec cet identifiant.', 'A password is required with this user name.')
+              : r.enabled && !local && !withPassword && !r.allow_unauthenticated_remote
+                ? t('Pour écouter sur le réseau : un identifiant et un mot de passe, ou cochez la case d’accès sans mot de passe.', 'To listen on the network: a user name and a password, or tick the box about access without a password.')
+                : null
 
   const save = async () => {
     setBusy(true)
@@ -76,8 +88,17 @@ export function RestreamSettings() {
         live_transcode: now.live_transcode,
         live_max_bitrate_kbps: now.live_max_bitrate_kbps,
         low_space_percent: now.low_space_percent,
-        // The agreement is only kept while it is needed.
-        restream: { ...r, listen: r.listen.trim(), allow_unauthenticated_remote: r.allow_unauthenticated_remote && !local },
+        restream: {
+          enabled: r.enabled,
+          listen: r.listen.trim(),
+          max_clients: r.max_clients,
+          max_clients_per_address: r.max_clients_per_address ?? 8,
+          // The agreement is only kept while it is needed.
+          allow_unauthenticated_remote: r.allow_unauthenticated_remote && !local && !withPassword,
+          username: user || null,
+          // Absent: the stored password is kept.
+          ...(user && r.password ? { password: r.password } : {}),
+        },
       })
       setSaved(result)
       setDraft(null)
@@ -111,7 +132,7 @@ export function RestreamSettings() {
         <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={r.enabled} onChange={(e) => edit({ enabled: e.target.checked })} />
         <span>
           {t('Republier les flux des caméras en RTSP', 'Republish the camera streams over RTSP')}
-          <span className="block text-xs text-muted">{t('Sans mot de passe ; RTP dans la connexion RTSP (TCP) uniquement.', 'No password; RTP inside the RTSP connection (TCP) only.')}</span>
+          <span className="block text-xs text-muted">{t('RTP dans la connexion RTSP (TCP) uniquement.', 'RTP inside the RTSP connection (TCP) only.')}</span>
         </span>
       </label>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -129,12 +150,39 @@ export function RestreamSettings() {
             {t('Chaque client reçoit le débit de la caméra. 1–256.', 'Each client receives the bit rate of the camera. 1–256.')} <ConfigKey name="restream.max_clients" />
           </span>
         </label>
+        <label className="text-xs font-medium text-muted">
+          {t('Identifiant (facultatif)', 'User name (optional)')}
+          <input className={input} value={r.username ?? ''} spellCheck={false} autoComplete="off" onChange={(e) => edit({ username: e.target.value })} />
+          <span className="mt-1 block font-normal">
+            {t('Demandé aux logiciels qui lisent les caméras ; une caméra peut avoir le sien (dans sa fiche).', 'Asked to programs reading the cameras; a camera may have its own (in its settings).')} <ConfigKey name="restream.username" />
+          </span>
+        </label>
+        <label className="text-xs font-medium text-muted">
+          {t('Mot de passe', 'Password')}
+          <input
+            className={input}
+            type="password"
+            value={r.password}
+            disabled={user === ''}
+            autoComplete="new-password"
+            placeholder={current.has_password && user === (current.username ?? '') ? t('•••••••• (inchangé)', '•••••••• (unchanged)') : ''}
+            onChange={(e) => edit({ password: e.target.value })}
+          />
+          <span className="mt-1 block font-normal">{t('Jamais réaffiché ni renvoyé par le serveur. Cinq erreurs : l’adresse est refusée 15 minutes.', 'Never shown again nor returned by the server. Five errors: the address is refused for 15 minutes.')}</span>
+        </label>
+        <label className="text-xs font-medium text-muted">
+          {t('Clients par adresse (max.)', 'Clients per address (max.)')}
+          <input className={input} inputMode="numeric" value={Number.isNaN(r.max_clients_per_address) ? '' : String(r.max_clients_per_address ?? 8)} onChange={(e) => edit({ max_clients_per_address: e.target.value === '' ? NaN : Number(e.target.value) })} />
+          <span className="mt-1 block font-normal">
+            {t('Une machine ne peut pas prendre toutes les places.', 'One machine cannot take every place.')} <ConfigKey name="restream.max_clients_per_address" />
+          </span>
+        </label>
       </div>
-      {!local && port !== null && (
+      {!local && port !== null && !withPassword && (
         <label className="flex items-start gap-2 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-sm">
           <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={r.allow_unauthenticated_remote} onChange={(e) => edit({ allow_unauthenticated_remote: e.target.checked })} />
           <span>
-            {t('J’accepte que toute machine du réseau qui joint cette adresse voie les caméras sans mot de passe', 'I accept that any machine on the network reaching this address watches the cameras without a password')}
+            {t('Sans mot de passe général : j’accepte que toute machine du réseau qui joint cette adresse voie les caméras (sauf celles qui ont leur propre mot de passe)', 'Without a general password: I accept that any machine on the network reaching this address watches the cameras (except those with their own password)')}
             <span className="block text-xs text-muted">
               {t('À réserver à un réseau local de confiance ; ne pas exposer ce port sur Internet.', 'Keep it to a trusted local network; do not expose this port to the Internet.')} <ConfigKey name="restream.allow_unauthenticated_remote" />
             </span>

@@ -10,6 +10,8 @@ publish.workspace = true
 base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
+getrandom = "0.4"
+md-5 = "0.10"
 rustnvr-core.workspace = true
 rustnvr-stream.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "macros", "rt"] }

@@ -40,6 +40,9 @@ interface FormState {
   gb: string
   /** Port of the ONVIF service (PTZ); empty: none. */
   onvif: string
+  /** Own account of the RTSP republication; empty user: the general one. */
+  rsUser: string
+  rsPass: string
 }
 
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
@@ -68,7 +71,7 @@ function validateUrl(url: string, label: string): string | null {
   return null
 }
 
-export function validate(f: FormState, existingIds: string[], editing: boolean): Partial<Record<keyof FormState, string>> {
+export function validate(f: FormState, existingIds: string[], editing: boolean, storedRestreamPassword = false): Partial<Record<keyof FormState, string>> {
   const e: Partial<Record<keyof FormState, string>> = {}
   if (!f.name.trim()) e.name = t('Le nom est obligatoire.', 'The name is required.')
   else if (f.name.length > 128) e.name = t('128 caractères au maximum.', '128 characters at most.')
@@ -97,6 +100,10 @@ export function validate(f: FormState, existingIds: string[], editing: boolean):
   if (!positive(f.days) || Number(f.days) > 3650) e.days = t('Nombre de jours entre 1 et 3650, ou vide.', 'Number of days between 1 and 3650, or empty.')
   if (!positive(f.gb)) e.gb = t('Nombre entier de Go, ou vide.', 'Whole number of GB, or empty.')
   if (f.source === 'rtsp' && !whole(f.onvif, 1, 65535)) e.onvif = t('Port entre 1 et 65535, ou vide.', 'Port between 1 and 65535, or empty.')
+  if (f.rsUser.trim()) {
+    if (/[:"]/.test(f.rsUser)) e.rsUser = t('Sans « : » ni guillemet.', 'Without « : » or quotation mark.')
+    if (!f.rsPass && !storedRestreamPassword) e.rsPass = t('Un mot de passe est requis avec cet identifiant.', 'A password is required with this user name.')
+  }
   return e
 }
 
@@ -149,7 +156,7 @@ export function toToml(f: FormState): string {
   return lines.join('\n')
 }
 
-function toInput(f: FormState, editing: boolean): CameraInput {
+function toInput(f: FormState, editing: boolean, restream: boolean): CameraInput {
   const username = f.username.trim() || null
   // An empty field sends null: no password on creation, unchanged when editing.
   const password = f.password || null
@@ -171,6 +178,8 @@ function toInput(f: FormState, editing: boolean): CameraInput {
     retention_days: f.days.trim() ? Number(f.days) : null,
     max_size_gb: f.gb.trim() ? Number(f.gb) : null,
     record_audio: f.audio,
+    // Not sent to a server that does not know them (it would refuse them).
+    ...(restream ? { restream_username: f.rsUser.trim() || null, ...(f.rsUser.trim() && f.rsPass ? { restream_password: f.rsPass } : {}) } : {}),
   }
 }
 
@@ -218,6 +227,8 @@ const empty: FormState = {
   days: '',
   gb: '',
   onvif: '',
+  rsUser: '',
+  rsPass: '',
 }
 
 function fromCamera(c: Camera): FormState {
@@ -248,6 +259,7 @@ function fromCamera(c: Camera): FormState {
     days: c.retention_days?.toString() ?? '',
     gb: c.max_size_gb?.toString() ?? '',
     onvif: c.edit?.onvif_port?.toString() ?? '',
+    rsUser: c.edit?.restream_username ?? '',
   }
 }
 
@@ -478,7 +490,9 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
   const usbCameras = useCapability('usb_cameras') === true
   const viewerReason = useReadOnly()
   const demo = useIsDemo()
-  const { source } = useData()
+  const { source, capabilities } = useData()
+  // The server republishes over RTSP and takes a password per camera.
+  const restream = capabilities?.restream_port !== undefined
   const editing = camera !== null
   // Cameras of config.toml can only be changed in that file.
   const readOnly = editing && !camera.managed
@@ -534,7 +548,8 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
     }
   }, [open, editing, demo, canReadSettings])
 
-  const errors = useMemo(() => validate(f, existingIds, editing), [f, existingIds, editing])
+  const storedRestreamPassword = editing && camera?.edit?.restream_has_password === true
+  const errors = useMemo(() => validate(f, existingIds, editing, storedRestreamPassword), [f, existingIds, editing, storedRestreamPassword])
   const valid = Object.keys(errors).length === 0
   const shown = (k: keyof FormState) => (submitted ? errors[k] : undefined)
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => {
@@ -591,7 +606,7 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
     setSaving(true)
     setSaveError(null)
     try {
-      const saved = editing ? await updateCamera(camera.id, toInput(f, true)) : await createCamera(toInput(f, false))
+      const saved = editing ? await updateCamera(camera.id, toInput(f, true, restream)) : await createCamera(toInput(f, false, restream))
       source.store.upsertCamera(saved)
       source.store.notify('info', editing ? t(`${saved.name} : modifiée`, `${saved.name}: changed`) : t(`${saved.name} : ajoutée`, `${saved.name}: added`), saved.id)
       close()
@@ -728,6 +743,35 @@ export function CameraForm({ open, onClose, camera, existingIds, preset = null }
         >
           <input id="cam-onvif" className={inputCls(shown('onvif'))} inputMode="numeric" value={f.onvif} onChange={(e) => set('onvif', e.target.value)} placeholder={t('aucun', 'none')} autoComplete="off" />
         </Field>
+          </>
+        )}
+        {restream && (
+          <>
+            <Field
+              label={t('Republication RTSP : identifiant propre (facultatif)', 'RTSP republication: own user name (optional)')}
+              htmlFor="cam-rs-user"
+              error={shown('rsUser')}
+              hint={t('Demandé aux logiciels qui lisent cette caméra depuis RustNVR, à la place de l’identifiant général (Paramètres → Réseau). Vide : l’identifiant général.', 'Asked to programs reading this camera from RustNVR, instead of the general user name (Settings → Network). Empty: the general one.')}
+            >
+              <input id="cam-rs-user" className={inputCls(shown('rsUser'))} value={f.rsUser} onChange={(e) => set('rsUser', e.target.value)} autoComplete="off" spellCheck={false} />
+            </Field>
+            <Field
+              label={t('Republication RTSP : mot de passe propre', 'RTSP republication: own password')}
+              htmlFor="cam-rs-pass"
+              error={shown('rsPass')}
+              hint={editing && camera?.edit?.restream_has_password ? t('Laissez vide pour conserver le mot de passe enregistré.', 'Leave empty to keep the saved password.') : t('Jamais réaffiché ni renvoyé par le serveur.', 'Never shown again nor returned by the server.')}
+            >
+              <input
+                id="cam-rs-pass"
+                type={showPassword ? 'text' : 'password'}
+                className={inputCls(shown('rsPass'))}
+                value={f.rsPass}
+                disabled={!f.rsUser.trim()}
+                placeholder={editing && camera?.edit?.restream_has_password && f.rsUser.trim() ? t('•••••••• (inchangé)', '•••••••• (unchanged)') : ''}
+                onChange={(e) => set('rsPass', e.target.value)}
+                autoComplete="new-password"
+              />
+            </Field>
           </>
         )}
         <div className="flex flex-col gap-2 sm:col-span-2">

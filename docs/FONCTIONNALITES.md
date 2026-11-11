@@ -49,8 +49,11 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   voit qu'une connexion par flux. Images renvoyées telles quelles (H.264,
   H.265 ; son AAC, ou l'Opus tiré du G.711), sans conversion ; rien ne
   tourne sans client. RTP dans la connexion RTSP (TCP) seulement, pas d'UDP ;
-  **sans authentification** : écoute sur `127.0.0.1` par défaut, le réseau
-  seulement après un accord explicite. Réglée dans Paramètres → Réseau, sans
+  identifiant et mot de passe facultatifs (Digest ou Basic), généraux ou
+  propres à une caméra ; cinq erreurs bloquent l'adresse 15 minutes, et une
+  adresse ne peut pas prendre toutes les places. Écoute sur `127.0.0.1` par
+  défaut ; le réseau avec un mot de passe, ou après un accord explicite.
+  Réglée dans Paramètres → Réseau et dans la fiche des caméras, sans
   redémarrage. Coût mesuré (`cargo run --release -p rustnvr-restream
   --example cost`, flux de synthèse à 4 Mbit/s, clients sur la même
   machine) : environ 0,1 % d'un cœur et 0,5 Mio par client ; 1,4 % d'un cœur

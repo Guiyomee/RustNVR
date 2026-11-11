@@ -341,8 +341,8 @@ export function CameraDetailPage({ id }: { id: string }) {
                 {t("Le chemin RTSP et les identifiants ne sont jamais renvoyés par l'API.", "The RTSP path and the credentials are never returned by the API.")}
                 {restreamBase &&
                   t(
-                    ' Les adresses de republication sont à donner à Home Assistant, Frigate ou VLC à la place de celle de la caméra (sans mot de passe, RTSP sur TCP)',
-                    ' Give the republication addresses to Home Assistant, Frigate or VLC instead of the address of the camera (no password, RTSP over TCP)',
+                    ' Les adresses de republication sont à donner à Home Assistant, Frigate ou VLC à la place de celle de la caméra (RTSP sur TCP ; identifiant et mot de passe de la republication s’il y en a)',
+                    ' Give the republication addresses to Home Assistant, Frigate or VLC instead of the address of the camera (RTSP over TCP; user name and password of the republication if any)',
                   ) + (capabilities?.restream_local_only ? t(' ; utilisables depuis la machine de RustNVR seulement.', '; usable from the machine running RustNVR only.') : '.')}
               </p>
             </div>
