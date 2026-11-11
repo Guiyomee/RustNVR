@@ -1,0 +1,54 @@
+# Known vulnerabilities in the dependencies (Rust and web interface): when the
+# lock files change, and every week (a flaw may be published for a version
+# already in use).
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.lock, web/package-lock.json, .github/workflows/audit.yml]
+  pull_request:
+    paths: [Cargo.lock, web/package-lock.json, .github/workflows/audit.yml]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # The audit tool itself, not the workspace.
+          cache-targets: false
+          cache-bin: true
+      - name: cargo-audit
+        run: command -v cargo-audit || cargo install cargo-audit --locked
+      # Fails on a vulnerability; unmaintained or yanked crates are listed
+      # as warnings.
+      - run: cargo audit
+
+  npm:
+    name: npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # What ends up in the served interface; build tools are checked by
+      # Dependabot.
+      - working-directory: web
+        run: npm audit --omit=dev --audit-level=high
