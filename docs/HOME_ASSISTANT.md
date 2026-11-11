@@ -247,9 +247,42 @@ le réglage est enregistré et survit au redémarrage. Couper la détection
 n'arrête pas l'enregistrement continu ; une caméra en mode « sur mouvement »
 n'enregistre plus tant que la détection est coupée.
 
-## 5. Limites
+## 5. Interface dans Home Assistant
 
-- Pas de direct vidéo ni de relecture dans Home Assistant (voir § 3).
+L'interface complète de RustNVR (direct, relecture, événements, réglages)
+peut s'afficher dans la barre latérale de Home Assistant, comme Frigate avec
+« Frigate Proxy ». C'est l'app **RustNVR Proxy** (Home Assistant OS ou
+Supervised), fournie dans ce dépôt ; RustNVR continue de tourner où il est.
+
+1. **Paramètres → Apps → Magasin d'apps → ⋮ → Dépôts** : ajoutez
+   `https://github.com/Guiyomee/RustNVR` (ou l'adresse de votre fork).
+2. Installez **RustNVR Proxy**. Dans **Configuration**, réglez `server` sur
+   l'adresse de RustNVR vue depuis Home Assistant, sans chemin, par exemple
+   `http://192.168.1.10:8080`.
+3. Démarrez l'app et cochez « Afficher dans la barre latérale ». Le panneau
+   « RustNVR » ouvre l'interface ; si des comptes sont configurés, connectez-vous
+   une fois.
+
+Si l'authentification de RustNVR est active, déclarez Home Assistant comme
+proxy de confiance : les échecs de connexion bloquent alors la personne qui
+se trompe, et non tout Home Assistant.
+
+```toml
+[web]
+trusted_proxies = ["192.168.1.5", "172.30.32.0/23"]   # IP de Home Assistant, réseau interne de ses apps
+```
+
+Fonctionnement : Home Assistant sert le panneau sous
+`/api/hassio_ingress/<jeton>/` et donne ce préfixe à l'app dans l'en-tête
+`X-Ingress-Path`, que l'app transmet à RustNVR. RustNVR l'applique à ses
+fichiers, à son API et à ses liens, et n'accepte d'être affiché dans un cadre
+que sous ingress, et seulement par une page de la même origine (Home
+Assistant). Sans cet en-tête, rien ne change.
+
+## 6. Limites
+
+- Pas de direct vidéo ni de relecture dans les cartes du tableau de bord
+  (voir § 3) : ils sont dans le panneau RustNVR (§ 5).
 - Le mode d'enregistrement ne se change que pour les caméras ajoutées depuis
   l'interface (celles de `config.toml` restent comme le fichier le dit).
 - Seules les entités « Personne » et « Dernière personne » sont fournies : les

@@ -1,0 +1,5 @@
+# Home Assistant app repository: Settings → Apps → App store → ⋮ →
+# Repositories, then add the address of this Git repository.
+name: RustNVR
+url: https://github.com/Guiyomee/RustNVR
+maintainer: RustNVR
