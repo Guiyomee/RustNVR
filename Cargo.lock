@@ -3876,7 +3876,7 @@ dependencies = [
  "bytes",
  "futures",
  "getrandom 0.4.3",
- "md-5 0.10.6",
+ "md-5 0.11.0",
  "rustnvr-core",
  "rustnvr-stream",
  "rustnvr-testkit",
