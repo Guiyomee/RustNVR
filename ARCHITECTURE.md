@@ -36,6 +36,7 @@ justifiés dans [docs/adr/0001-choix-techniques-fondamentaux.md](docs/adr/0001-c
 | `rustnvr-remote` | Points de stockage distants : envoi des segments terminés vers S3 (object_store) ou SFTP (russh), dossier d'attente local, vérification de la clé SSH | **Implémenté** |
 | `rustnvr-webrtc` | Direct WebRTC (prototype) avec str0m : signalisation WHEP, candidats « host », une socket UDP par adresse, H.264 en Annex B depuis le `LiveTap` sans réencodage, son Opus (caméras G.711) | **Prototype** (vérifié dans Edge) |
 | `rustnvr-ai` | IA optionnelle : trait `ObjectDetector`, filtres (`Analyzer`), client de l'API HTTP DeepStack / CodeProject.AI, modèles YOLOX exécutés par tract (fonctionnalité `onnx`) ; aucun modèle fourni | **Implémenté** (désactivé par défaut) |
+| `rustnvr-restream` | Republication RTSP : serveur RTSP/1.0 (RTP entrelacé en TCP, sans authentification) qui renvoie les images d'un `LiveTap` en paquets RTP (H.264, H.265, AAC, Opus), sans réencodage ; une tâche par client, rien sans client | **Implémenté** (vérifié avec Retina et FFmpeg) |
 | `rustnvr-discovery` | Recherche des caméras du réseau : WS-Discovery ONVIF, balayage des ports RTSP, client ONVIF (modèle, profils, `GetStreamUri`, authentification WS-Security), adresses RTSP habituelles des marques ; rien n'est enregistré | **Implémenté** (ONVIF avec identifiants : vérifié contre une caméra simulée seulement) |
 | `rustnvr-motion` | Détection de mouvement sans IA : décodage du sous-flux par FFmpeg, fond adaptatif, zones polygonales, événements, captures JPEG | **Implémenté** |
 | `rustnvr-api` | Axum : REST `/api/v1` en lecture seule, WebSocket, service des segments MP4 (Range), interface statique, auth Basic, CPU/RAM hôte | **Implémenté en partie** (voir API_CONTRACT.md) |
@@ -59,7 +60,8 @@ pas créées vides pour éviter de donner une fausse impression d'avancement.
                           │  StreamItem::SessionEnd
         ┌─────────────────┼───────────────────┬──────────────────────────┐
         ▼                 ▼                   ▼                          ▼
-  thread recorder    (motion, prévu)     (LiveTap → direct WS/MSE)   (snapshots, prévu)
+  thread recorder    (motion, prévu)     (LiveTap → direct WS/MSE,   (snapshots, prévu)
+                                          WebRTC, republication RTSP)
   RecorderCore        sous-flux           sans coût sans spectateur
   → fMP4 *.mp4.part
   → fsync + rename *.mp4
@@ -73,6 +75,16 @@ seulement s'il y a des spectateurs, plus le cache des images depuis la
 dernière image clé (≤ 4 Mio par caméra). Chaque spectateur WebSocket a son
 propre muxer fMP4 (une image = un fragment) ; un spectateur trop lent est
 déconnecté et repart d'une image clé, sans effet sur l'enregistrement.
+
+### Republication RTSP
+
+`rustnvr-restream` s'abonne à la même `LiveTap` que le direct : un client
+RTSP coûte une tâche Tokio et une recopie des images en paquets RTP, rien
+d'autre (ni décodage, ni cache en plus, ni connexion de plus à la caméra).
+Un client trop lent reprend à l'image clé suivante ; s'il ne lit plus rien
+pendant 10 s, il est déconnecté. Les horodatages RTP restent continus quand
+la caméra se reconnecte ; un changement de codec ou de résolution ferme la
+connexion du client, qui redemande la description du flux.
 
 ### Contre-pression et pertes
 

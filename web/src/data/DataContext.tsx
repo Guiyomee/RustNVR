@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { describeError } from '../api/client'
 import { DEMO_SITE } from '../lib/build'
 import { useLiveState, type LiveState } from '../state/liveStore'
@@ -22,6 +22,8 @@ interface DataContextValue {
   mode: DataMode
   capabilities: Capabilities | null
   capabilitiesError: string | null
+  /** Reads the capabilities again, after a setting that changes them. */
+  reloadCapabilities: () => void
 }
 
 const Ctx = createContext<DataContextValue | null>(null)
@@ -54,14 +56,20 @@ export function DataProvider({ children }: { children: (mode: DataMode) => React
     }
   }, [source])
 
+  const reloadCapabilities = useCallback(() => {
+    // On failure the previous ones stay.
+    void source.capabilities().then(setCapabilities, () => undefined)
+  }, [source])
+
   const value = useMemo<DataContextValue>(
     () => ({
       source,
       mode,
       capabilities,
       capabilitiesError,
+      reloadCapabilities,
     }),
-    [source, mode, capabilities, capabilitiesError],
+    [source, mode, capabilities, capabilitiesError, reloadCapabilities],
   )
   return <Ctx.Provider value={value}>{children(mode)}</Ctx.Provider>
 }

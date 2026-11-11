@@ -56,7 +56,8 @@ WORKDIR /data
 # /config: config.toml and the settings made in the interface (*.ui.toml,
 # camera passwords included). /data: recordings, database, thumbnails.
 VOLUME ["/config", "/data"]
-EXPOSE 8080
+# 8554: RTSP republication of the cameras, when enabled ([restream]).
+EXPOSE 8080 8554
 # Health (« healthy » in Portainer / docker ps): the program asks the running
 # server for GET /api/v1/health on its own port (there is no curl here).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

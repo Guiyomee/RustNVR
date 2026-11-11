@@ -71,10 +71,10 @@ pub(super) async fn restart(shared: &Arc<Shared>) {
     publish(shared, running.as_ref());
 }
 
-/// Tells the API on which port the cameras are republished.
+/// Tells the API where the cameras are republished.
 fn publish(shared: &Shared, server: Option<&RestreamServer>) {
     if let Some(api) = shared.api.get() {
-        api.set_restream_port(server.map(|s| s.local_addr().port()));
+        api.set_restream(server.map(RestreamServer::local_addr));
     }
 }
 

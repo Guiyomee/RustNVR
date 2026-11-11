@@ -98,6 +98,12 @@ joint les caméras comme l'hôte et le direct WebRTC (UDP) fonctionne. En résea
 « bridge » (retirez `network_mode`, décommentez `ports`), le direct standard
 marche mais pas le WebRTC (adresses du conteneur non joignables).
 
+**Republication RTSP** (Paramètres → Réseau, désactivée par défaut) : port
+8554 en TCP. En réseau de l'hôte, rien à ajouter ; en « bridge », ajoutez
+`"8554:8554"` à `ports`. Dans les deux cas l'adresse d'écoute doit être
+`0.0.0.0:8554` pour être jointe depuis une autre machine ou un autre
+conteneur.
+
 **Autre port.** En réseau de l'hôte, `ports` n'a aucun effet : RustNVR écoute
 sur `listen` de `/config/config.toml` (8080). Pour un autre port, sans toucher
 à ce fichier, ajoutez dans `environment` de la stack :

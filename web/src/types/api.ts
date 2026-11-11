@@ -27,9 +27,13 @@ export interface Capabilities {
   ptz?: boolean
   /** USB webcams (V4L2) can be added as cameras (`usb` in the camera input, `/devices/video` lists them). */
   usb_cameras?: boolean
+  /** Port of the RTSP republication (`rtsp://host:port/<camera>`, `/<camera>/sub`), while it is served. */
+  restream_port?: number | null
+  /** The republication only listens on the server itself (127.0.0.1). */
+  restream_local_only?: boolean
 }
 
-export type CapabilityKey = Exclude<keyof Capabilities, 'api_version'>
+export type CapabilityKey = Exclude<keyof Capabilities, 'api_version' | 'restream_port' | 'restream_local_only'>
 
 export interface SystemInfo {
   version: string
@@ -608,6 +612,16 @@ export interface MotionGlobalSettings {
   events_retention_days: number
 }
 
+/** `[restream]`: RTSP republication of the cameras (no authentication). */
+export interface RestreamSettings {
+  enabled: boolean
+  /** Listening address, `127.0.0.1:8554` or `0.0.0.0:8554`. */
+  listen: string
+  max_clients: number
+  /** Agreement to listen on the network without authentication. */
+  allow_unauthenticated_remote: boolean
+}
+
 /** GET /api/v1/settings. */
 export interface GeneralSettings {
   recording: RecordingSettings
@@ -619,14 +633,18 @@ export interface GeneralSettings {
   low_space_percent: number
   /** Destination of cameras whose recording is enabled without choosing one. */
   default_destination: string
+  /** RTSP republication (absent on an older server). */
+  restream?: RestreamSettings
+  /** Why the republication is enabled but not served (address in use…). */
+  restream_error?: string | null
   /** Read-only here. */
   ffmpeg: string
   /** Changed from the interface (settings.ui.toml). */
   managed: boolean
 }
 
-/** PUT /api/v1/settings; `default_destination` absent keeps the current one. */
-export type GeneralSettingsInput = Omit<GeneralSettings, 'ffmpeg' | 'managed' | 'default_destination'> & { default_destination?: string }
+/** PUT /api/v1/settings; `default_destination` and `restream` absent keep the current ones. */
+export type GeneralSettingsInput = Omit<GeneralSettings, 'ffmpeg' | 'managed' | 'default_destination' | 'restream_error'> & { default_destination?: string }
 
 /** Severity of a log message. */
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace'

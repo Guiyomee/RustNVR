@@ -192,6 +192,8 @@ pub struct ApiState {
     low_space_percent: std::sync::atomic::AtomicU8,
     /// Port of the RTSP republication while it is served (0: not served).
     restream_port: std::sync::atomic::AtomicU16,
+    /// The republication only listens on this machine (loopback).
+    restream_local: std::sync::atomic::AtomicBool,
     /// Served over HTTPS (session cookies get `Secure`).
     pub(crate) https: std::sync::atomic::AtomicBool,
     /// Accounts exist in the database (authentication required).
@@ -262,6 +264,7 @@ impl ApiState {
             }),
             low_space_percent: std::sync::atomic::AtomicU8::new(90),
             restream_port: std::sync::atomic::AtomicU16::new(0),
+            restream_local: std::sync::atomic::AtomicBool::new(false),
             https: std::sync::atomic::AtomicBool::new(false),
             has_users: std::sync::atomic::AtomicBool::new(false),
             login_guard: crate::auth::LoginGuard::default(),
@@ -473,15 +476,22 @@ impl ApiState {
         self.low_space_percent.store(percent, Ordering::Relaxed);
     }
 
-    /// Says on which port the cameras are republished over RTSP (`None`:
-    /// they are not).
-    pub fn set_restream_port(&self, port: Option<u16>) {
+    /// Says where the cameras are republished over RTSP (`None`: they
+    /// are not).
+    pub fn set_restream(&self, addr: Option<std::net::SocketAddr>) {
+        self.restream_local.store(
+            addr.is_some_and(|a| a.ip().is_loopback()),
+            Ordering::Relaxed,
+        );
         self.restream_port
-            .store(port.unwrap_or(0), Ordering::Relaxed);
+            .store(addr.map_or(0, |a| a.port()), Ordering::Relaxed);
     }
 
-    pub(crate) fn restream_port(&self) -> Option<u16> {
-        Some(self.restream_port.load(Ordering::Relaxed)).filter(|p| *p != 0)
+    /// Port of the RTSP republication while it is served, and whether it
+    /// only listens on this machine.
+    pub(crate) fn restream(&self) -> Option<(u16, bool)> {
+        let port = self.restream_port.load(Ordering::Relaxed);
+        (port != 0).then(|| (port, self.restream_local.load(Ordering::Relaxed)))
     }
 
     pub(crate) fn low_space_percent(&self) -> u8 {

@@ -27,6 +27,14 @@ password_env = "RUSTNVR_WEB_PASSWORD"
 # tls_key = "/config/key.pem", without tls_self_signed.
 tls_self_signed = true
 
+# RTSP republication (Home Assistant, Frigate, VLC… read the cameras from
+# RustNVR: rtsp://<machine>:8554/<camera id>, and /<camera id>/sub). No
+# password: for a trusted local network. Also in Paramètres → Réseau.
+# [restream]
+# enabled = true
+# listen = "0.0.0.0:8554"
+# allow_unauthenticated_remote = true
+
 # Built-in object recognition: download yolox_nano.onnx into the config
 # volume, then choose it in Paramètres → Intelligence artificielle, or here:
 # [ai]
