@@ -140,6 +140,11 @@ pub struct CameraEditInfo {
     pub onvif_port: Option<u16>,
     /// USB webcam settings (`main_url` is then empty).
     pub usb: Option<rustnvr_core::config::UsbConfig>,
+    /// User name of the RTSP republication for this camera, when it has
+    /// its own.
+    pub restream_username: Option<String>,
+    /// Whether a republication password is stored for this camera.
+    pub restream_has_password: bool,
 }
 
 #[derive(Default)]
@@ -676,6 +681,8 @@ impl ApiState {
                 },
                 onvif_port: e.onvif_port,
                 usb: e.usb.clone(),
+                restream_username: e.restream_username.clone(),
+                restream_has_password: e.restream_has_password,
             }),
             record_destinations: c.record_destinations.clone(),
             record_mode: c.record_mode.as_str(),

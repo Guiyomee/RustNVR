@@ -113,7 +113,11 @@ pub struct ManagedSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_hwaccel: Option<HwAccelMode>,
     /// Replaces `[restream]`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "stored_restream"
+    )]
     pub restream: Option<RestreamConfig>,
     /// Replaces `storage.low_space_percent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -717,7 +721,7 @@ impl Default for LiveConfig {
 /// inside the RTSP connection. There is no authentication: for that reason
 /// the default address is loopback, and listening on another address needs
 /// an explicit agreement.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct RestreamConfig {
     /// Serve the cameras over RTSP.
@@ -726,9 +730,18 @@ pub struct RestreamConfig {
     pub listen: String,
     /// Most clients served at a time.
     pub max_clients: u32,
-    /// Allow listening on a non-loopback address: anyone who can reach it
-    /// can watch the cameras.
+    /// Most clients served at a time from one address.
+    pub max_clients_per_address: u32,
+    /// Allow listening on a non-loopback address without credentials:
+    /// anyone who can reach it can watch the cameras.
     pub allow_unauthenticated_remote: bool,
+    /// User name asked to RTSP clients (with a password). A camera may have
+    /// its own (`restream = { username = …, password = … }` on the camera).
+    pub username: Option<String>,
+    /// Password. Prefer `password_env`.
+    pub password: Option<Secret>,
+    /// Environment variable holding the password.
+    pub password_env: Option<String>,
 }
 
 impl Default for RestreamConfig {
@@ -737,8 +750,48 @@ impl Default for RestreamConfig {
             enabled: false,
             listen: "127.0.0.1:8554".to_owned(),
             max_clients: 16,
+            max_clients_per_address: 8,
             allow_unauthenticated_remote: false,
+            username: None,
+            password: None,
+            password_env: None,
         }
+    }
+}
+
+/// Credentials of the RTSP republication from their three fields: both a
+/// user name and a non-empty password, or neither.
+fn restream_credentials(
+    what: &str,
+    username: Option<&str>,
+    password: Option<&Secret>,
+    password_env: Option<&str>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<(String, Secret)>, String> {
+    let password = match (password, password_env) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "{what}: password and password_env are mutually exclusive"
+            ));
+        }
+        (Some(p), None) => Some(p.clone()),
+        (None, Some(var)) => Some(Secret::new(env(var).ok_or_else(|| {
+            format!("{what}: password_env: environment variable {var:?} is not set")
+        })?)),
+        (None, None) => None,
+    };
+    match (username, password) {
+        (None, None) => Ok(None),
+        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
+            // The user name travels in `user:password` and in quotes.
+            if u.contains([':', '"']) || u.chars().any(char::is_control) {
+                return Err(format!("{what}: username must not contain : or \""));
+            }
+            Ok(Some((u.to_owned(), p)))
+        }
+        _ => Err(format!(
+            "{what}: username and a non-empty password must be set together"
+        )),
     }
 }
 
@@ -753,29 +806,118 @@ impl RestreamConfig {
         })
     }
 
+    /// What RTSP clients must present, or `None` without authentication.
+    pub fn credentials(
+        &self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<(String, Secret)>, String> {
+        restream_credentials(
+            "restream",
+            self.username.as_deref(),
+            self.password.as_ref(),
+            self.password_env.as_deref(),
+            env,
+        )
+    }
+
     /// Every invalid value (empty when valid).
-    pub fn problems(&self) -> Vec<String> {
+    pub fn problems(&self, env: impl Fn(&str) -> Option<String>) -> Vec<String> {
         let mut p = Vec::new();
         if !(1..=256).contains(&self.max_clients) {
             p.push("restream.max_clients must be between 1 and 256".to_owned());
         }
+        if !(1..=self.max_clients.max(1)).contains(&self.max_clients_per_address) {
+            p.push(
+                "restream.max_clients_per_address must be between 1 and restream.max_clients"
+                    .to_owned(),
+            );
+        }
+        let credentials = self.credentials(env).map_err(|e| p.push(e)).ok().flatten();
         match self.listen_addr() {
             Err(e) => p.push(e),
             Ok(addr)
                 if self.enabled
                     && !addr.ip().is_loopback()
+                    && credentials.is_none()
                     && !self.allow_unauthenticated_remote =>
             {
                 p.push(format!(
-                    "restream.listen {addr} is reachable from the network and RTSP \
-                     republication has no authentication: set \
-                     restream.allow_unauthenticated_remote = true to accept that anyone who \
-                     can reach this address watches the cameras"
+                    "restream.listen {addr} is reachable from the network but RTSP clients \
+                     are asked for no password: set restream.username and \
+                     restream.password_env, or restream.allow_unauthenticated_remote = true \
+                     to accept that anyone who can reach this address watches the cameras"
                 ));
             }
             Ok(_) => {}
         }
         p
+    }
+}
+
+/// What `settings.ui.toml` keeps of `[restream]`: its password too (the file
+/// is readable by its owner only).
+fn stored_restream<S: serde::Serializer>(
+    restream: &Option<RestreamConfig>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(serde::Serialize)]
+    struct Stored<'a> {
+        enabled: bool,
+        listen: &'a str,
+        max_clients: u32,
+        max_clients_per_address: u32,
+        allow_unauthenticated_remote: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        username: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password_env: Option<&'a str>,
+    }
+    serde::Serialize::serialize(
+        &restream.as_ref().map(|r| Stored {
+            enabled: r.enabled,
+            listen: &r.listen,
+            max_clients: r.max_clients,
+            max_clients_per_address: r.max_clients_per_address,
+            allow_unauthenticated_remote: r.allow_unauthenticated_remote,
+            username: r.username.as_deref(),
+            password: r.password.as_ref().map(Secret::expose),
+            password_env: r.password_env.as_deref(),
+        }),
+        serializer,
+    )
+}
+
+/// Credentials RTSP clients must present for one camera, instead of those
+/// of `[restream]` (`restream = { username = "…", password_env = "…" }`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraRestreamConfig {
+    /// User name.
+    pub username: String,
+    /// Password. Prefer `password_env`.
+    #[serde(default)]
+    pub password: Option<Secret>,
+    /// Environment variable holding the password.
+    #[serde(default)]
+    pub password_env: Option<String>,
+}
+
+impl CameraRestreamConfig {
+    /// The user name and password of this camera.
+    pub fn credentials(
+        &self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<(String, Secret), String> {
+        restream_credentials(
+            "restream",
+            Some(&self.username),
+            self.password.as_ref(),
+            self.password_env.as_deref(),
+            env,
+        )?
+        .ok_or_else(|| "restream: username and a non-empty password must be set together".into())
     }
 }
 
@@ -1537,6 +1679,10 @@ pub struct CameraConfig {
     /// ONVIF device service, for moving a motorised camera (PTZ).
     #[serde(default)]
     pub onvif: Option<OnvifConfig>,
+    /// Credentials of the RTSP republication for this camera, instead of
+    /// those of `[restream]`.
+    #[serde(default)]
+    pub restream: Option<CameraRestreamConfig>,
     /// True for cameras stored in [`MANAGED_CAMERAS_FILE`] (editable from the
     /// web interface); false for cameras declared in the configuration file.
     #[serde(skip)]
@@ -1683,6 +1829,18 @@ impl CameraConfig {
             };
             if let Err(e) = s.resolve_with(env_lookup) {
                 problems.push(format!("{prefix}: {e}"));
+            }
+        }
+        if let Some(restream) = &self.restream {
+            let env_lookup = |name: &str| {
+                if self.enabled {
+                    env(name)
+                } else {
+                    Some("-".to_owned())
+                }
+            };
+            if let Err(e) = restream.credentials(env_lookup) {
+                problems.push(format!("camera {id:?} {e}"));
             }
         }
         if let Some(onvif) = &self.onvif {
@@ -2195,7 +2353,7 @@ impl Config {
         }
         problems.extend(self.web.problems(&env));
         problems.extend(self.live.problems());
-        problems.extend(self.restream.problems());
+        problems.extend(self.restream.problems(&env));
         problems.extend(self.motion.problems());
         problems.extend(self.mqtt.problems(&env));
         problems.extend(self.ai.problems(&env));

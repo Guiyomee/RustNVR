@@ -411,6 +411,11 @@ pub struct CameraEditDto {
     pub onvif_port: Option<u16>,
     /// USB webcam settings (`main_url` empty), `null` for an RTSP camera.
     pub usb: Option<rustnvr_core::config::UsbConfig>,
+    /// User name RTSP clients must give for this camera, when it has its
+    /// own (`null`: the general one of the republication).
+    pub restream_username: Option<String>,
+    /// Whether its password is stored (never returned).
+    pub restream_has_password: bool,
 }
 
 /// Result of a connection test.

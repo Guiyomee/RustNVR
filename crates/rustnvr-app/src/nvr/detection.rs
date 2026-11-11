@@ -1274,7 +1274,16 @@ pub(super) fn settings_view(shared: &Arc<Shared>) -> SettingsView {
         live_hwaccel: g.live_hwaccel,
         low_space_percent: g.low_space_percent,
         default_destination: g.default_destination,
-        restream: g.restream,
+        restream: rustnvr_api::RestreamView {
+            enabled: g.restream.enabled,
+            listen: g.restream.listen.clone(),
+            max_clients: g.restream.max_clients,
+            max_clients_per_address: g.restream.max_clients_per_address,
+            allow_unauthenticated_remote: g.restream.allow_unauthenticated_remote,
+            username: g.restream.username.clone(),
+            has_password: g.restream.password.as_ref().is_some_and(|p| !p.is_empty())
+                || g.restream.password_env.is_some(),
+        },
         restream_error: shared
             .restream_error
             .lock()
@@ -1289,13 +1298,23 @@ pub(super) fn settings_view(shared: &Arc<Shared>) -> SettingsView {
 fn save_settings(path: &std::path::Path, s: &ManagedSettings) -> std::io::Result<()> {
     let body = toml::to_string(s).map_err(std::io::Error::other)?;
     let tmp = path.with_file_name(format!("{MANAGED_SETTINGS_FILE}.tmp"));
-    std::fs::write(
-        &tmp,
+    // May hold the password of the RTSP republication: its owner only.
+    let _ = std::fs::remove_file(&tmp);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut f = opts.open(&tmp)?;
+    std::io::Write::write_all(
+        &mut f,
         format!(
             "# Réglages généraux modifiés depuis l'interface web de RustNVR (fichier géré\n\
-             # automatiquement). Ils remplacent ceux de config.toml.\n\n{body}"
-        ),
+             # automatiquement, à garder privé). Ils remplacent ceux de config.toml.\n\n{body}"
+        )
+        .as_bytes(),
     )?;
+    f.sync_all()?;
+    drop(f);
     std::fs::rename(&tmp, path)
 }
 
@@ -1319,6 +1338,43 @@ pub(super) async fn set_settings(
         }
         None => previous.default_destination.clone(),
     };
+    let restream = match input.restream {
+        None => previous.restream.clone(),
+        Some(r) => {
+            let username = r
+                .username
+                .map(|u| u.trim().to_owned())
+                .filter(|u| !u.is_empty());
+            // No password in the input keeps the stored one (never sent
+            // back); without a user name there is none.
+            let (password, password_env) = match (&username, r.password) {
+                (None, _) => (None, None),
+                (Some(_), Some(p)) => ((!p.is_empty()).then_some(p), None),
+                (Some(_), None) => (
+                    previous.restream.password.clone(),
+                    previous.restream.password_env.clone(),
+                ),
+            };
+            let next = RestreamConfig {
+                enabled: r.enabled,
+                listen: r.listen.trim().to_owned(),
+                max_clients: r.max_clients,
+                max_clients_per_address: r
+                    .max_clients_per_address
+                    .unwrap_or(previous.restream.max_clients_per_address)
+                    .min(r.max_clients.max(1)),
+                allow_unauthenticated_remote: r.allow_unauthenticated_remote,
+                username,
+                password,
+                password_env,
+            };
+            let problems = next.problems(|n| std::env::var(n).ok());
+            if !problems.is_empty() {
+                return Err(ControlError::Invalid(problems.join("; ")));
+            }
+            next
+        }
+    };
     let next = GeneralSettings {
         recording: input.recording,
         motion: input.motion,
@@ -1327,7 +1383,7 @@ pub(super) async fn set_settings(
         live_hwaccel: input.live_hwaccel.unwrap_or(previous.live_hwaccel),
         low_space_percent: input.low_space_percent,
         default_destination,
-        restream: input.restream.unwrap_or_else(|| previous.restream.clone()),
+        restream,
         managed: true,
     };
     save_settings(

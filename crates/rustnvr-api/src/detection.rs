@@ -274,9 +274,6 @@ pub(crate) async fn set_settings(
     if !(50..=99).contains(&input.low_space_percent) {
         problems.push("storage.low_space_percent must be between 50 and 99".to_owned());
     }
-    if let Some(restream) = &input.restream {
-        problems.extend(restream.problems());
-    }
     if !problems.is_empty() {
         return Err(ApiError::bad_request(problems.join("; ")));
     }

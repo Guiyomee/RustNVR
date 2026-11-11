@@ -42,7 +42,22 @@ async fn http(
 
 /// Reads `count` pictures of `rtsp://addr/path`.
 async fn watch(addr: SocketAddr, path: &str, count: usize) -> Result<(), String> {
-    let target = RtspTarget::parse(&format!("rtsp://{addr}/{path}"), None, None).unwrap();
+    watch_as(addr, path, count, None).await
+}
+
+/// [`watch`] with a user name and a password.
+async fn watch_as(
+    addr: SocketAddr,
+    path: &str,
+    count: usize,
+    account: Option<(&str, &str)>,
+) -> Result<(), String> {
+    let target = RtspTarget::parse(
+        &format!("rtsp://{addr}/{path}"),
+        account.map(|a| a.0),
+        account.map(|a| rustnvr_core::Secret::new(a.1)),
+    )
+    .unwrap();
     let opts = SessionOptions {
         connect_timeout: Duration::from_secs(8),
         stall_timeout: Duration::from_secs(5),
@@ -103,7 +118,10 @@ async fn republication_is_set_from_the_interface_and_serves_the_cameras() {
             "enabled": false,
             "listen": "127.0.0.1:8554",
             "max_clients": 16,
-            "allow_unauthenticated_remote": false
+            "max_clients_per_address": 8,
+            "allow_unauthenticated_remote": false,
+            "username": null,
+            "has_password": false
         })
     );
     let input = |restream: serde_json::Value| {
@@ -231,4 +249,163 @@ async fn republication_from_the_configuration_file() {
     assert!(buf[..n].starts_with(b"RTSP/1.0 200 OK"));
     assert!(nvr.shutdown().await);
     assert!(tokio::net::TcpStream::connect(rtsp).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn republication_passwords_general_and_per_camera() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = MockServerConfig::new(Fixture::h264());
+    cfg.frame_interval = Duration::from_millis(40);
+    let camera = MockRtspServer::start(cfg).await.unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+            [storage]
+            recordings_dir = "{rec}"
+            [metrics]
+            log_interval_seconds = 0
+            [web]
+            listen = "127.0.0.1:0"
+            static_dir = "/nonexistent-rustnvr-web"
+            [[cameras]]
+            id = "jardin"
+            main = {{ url = "{url}" }}
+            record = {{ enabled = false }}
+            "#,
+            rec = dir.path().join("rec").display(),
+            url = camera.url()
+        ),
+    )
+    .unwrap();
+    let config = Config::load_with_env(&config_path, |_| None).unwrap();
+    let nvr = Nvr::start(&config, event_bus(64)).await.unwrap();
+    let web = nvr.web_addr().unwrap();
+    let (_, settings) = http(web, "GET", "/api/v1/settings", None).await;
+    let input = |restream: serde_json::Value| {
+        serde_json::json!({
+            "recording": settings["recording"],
+            "motion": settings["motion"],
+            "live_transcode": settings["live_transcode"],
+            "live_max_bitrate_kbps": settings["live_max_bitrate_kbps"],
+            "low_space_percent": settings["low_space_percent"],
+            "restream": restream,
+        })
+        .to_string()
+    };
+
+    // A user name without a password is refused.
+    let half = serde_json::json!({"enabled": true, "listen": "127.0.0.1:0", "max_clients": 8, "username": "nvr"});
+    let (status, err) = http(web, "PUT", "/api/v1/settings", Some(&input(half))).await;
+    assert_eq!(status, 400, "{err}");
+
+    // With a password, the network needs no explicit agreement.
+    let on = serde_json::json!({"enabled": true, "listen": "0.0.0.0:0", "max_clients": 8, "username": "nvr", "password": "general-pass"});
+    let (status, saved) = http(web, "PUT", "/api/v1/settings", Some(&input(on))).await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["restream"]["username"], "nvr");
+    assert_eq!(saved["restream"]["has_password"], true);
+    // The password never comes back, here or in the settings read again.
+    let (_, read) = http(web, "GET", "/api/v1/settings", None).await;
+    assert!(
+        !saved.to_string().contains("general-pass") && !read.to_string().contains("general-pass")
+    );
+    // It is kept in a file only its owner reads.
+    let stored = dir.path().join("settings.ui.toml");
+    assert!(
+        std::fs::read_to_string(&stored)
+            .unwrap()
+            .contains("general-pass")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&stored).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let port = nvr
+        .restream_addr()
+        .await
+        .expect("republication started")
+        .port();
+    let rtsp: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let general = Some(("nvr", "general-pass"));
+    watch_as(rtsp, "jardin", 3, general).await.unwrap();
+    assert!(watch(rtsp, "jardin", 1).await.is_err(), "no password");
+    assert!(
+        watch_as(rtsp, "jardin", 1, Some(("nvr", "wrong")))
+            .await
+            .is_err()
+    );
+
+    // Saving again without the password keeps it.
+    let again = serde_json::json!({"enabled": true, "listen": format!("0.0.0.0:{port}"), "max_clients": 8, "username": "nvr"});
+    let (status, saved) = http(web, "PUT", "/api/v1/settings", Some(&input(again))).await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["restream"]["has_password"], true);
+
+    // A camera added from the interface, with its own account.
+    let cam = serde_json::json!({
+        "id": "porte", "name": "Porte", "record": false,
+        "main": {"url": camera.url()},
+        "restream_username": "porte", "restream_password": "porte-pass",
+    });
+    let (status, created) = http(web, "POST", "/api/v1/cameras", Some(&cam.to_string())).await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["edit"]["restream_username"], "porte");
+    assert_eq!(created["edit"]["restream_has_password"], true);
+    assert!(!created.to_string().contains("porte-pass"));
+    tokio::time::timeout(Duration::from_secs(20), async {
+        // Its own account only; the general one opens the other camera only.
+        watch_as(rtsp, "porte", 3, Some(("porte", "porte-pass")))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("camera not served in time");
+    assert!(watch_as(rtsp, "porte", 1, general).await.is_err());
+    assert!(
+        watch_as(rtsp, "jardin", 1, Some(("porte", "porte-pass")))
+            .await
+            .is_err()
+    );
+    watch_as(rtsp, "jardin", 3, general).await.unwrap();
+
+    // Edited without the password: kept. Without the user name: back to the
+    // general account.
+    let mut edit = cam.clone();
+    edit.as_object_mut().unwrap().remove("id");
+    edit.as_object_mut().unwrap().remove("restream_password");
+    let (status, updated) =
+        http(web, "PUT", "/api/v1/cameras/porte", Some(&edit.to_string())).await;
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(updated["edit"]["restream_has_password"], true);
+    edit.as_object_mut().unwrap().remove("restream_username");
+    let (status, updated) =
+        http(web, "PUT", "/api/v1/cameras/porte", Some(&edit.to_string())).await;
+    assert_eq!(status, 200, "{updated}");
+    assert!(updated["edit"]["restream_username"].is_null());
+    tokio::time::timeout(Duration::from_secs(20), async {
+        watch_as(rtsp, "porte", 3, general).await.unwrap();
+    })
+    .await
+    .expect("camera not served in time");
+
+    assert!(nvr.shutdown().await);
+    let reloaded = Config::load_with_env(&config_path, |_| None).unwrap();
+    assert_eq!(reloaded.restream.username.as_deref(), Some("nvr"));
+    assert_eq!(
+        reloaded
+            .restream
+            .credentials(|_| None)
+            .unwrap()
+            .unwrap()
+            .1
+            .expose(),
+        "general-pass"
+    );
 }

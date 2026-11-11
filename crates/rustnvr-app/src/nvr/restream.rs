@@ -6,42 +6,75 @@
 use super::Shared;
 use rustnvr_core::CameraId;
 use rustnvr_core::config::RestreamConfig;
-use rustnvr_restream::{Lookup, RestreamServer};
+use rustnvr_restream::{Credentials, Lookup, Options, RestreamServer, Source};
 use std::sync::{Arc, Weak};
 use tracing::{info, warn};
 
-/// The live frames of a running camera (`sub`: its sub stream).
-fn lookup(shared: &Arc<Shared>) -> Lookup {
+/// A stream of a camera (`sub`: its sub stream), and what clients must
+/// present to read it: the credentials of the camera, else the general ones.
+fn lookup(shared: &Arc<Shared>, general: Option<Credentials>) -> Lookup {
     // Weak: the server must not keep the NVR alive.
     let shared: Weak<Shared> = Arc::downgrade(shared);
     Arc::new(move |camera: String, sub: bool| {
-        let shared = shared.clone();
+        let (shared, general) = (shared.clone(), general.clone());
         Box::pin(async move {
-            let shared = shared.upgrade()?;
-            let id = CameraId::new(camera).ok()?;
+            // Unknown cameras are protected like the others, so that only
+            // authenticated clients learn which cameras exist.
+            let unknown = Source {
+                tap: None,
+                credentials: general.clone(),
+            };
+            let (Some(shared), Ok(id)) = (shared.upgrade(), CameraId::new(camera)) else {
+                return unknown;
+            };
             let state = shared.state.lock().await;
-            let runtime = state.running.get(&id)?;
-            if sub {
-                runtime.sub.as_ref().map(|(_, tap)| tap.clone())
-            } else {
-                Some(runtime.live.clone())
-            }
+            let Some(config) = state.configs.iter().find(|c| c.id == id) else {
+                return unknown;
+            };
+            let credentials = match &config.restream {
+                Some(own) => match own.credentials(|n| std::env::var(n).ok()) {
+                    Ok((username, password)) => Some(Credentials { username, password }),
+                    // Never served without the password it was given.
+                    Err(e) => {
+                        warn!(camera = %id, error = %e, "RTSP republication: unusable credentials of the camera, stream not served");
+                        return unknown;
+                    }
+                },
+                None => general,
+            };
+            let tap = state.running.get(&id).and_then(|runtime| {
+                if sub {
+                    runtime.sub.as_ref().map(|(_, tap)| tap.clone())
+                } else {
+                    Some(runtime.live.clone())
+                }
+            });
+            Source { tap, credentials }
         })
     })
 }
 
 async fn start(shared: &Arc<Shared>, config: &RestreamConfig) -> Result<RestreamServer, String> {
     let addr = config.listen_addr()?;
-    let server = RestreamServer::start(addr, lookup(shared), config.max_clients as usize)
+    let general = config
+        .credentials(|n| std::env::var(n).ok())?
+        .map(|(username, password)| Credentials { username, password });
+    let protected = general.is_some();
+    let options = Options {
+        max_clients: config.max_clients as usize,
+        max_clients_per_address: config.max_clients_per_address as usize,
+    };
+    let server = RestreamServer::start(addr, lookup(shared, general), options)
         .await
         .map_err(|e| format!("cannot listen on {addr}: {e}"))?;
     info!(
         url = %format!("rtsp://{}/<camera>", server.local_addr()),
         max_clients = config.max_clients,
+        password = protected,
         "RTSP republication listening"
     );
-    if !addr.ip().is_loopback() {
-        warn!(listen = %addr, "RTSP republication reachable from the network without authentication: anyone who can reach this address can watch the cameras");
+    if !addr.ip().is_loopback() && !protected {
+        warn!(listen = %addr, "RTSP republication reachable from the network without a general password: anyone who can reach this address can watch the cameras that have no password of their own");
     }
     Ok(server)
 }
