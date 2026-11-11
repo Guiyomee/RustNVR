@@ -83,12 +83,14 @@ rtsp://<machine-rustnvr>:8554/jardin/sub     (sous-flux, plus léger)
 rtsp://<machine-rustnvr>:8554/jardin         (flux principal)
 ```
 
-Transport RTSP : **TCP**. Pas d'identifiant ni de mot de passe. Home
+Transport RTSP : **TCP**. Identifiant et mot de passe : ceux de la
+republication (Paramètres → Réseau), ou ceux de la caméra si elle a les siens
+(dans sa fiche) ; Home Assistant les demande dans des champs à part. Home
 Assistant lit alors le flux que RustNVR reçoit déjà : la caméra ne voit
 toujours qu'une connexion, et RustNVR ne convertit rien (une caméra H.265 est
 republiée en H.265). Si Home Assistant tourne sur une autre machine,
-l'adresse d'écoute doit être `0.0.0.0:8554`, ce qui ouvre les flux, sans mot
-de passe, à tout le réseau local : ne l'exposez pas sur Internet. Pour la
+l'adresse d'écoute doit être `0.0.0.0:8554` : donnez un identifiant et un mot
+de passe à la republication, et ne l'exposez pas sur Internet. Pour la
 relecture et les événements complets, ouvrez l'interface RustNVR (par exemple
 avec une carte bouton et une action `url`).
 

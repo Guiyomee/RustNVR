@@ -59,6 +59,8 @@ default_destination = "local"
 # port = 22
 # username = "rustnvr"
 # private_key = "/home/rustnvr/.ssh/id_ed25519"   # or password_env = "…"
+# (prefer an Ed25519 key to an RSA one: the RSA code of the SSH library has a
+# known timing weakness, RUSTSEC-2023-0071)
 # remote_dir = "videos/rustnvr"
 # host_key = "SHA256:…"   # optional: else kept from the first connection
 
@@ -114,12 +116,19 @@ hwaccel = "auto"
 # conversion, nothing running while nobody reads. Also editable in the web
 # interface (Settings > Network), applied without restart.
 enabled = false
-# No authentication: loopback by default (programs on this machine). To serve
-# the local network, "0.0.0.0:8554" and allow_unauthenticated_remote = true:
-# anyone who can reach this address then watches the cameras.
+# Loopback by default (programs on this machine). To serve the local network,
+# "0.0.0.0:8554" with a user name and a password (below)…
 listen = "127.0.0.1:8554"
+# User name and password asked to RTSP clients (Digest, or Basic). A camera
+# may have its own instead (see `restream = …` on the cameras). Five wrong
+# passwords: the address is refused for 15 minutes.
+# username = "nvr"
+# password_env = "RUSTNVR_RTSP_PASSWORD"
+# …or without a password, by saying so: anyone who can reach this address
+# then watches the cameras that have no password of their own.
 allow_unauthenticated_remote = false
 max_clients = 16              # each client receives the camera's bit rate
+max_clients_per_address = 8   # one machine cannot take every place
 
 [motion]
 # Motion detection is enabled camera by camera in the web interface (camera
@@ -207,6 +216,11 @@ static_dir = "web/dist"
 # the port are redirected to https://.
 # tls_self_signed = true
 # tls_names = ["10.8.0.1", "nvr.maison.lan"]
+# Behind a reverse proxy (Nginx Proxy Manager, Traefik, Caddy…): its address
+# or network. Failed logins then lock out the client the proxy names
+# (X-Forwarded-For), not everyone behind the proxy. Only list machines you
+# control: that header is believed from them.
+# trusted_proxies = ["192.168.1.5", "172.18.0.0/16"]
 # Basic sends the password in clear text: put an HTTPS reverse proxy in front.
 username = "admin"
 password_env = "RUSTNVR_WEB_PASSWORD"
@@ -239,6 +253,9 @@ record = { enabled = true, mode = "continuous", destinations = ["local"] }
 # onvif = { port = 80 }
 # onvif = { port = 2020, username = "onvif", password_env = "RUSTNVR_GARAGE_ONVIF_PASSWORD" }
 # onvif = { url = "http://192.168.1.21:8899/onvif/device_service" }
+# Own user name and password of the RTSP republication for this camera,
+# instead of those of [restream]:
+# restream = { username = "garage", password_env = "RUSTNVR_GARAGE_RTSP_PASSWORD" }
 
 # A USB webcam (V4L2) instead of an RTSP camera: no main / sub / onvif. FFmpeg
 # reads it and encodes H.264 (on the graphics card used for conversions, else

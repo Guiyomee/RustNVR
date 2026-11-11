@@ -89,8 +89,8 @@ Ce que le serveur sait réellement faire. L'interface s'en sert pour afficher
 
 `restream_port` : port de la republication RTSP tant qu'elle est servie
 (`null` sinon) ; les caméras sont à `rtsp://<hôte>:<port>/<id>` et
-`rtsp://<hôte>:<port>/<id>/sub` (sous-flux), sans authentification, RTP dans
-la connexion RTSP (TCP). `restream_local_only` : elle n'écoute que sur la
+`rtsp://<hôte>:<port>/<id>/sub` (sous-flux), RTP dans la connexion RTSP
+(TCP), avec l'identifiant et le mot de passe de la republication s'il y en a. `restream_local_only` : elle n'écoute que sur la
 machine du serveur (`127.0.0.1`).
 
 `usb_cameras` : des webcams USB (V4L2) peuvent être ajoutées comme caméras
@@ -1104,14 +1104,21 @@ Réglages généraux modifiables depuis l'interface :
   "live_transcode": true, "live_max_bitrate_kbps": 2000, "live_hwaccel": "auto",
   "low_space_percent": 90, "default_destination": "local",
   "restream": { "enabled": false, "listen": "127.0.0.1:8554", "max_clients": 16,
-                "allow_unauthenticated_remote": false },
+                "max_clients_per_address": 8, "allow_unauthenticated_remote": false,
+                "username": null, "has_password": false },
   "restream_error": null, "ffmpeg": "ffmpeg", "managed": false }
 ```
 
 `restream` (`[restream]`) : republication RTSP des caméras ; facultatif dans
-`PUT` (absent : inchangé). Une adresse d'écoute hors de la machine est
-refusée (400) sans `allow_unauthenticated_remote`, la republication n'ayant
-pas d'authentification. Un changement arrête et relance le serveur RTSP tout
+`PUT` (absent : inchangé). `username` et `password` : ce que les clients RTSP
+doivent présenter (Digest ou Basic) ; **le mot de passe n'est jamais
+renvoyé** (`has_password`), et dans `PUT` `password` absent garde celui qui
+est enregistré, `""` le supprime. Une adresse d'écoute hors de la machine est
+refusée (400) sans mot de passe ni `allow_unauthenticated_remote`. Une caméra
+peut avoir son propre couple (`restream_username`, `restream_password` de
+`POST`/`PUT /cameras` ; `edit.restream_username` et
+`edit.restream_has_password` en lecture), qui remplace alors le général pour
+elle. Un changement arrête et relance le serveur RTSP tout
 de suite (les clients connectés sont déconnectés). `restream_error` (lecture
 seule) : pourquoi elle est activée mais pas servie (adresse déjà utilisée…).
 
