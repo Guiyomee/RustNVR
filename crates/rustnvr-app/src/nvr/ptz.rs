@@ -5,7 +5,7 @@
 //! selector (MQTT).
 
 use super::Shared;
-use rustnvr_api::control::{ControlError, PtzCommand, PtzPreset};
+use rustnvr_api::control::{CameraDevice, ControlError, PtzCommand, PtzPreset};
 use rustnvr_core::NvrEvent;
 use rustnvr_core::config::OnvifTarget;
 use rustnvr_discovery::onvif::OnvifError;
@@ -30,9 +30,21 @@ const MAX_PRESET_NAME: usize = 64;
 pub(super) struct Sessions {
     open: tokio::sync::Mutex<HashMap<String, (String, Arc<PtzCamera>)>>,
     presets: std::sync::Mutex<HashMap<String, Vec<PtzPreset>>>,
+    /// The records of the cameras, as last read (any ONVIF camera, with or
+    /// without PTZ).
+    devices: std::sync::Mutex<HashMap<String, CameraDevice>>,
 }
 
 impl Sessions {
+    /// The record of `camera` as last read, if any.
+    pub(super) fn device(&self, camera: &str) -> Option<CameraDevice> {
+        self.devices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(camera)
+            .cloned()
+    }
+
     /// Names of the presets last read from `camera` (empty if never read).
     pub(super) fn preset_names(&self, camera: &str) -> Vec<String> {
         self.presets
@@ -99,6 +111,76 @@ async fn target(shared: &Shared, camera: &str) -> Result<OnvifTarget, ControlErr
                 "pas de port ONVIF réglé pour cette caméra (modifier la caméra → ONVIF)".into(),
             )
         })
+}
+
+/// Restarts `camera` through ONVIF (`SystemReboot`); the camera's message.
+/// Its PTZ session is forgotten: the camera drops it when it restarts.
+pub(super) async fn reboot(shared: &Shared, camera: &str) -> Result<String, ControlError> {
+    let target = target(shared, camera).await?;
+    let mut client = rustnvr_discovery::onvif::Client::new(target.credentials, REQUEST_TIMEOUT)
+        .map_err(control_error)?;
+    client
+        .sync_clock(&target.device_url)
+        .await
+        .map_err(control_error)?;
+    let message = client
+        .system_reboot(&target.device_url)
+        .await
+        .map_err(|e| match e {
+            OnvifError::Unauthorized => ControlError::Invalid(
+                "la caméra refuse le redémarrage : il faut un compte administrateur de la caméra"
+                    .into(),
+            ),
+            OnvifError::NotImplemented => {
+                ControlError::Invalid("la caméra ne permet pas le redémarrage par ONVIF".into())
+            }
+            other => control_error(other),
+        })?;
+    shared.ptz.open.lock().await.remove(camera);
+    info!(camera, %message, "camera restarting (ONVIF)");
+    Ok(message)
+}
+
+/// The record of `camera` (maker, model, firmware, serial number): the one
+/// kept, unless `fresh` or never read.
+pub(super) async fn device(
+    shared: &Shared,
+    camera: &str,
+    fresh: bool,
+) -> Result<CameraDevice, ControlError> {
+    if !fresh && let Some(d) = shared.ptz.device(camera) {
+        return Ok(d);
+    }
+    let target = target(shared, camera).await?;
+    let mut client = rustnvr_discovery::onvif::Client::new(target.credentials, REQUEST_TIMEOUT)
+        .map_err(control_error)?;
+    client
+        .sync_clock(&target.device_url)
+        .await
+        .map_err(control_error)?;
+    let info = client
+        .device_information(&target.device_url)
+        .await
+        .map_err(control_error)?;
+    let device = CameraDevice {
+        manufacturer: info.manufacturer,
+        model: info.model,
+        firmware: info.firmware,
+        serial: info.serial,
+        hardware: info.hardware,
+    };
+    let changed = shared
+        .ptz
+        .devices
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(camera.to_owned(), device.clone())
+        .is_none_or(|old| old != device);
+    // Home Assistant shows the maker and the model of the device.
+    if changed {
+        let _ = shared.engine.events.send(NvrEvent::CamerasChanged);
+    }
+    Ok(device)
 }
 
 /// The session of `camera`, opened if needed (`fresh`: opened again).
@@ -196,6 +278,16 @@ pub(super) async fn read_all(shared: Arc<Shared>) {
             .collect()
     };
     for camera in cameras {
+        match device(&shared, &camera, true).await {
+            Ok(d) => info!(
+                camera,
+                manufacturer = d.manufacturer.as_deref().unwrap_or("?"),
+                model = d.model.as_deref().unwrap_or("?"),
+                firmware = d.firmware.as_deref().unwrap_or("?"),
+                "camera record read (ONVIF)"
+            ),
+            Err(e) => debug!(camera, error = %e, "camera record not read"),
+        }
         match presets(&shared, &camera).await {
             Ok(p) => info!(camera, presets = p.len(), "PTZ presets read"),
             Err(e) => debug!(camera, error = %e, "PTZ presets not read"),

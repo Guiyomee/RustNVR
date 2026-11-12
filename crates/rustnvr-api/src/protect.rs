@@ -58,12 +58,18 @@ fn database(state: &ApiState) -> Result<&Database, ApiError> {
 /// `GET /protected`: every protected period, most recent first.
 pub(crate) async fn list(
     State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
 ) -> Result<Json<Vec<ProtectedDto>>, ApiError> {
     let list = database(&state)?
         .protected_ranges()
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    Ok(Json(list.into_iter().map(ProtectedDto::from).collect()))
+    Ok(Json(
+        list.into_iter()
+            .filter(|p| crate::auth::sees(principal.as_ref(), &p.camera))
+            .map(ProtectedDto::from)
+            .collect(),
+    ))
 }
 
 /// `POST /protected`: protects a period of a camera.

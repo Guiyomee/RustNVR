@@ -59,6 +59,8 @@ export function demoCamera(spec: DemoCameraSpec, now: number, jitter: number): C
     id: spec.id,
     name: spec.name,
     enabled: true,
+    paused: false,
+    night: false,
     recording_enabled: true,
     has_sub_stream: true,
     endpoint: 'rtsp://demo.invalid:554',

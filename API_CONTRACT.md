@@ -21,7 +21,20 @@ des identifiants HTTP Basic d'un compte (scripts), sauf `/auth/status`,
 ne contiennent aucune donnée). Rôles : `admin` (tout) et `viewer` (lecture
 seule : `GET`, plus sa déconnexion, son mot de passe et l'ouverture du
 direct WebRTC `POST /cameras/{id}/live/webrtc` ; sinon 403 ; l'interface grise
-alors toutes les commandes de modification). Toute
+alors toutes les commandes de modification). Un lecteur ne lit pas non plus
+les réglages (`GET /settings`, `/mqtt`, `/storage/destinations`,
+`/devices/video`, `/audit`, comme déjà `/users`, `/webhooks` et `/logs` :
+403) : l'interface ne lui montre ni les pages Caméras et Stockage, ni les
+réglages. Il peut être limité à certaines caméras (`cameras` de son compte) :
+les autres n'existent pas pour lui — 404 sur `/cameras/{id}…`,
+`/recordings/{destination}/{caméra}/…` et `/ai/captures/{caméra}/…`, et
+absentes de toutes les listes (`/cameras`, `/events`, `/events/stats`,
+`/crossings`, `/protected`, `/ai/captures`, le détail par caméra de
+`/storage`, les messages du WebSocket) ; un changement de ces droits
+s'applique à la requête suivante, sans reconnexion ; les connexions déjà
+ouvertes suivent sous 5 s (WebSocket d'état : nouvelle liste `cameras` ;
+direct vidéo, MSE ou WebRTC, d'une caméra retirée : fermé, avec la raison
+`access to this camera withdrawn`). Toute
 requête qui modifie quelque chose et porte un en-tête `Origin` d'un autre site
 est refusée (403). 5 échecs de connexion en 15 min, par adresse ou par compte,
 bloquent les essais 15 min (429). Au démarrage, si la base n'a aucun compte et
@@ -37,13 +50,25 @@ les cookies sont alors `Secure` et le direct passe en `wss://`.
 
 | Route | Accès | Rôle |
 |---|---|---|
-| `GET /auth/status` | public | `{ "required", "accounts", "setup", "user": { "username", "role" } \| null }` |
+| `GET /auth/status` | public | `{ "required", "accounts", "setup", "user": { "username", "role", "cameras" } \| null }` (`cameras` : caméras visibles, `null` = toutes) |
 | `POST /auth/login` | public | `{ "username", "password" }` → utilisateur + cookie ; 401 `bad_credentials`, 429 |
 | `POST /auth/logout` | session | 204, cookie effacé |
 | `POST /auth/setup` | public, sans aucun compte | crée le premier administrateur et ouvre sa session ; 409 ensuite |
 | `PUT /auth/password` | session | `{ "current", "new" }` (8 caractères min.) ; ferme les sessions du compte |
-| `GET /users` · `POST /users` | admin | `[{ "username", "role", "created_ms" }]` ; corps `{ "username", "password", "role" }` |
-| `PUT /users/{nom}` · `DELETE /users/{nom}` | admin | `{ "password"?, "role"? }` ; ferme ses sessions ; 409 pour le dernier administrateur |
+| `GET /users` · `POST /users` | admin | `[{ "username", "role", "created_ms", "cameras" }]` ; corps `{ "username", "password", "role", "cameras"? }` |
+| `PUT /users/{nom}` · `DELETE /users/{nom}` | admin | `{ "password"?, "role"?, "cameras"? }` ; mot de passe ou rôle changé : ferme ses sessions ; `cameras` (lecteur) : liste d'identifiants existants, ou `null` pour toutes (400 pour une caméra inconnue), appliqué tout de suite ; 409 pour le dernier administrateur |
+| `GET /audit?before=&limit=` | admin | journal d'activité, du plus récent au plus ancien : `[{ "id", "at_ms", "username" \| null, "client", "action", "status" }]` ; `limit` 100 par défaut, 500 au plus ; `before` : `id` de la dernière ligne reçue, pour la page suivante |
+
+**Journal d'activité** (`capabilities.audit`, avec la base de données). Une
+ligne par connexion (`action` = `login`), connexion refusée (`login_failed`,
+page de connexion ou HTTP Basic, avec le nom saisi) et par requête qui
+modifie quelque chose (`action` = `MÉTHODE /chemin` sans `/api/v1`, par
+exemple `PUT /settings`, `POST /cameras/jardin/export`), avec le compte,
+l'adresse du client (celle que donne le proxy déclaré dans
+`web.trusted_proxies`) et le code HTTP de la réponse (une tentative refusée à
+un lecteur est notée avec son 403). Ne sont pas notés : les lectures (`GET`),
+l'ouverture du direct, les déplacements PTZ, les tests de connexion et la
+recherche sur le réseau. Gardé 180 jours et 50 000 lignes au plus.
 
 **Erreurs.** Code HTTP approprié et corps :
 
@@ -83,7 +108,7 @@ Ce que le serveur sait réellement faire. L'interface s'en sert pour afficher
 { "api_version": 1, "live_video": true, "live_transcode": true, "live_webrtc": true, "snapshots": true, "events": true,
   "motion_detection": true, "camera_management": true, "camera_probe": true,
   "recordings": true, "export": true, "protect": true, "retention": true, "settings_write": true,
-  "mqtt": true, "ai": false, "users": true, "backup": true, "ptz": true,
+  "mqtt": true, "ai": false, "users": true, "audit": true, "backup": true, "ptz": true,
   "usb_cameras": true, "restream_port": 8554, "restream_local_only": false }
 ```
 
@@ -204,7 +229,13 @@ conteneur ou du service, `null` sans limite. Échantillonnés toutes les 2 s
 ```
 
 `status` : `online` | `connecting` | `retrying` | `idle` | `stopped` |
-`disabled`. `codec`, `width`, `height`, `fps`, `bitrate_kbps` ne sont
+`disabled` | `paused` (`paused: true`, voir `PUT /cameras/{id}/pause`).
+`night` : `true` quand la caméra filme en vision nocturne (son image est en
+noir et blanc : infrarouge), `false` en couleur, `null` tant que ce n'est
+pas connu (caméra arrêtée ou hors ligne, FFmpeg absent). Mesuré chaque
+minute sur une image clé du sous-flux (sinon du flux principal) réduite à
+32 × 18 pixels ; l'état change après deux mesures d'affilée de l'autre côté
+des seuils (couleur moyenne ≤ 2,5 : nuit, ≥ 5 : jour). `codec`, `width`, `height`, `fps`, `bitrate_kbps` ne sont
 renseignés qu'en `online`. `recorder` est `null` si l'enregistrement est
 désactivé. 404 si la caméra n'existe pas.
 
@@ -662,6 +693,39 @@ Dans `GET /cameras` : `record_audio` (réglage) et `audio` (son reçu de la
 caméra, par exemple `"mp4a.40.2 16000 Hz"`, ou `"opus 48000 Hz"` pour un son
 G.711 converti, ou `null` hors ligne ou sans son enregistrable).
 
+### `GET /api/v1/cameras/{id}/device`
+
+La fiche de la caméra, lue par ONVIF (`GetDeviceInformation`) :
+`{ "manufacturer": "EZVIZ", "model": "CS-C6N", "firmware": "V5.3.0",
+"serial": "Q12345678", "hardware": "88" }` (`null` : non donné par la
+caméra). Lue au démarrage pour chaque caméra dont le port ONVIF est réglé,
+puis gardée ; `?refresh=1` la relit. 400 avec la raison sans port ONVIF ou
+sans réponse ONVIF. La fiche sert aussi à Home Assistant : fabricant, modèle,
+firmware (`sw_version`) et numéro de série de l'appareil de la caméra, à la
+place de « RustNVR / Caméra ».
+
+### `POST /api/v1/cameras/{id}/reboot`
+
+Redémarre la caméra elle-même par ONVIF (`SystemReboot`) : réponse
+`{ "message": "Rebooting in 30 seconds" }` (ce que dit la caméra, parfois
+vide). Seulement pour une caméra dont le port ONVIF est réglé (`ptz: true`) ;
+il faut un compte administrateur de la caméra. 400 avec la raison sinon
+(« la caméra refuse le redémarrage : il faut un compte administrateur de la
+caméra », pas de port ONVIF, pas de réponse ONVIF). Administrateur ; aussi
+par MQTT (`<p>/<caméra>/reboot`, bouton « Redémarrer la caméra »).
+
+### `PUT /api/v1/cameras/{id}/pause`
+
+Corps `{ "paused": true }` : met la caméra en pause, ou la reprend
+(`false`), et renvoie la caméra. En pause, elle est arrêtée comme une caméra
+désactivée : ni connexion, ni enregistrement, ni détection, ni direct, ni
+republication ; `paused: true`, `status: "paused"`. La pause n'est **jamais
+enregistrée** : elle dure jusqu'à la reprise ou jusqu'au redémarrage de
+RustNVR. Vaut aussi pour les caméras de `config.toml`. Une caméra désactivée
+dans sa configuration (`enabled: false`) reste arrêtée une fois reprise.
+Administrateur ; aussi par MQTT (`<p>/<caméra>/active/set`, entité « Caméra
+active »). 404 pour une caméra inconnue.
+
 ### `GET /api/v1/cameras/{id}/ptz` · `POST …/ptz/move` · `POST …/ptz/stop` · presets
 
 Pilotage d'une caméra motorisée en **ONVIF PTZ** (capacité `ptz`, caméras
@@ -694,15 +758,29 @@ voir `docs/MQTT.md`), lus au démarrage et après chaque changement.
 
 ### `GET /api/v1/webhooks` · `PUT /api/v1/webhooks` · `POST /api/v1/webhooks/test`
 
-Adresses appelées (HTTP POST, JSON) sur les événements de détection.
+Adresses appelées (HTTP POST) sur les événements : en JSON, ou en message
+Discord, notification ntfy ou message Telegram.
 Réservé aux administrateurs, lecture comprise (les adresses portent souvent un
 jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
 `config.toml` ; appliqués sans redémarrage. 20 au plus.
 
 ```json
-[{ "name": "n8n", "url": "https://n8n.maison/webhook/abc", "enabled": true,
-   "cameras": [], "objects": ["person"], "events": ["motion", "objects", "end"], "image": true }]
+[{ "name": "n8n", "url": "https://n8n.maison/webhook/abc", "kind": "json", "enabled": true,
+   "cameras": [], "objects": ["person"], "events": ["motion", "objects", "end"], "image": true },
+ { "name": "Téléphone", "url": "https://ntfy.sh/maison-a7k2p9", "kind": "ntfy", "token": "tk_…", … },
+ { "name": "Telegram", "url": "", "kind": "telegram", "token": "123456789:AAH…", "chat_id": "-1001234567890", … }]
 ```
+
+- `kind` : `json` (le JSON ci-dessous), `discord`, `ntfy` ou `telegram`.
+  Toujours renvoyé par `GET` ; absent d'un webhook enregistré avant (ou
+  envoyé sans), il vaut `discord` pour une adresse Discord, `json` sinon.
+  `discord` exige une adresse Discord. `ntfy` : `url` est le sujet
+  (`https://ntfy.sh/<sujet>` ou un serveur ntfy à soi), `token` un jeton
+  d'accès facultatif (`Authorization: Bearer`). `telegram` : `url` inutilisée,
+  `token` le jeton du bot (`123456789:AA…`, donné par @BotFather) et
+  `chat_id` la conversation (un nombre, négatif pour un groupe, ou
+  `@canal`) ; 400 sinon. `token` est un secret, comme l'adresse : jamais
+  écrit dans le journal (le journal nomme `api.telegram.org` pour Telegram).
 
 - `events` : `motion` (une fois l'image de l'événement prise, ≈ 1 s après le
   début), `objects` (objets reconnus, image avec les cadres), `end` (fin, sans
@@ -711,7 +789,32 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   et `camera` (flux principal d'une caméra coupé depuis **1 minute**, puis de
   nouveau en ligne ; une reconnexion plus courte n'est pas annoncée, et le
   retour ne l'est qu'après une annonce « hors ligne » ; filtré par
-  `cameras`, pas par `objects`). Par défaut `motion` et `objects`.
+  `cameras`, pas par `objects`) et `recording` (l'enregistrement d'une
+  caméra échoue : disque plein, erreur d'écriture… ; seule la première
+  erreur est annoncée, RustNVR réessayant seul, puis le retour au premier
+  segment de nouveau écrit, donc jusqu'à une durée de segment plus tard ;
+  filtré par `cameras`, pas par `objects`). Par défaut `motion` et
+  `objects`.
+- `messages` (facultatif, Discord, ntfy et Telegram ; le JSON ne change
+  jamais) : par type d'appel, `{ "title", "text", "priority", "silent" }`,
+  par exemple `"messages": { "objects": { "title": "{objet} devant
+  {camera}", "priority": 5 } }`. Un titre ou un texte absent ou vide garde
+  le message habituel ; 500 caractères au plus. Variables : `{camera}`,
+  `{heure}`, `{date}` (heure locale du serveur) partout ; événements
+  `{objet}`, `{objets}`, `{zones}`, `{duree}` (fin) ; passages `{ligne}`,
+  `{sens}`, `{compte}`, `{objet}` ; stockage `{stockage}`, `{etat}`
+  (« dégradé » / « rétabli »), `{erreur}` ; caméra `{etat}` (« hors ligne » /
+  « rétablie »), `{erreur}`, `{duree}` ; enregistrement `{etat}` (« en
+  erreur » / « rétabli »), `{erreur}`, `{echecs}`, `{duree}`. `{durée}`,
+  `{échecs}` et `{caméra}` sont aussi compris ; une variable inconnue reste
+  telle quelle. `priority` : priorité ntfy de 1 à 5 (absente : haute pour
+  une panne, celle de ntfy sinon) ; `silent` : Telegram sans son
+  (`disable_notification`).
+- `cooldown_minutes` (facultatif, 0 à 1 440, 0 par défaut) : au plus un
+  événement appelé par caméra pendant ce délai. Le premier passe avec tous
+  ses appels (`motion`, `objects`, `end`), les suivants sont sautés en
+  entier ; les passages de ligne ont leur propre délai ; `storage`,
+  `camera` et `recording` ne sont jamais retenus.
 - `cameras` vide : toutes ; `objects` vide : tous les événements. Avec des
   objets, les appels `motion` sont sautés, `objects` / `end` n'ont lieu que
   si l'un de ces objets a été reconnu, et `crossing` seulement pour un passage
@@ -729,6 +832,12 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   (`offline_ms` : durée sans image ; `error` : dernière erreur de connexion,
   sans identifiants). Discord : « Caméra hors ligne · Garage » avec la durée
   et l'erreur, puis « Caméra rétablie · Garage » avec la durée de la coupure.
+  D'un enregistrement : `{ "type": "recording", "camera", "camera_name",
+  "recording": { "ok", "at_ms", "error", "errors", "failed_ms" }, "rustnvr" }`
+  (`ok` : `false` à l'échec, avec `error` ; `true` au retour, avec `errors`,
+  le nombre d'échecs, et `failed_ms`, la durée depuis le premier). Discord :
+  « Erreur d'enregistrement · Garage » avec l'erreur, puis « Enregistrement
+  rétabli · Garage ».
 - Corps envoyé : `{ "type", "camera", "camera_name", "event": { "id", "kind",
   "start_ms", "end_ms", "score", "zones", "objects" }, "image":
   "data:image/jpeg;base64,…" | null, "rustnvr" }`.
@@ -739,10 +848,21 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   l'événement · Jardin », objets
   et scores, zones, durée, heure de l'événement, numéro). L'image est envoyée
   en pièce jointe (`multipart/form-data`, champs `payload_json` et
-  `files[0]` = `evenement.jpg`) et affichée dans l'embed.
+  `files[0]` = `evenement.jpg`) et affichée dans l'embed. Ce même message
+  (titre, texte) sert à ntfy et à Telegram, pour tous les types d'appel :
+- ntfy : `POST <sujet>?title=…` (titre et réglages dans l'adresse, qui
+  accepte l'UTF-8 contrairement aux en-têtes), le texte en corps ; avec
+  l'image, l'image en corps (pièce jointe `evenement.jpg`) et le texte dans
+  `message=`. Échec ou panne (stockage, caméra, enregistrement) :
+  `tags=rotating_light&priority=high` ; retour à la normale :
+  `tags=white_check_mark`.
+- Telegram : `sendMessage` (`parse_mode` HTML, titre en gras, puis le texte)
+  ou, avec l'image, `sendPhoto` (`multipart/form-data`, la photo et ce texte
+  en légende, coupée à 1 024 caractères).
 - Une réponse en erreur est rapportée avec sa raison quand le serveur en
-  donne une (champ `message` d'une réponse JSON, ou début du texte, 160
-  caractères au plus) : `"réponse 400 : Cannot send an empty message"`.
+  donne une (champ `message` d'une réponse JSON, `description` pour
+  Telegram, `error` pour ntfy, ou début du texte, 160 caractères au plus) :
+  `"réponse 400 : Cannot send an empty message"`.
 - Chaque webhook a sa propre file (50 appels) et son propre envoi : une
   adresse lente ou injoignable ne retarde ni RustNVR ni les autres. Délai de
   10 s, un nouvel essai après 5 s, puis un avertissement dans le journal avec

@@ -5,6 +5,7 @@
 mod backups;
 mod detection;
 mod index;
+mod night;
 mod ptz;
 mod replay;
 mod restream;
@@ -41,7 +42,7 @@ use rustnvr_stream::{
     BackoffConfig, FrameFanout, LiveTap, SessionOptions, StreamHandle, StreamMetricsSnapshot,
     SupervisorConfig, spawn_supervisor,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -441,6 +442,11 @@ struct State {
     storage: Storage,
     /// Motion detection settings, by camera (absent: defaults, disabled).
     motion: HashMap<CameraId, MotionSettings>,
+    /// Cameras paused from the interface or MQTT: stopped until RustNVR
+    /// restarts (never stored) or the pause is lifted.
+    paused: HashSet<CameraId>,
+    /// Cameras whose night vision is known (see `night`): true in night vision.
+    night: HashMap<CameraId, bool>,
 }
 
 fn stream_source(h: &StreamHandle) -> StreamSource {
@@ -451,6 +457,11 @@ fn stream_source(h: &StreamHandle) -> StreamSource {
 }
 
 impl State {
+    /// Whether `cam` should run: enabled, and not paused.
+    fn runs(&self, cam: &CameraConfig) -> bool {
+        cam.enabled && !self.paused.contains(&cam.id)
+    }
+
     /// What the API shows for each camera.
     fn sources(&self) -> Vec<CameraSource> {
         self.configs
@@ -463,6 +474,8 @@ impl State {
                     id: cam.id.clone(),
                     name: cam.name.clone(),
                     enabled: cam.enabled,
+                    paused: self.paused.contains(&cam.id),
+                    night: self.night.get(&cam.id).copied(),
                     recording_enabled: cam.record.enabled,
                     has_sub_stream: cam.sub.is_some(),
                     endpoint: match &cam.usb {
@@ -683,7 +696,7 @@ async fn set_record_mode(
     if let Some(old) = state.running.remove(&cam.id) {
         old.stop().await;
     }
-    if cam.enabled {
+    if state.runs(&cam) {
         let rt = shared
             .engine
             .start(&cam, &state.storage, state.motion.get(&cam.id))
@@ -809,6 +822,8 @@ impl Nvr {
                 running,
                 storage,
                 motion: motion_settings,
+                paused: HashSet::new(),
+                night: HashMap::new(),
             }),
             api,
             managed_cameras_file: config.managed_cameras_file.clone(),
@@ -860,6 +875,7 @@ impl Nvr {
                 cancel.child_token(),
             )),
             tokio::spawn(ptz::read_all(shared.clone())),
+            tokio::spawn(night::run(shared.clone(), cancel.child_token())),
         ];
         if let Some(db) = &database {
             background.push(tokio::spawn(index::run_indexer(
@@ -1077,6 +1093,14 @@ async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken) {
                 && n > 0
             {
                 info!(sessions = n, "expired login sessions removed");
+            }
+            let audit_before = unix_now_ms()
+                - i64::try_from(rustnvr_api::auth::AUDIT_DAYS * 86_400_000).unwrap_or(i64::MAX);
+            if let Err(e) = db
+                .purge_audit(audit_before, rustnvr_api::auth::AUDIT_LINES)
+                .await
+            {
+                warn!(error = %e, "cannot purge the activity log");
             }
             match db.delete_events_before(before).await {
                 Ok(0) => {}
@@ -1350,7 +1374,9 @@ impl Controller {
             .configs
             .iter()
             .filter(|c| {
-                c.enabled && c.record.enabled && c.record.destinations.iter().any(|d| d == dest_id)
+                state.runs(c)
+                    && c.record.enabled
+                    && c.record.destinations.iter().any(|d| d == dest_id)
             })
             .cloned()
             .collect();
@@ -1460,7 +1486,7 @@ impl NvrControl for Controller {
             if let Some(old) = state.running.remove(&cam.id) {
                 old.stop().await;
             }
-            if cam.enabled {
+            if state.runs(&cam) {
                 let rt = self
                     .0
                     .engine
@@ -1736,6 +1762,44 @@ impl NvrControl for Controller {
         })
     }
 
+    fn set_camera_paused(
+        &self,
+        raw_id: String,
+        paused: bool,
+    ) -> BoxFuture<'_, Result<(), ControlError>> {
+        Box::pin(async move {
+            let mut state = self.0.state.lock().await;
+            let cam = state
+                .configs
+                .iter()
+                .find(|c| c.id.as_str() == raw_id)
+                .cloned()
+                .ok_or_else(|| ControlError::NotFound(format!("aucune caméra {raw_id:?}")))?;
+            if state.paused.contains(&cam.id) == paused {
+                return Ok(());
+            }
+            if paused {
+                state.paused.insert(cam.id.clone());
+                if let Some(old) = state.running.remove(&cam.id) {
+                    old.stop().await;
+                }
+            } else {
+                state.paused.remove(&cam.id);
+                if state.runs(&cam) && !state.running.contains_key(&cam.id) {
+                    let rt = self
+                        .0
+                        .engine
+                        .start(&cam, &state.storage, state.motion.get(&cam.id))
+                        .map_err(internal)?;
+                    state.running.insert(cam.id.clone(), rt);
+                }
+            }
+            info!(camera = %cam.id, paused, "camera paused until restart, or resumed");
+            self.0.publish(&state);
+            Ok(())
+        })
+    }
+
     fn set_detection_paused(&self, paused: bool) -> BoxFuture<'_, Result<(), ControlError>> {
         Box::pin(async move { detection::set_detection_paused(&self.0, paused).await })
     }
@@ -1888,6 +1952,18 @@ impl NvrControl for Controller {
         Box::pin(async move { ptz::presets(&self.0, &camera).await })
     }
 
+    fn camera_device(
+        &self,
+        camera: String,
+        fresh: bool,
+    ) -> BoxFuture<'_, Result<rustnvr_api::control::CameraDevice, ControlError>> {
+        Box::pin(async move { ptz::device(&self.0, &camera, fresh).await })
+    }
+
+    fn reboot_camera(&self, camera: String) -> BoxFuture<'_, Result<String, ControlError>> {
+        Box::pin(async move { ptz::reboot(&self.0, &camera).await })
+    }
+
     fn ptz_command(
         &self,
         camera: String,
@@ -1898,11 +1974,15 @@ impl NvrControl for Controller {
 
     fn webhooks(&self) -> BoxFuture<'_, Vec<rustnvr_core::config::WebhookConfig>> {
         Box::pin(async move {
+            // The form written out: the interface shows the type of each.
             self.0
                 .webhooks
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
-                .clone()
+                .iter()
+                .cloned()
+                .map(rustnvr_core::config::WebhookConfig::with_kind)
+                .collect()
         })
     }
 

@@ -9,6 +9,60 @@ précautions) sont sur la page de chaque
 
 Rien pour l'instant.
 
+## 2026.11.07 (2026-11-12)
+
+### Nouveautés
+- **Fiche de la caméra** (onglet « Informations techniques ») : fabricant,
+  modèle, firmware et numéro de série, lus par ONVIF ; Home Assistant les
+  affiche aussi sur l'appareil de la caméra.
+- **Redémarrer une caméra** par ONVIF, depuis sa page ou un bouton dans Home
+  Assistant (port ONVIF réglé, compte administrateur de la caméra).
+- **Vision nocturne** : RustNVR voit sur l'image quand une caméra passe en
+  infrarouge (noir et blanc), quelle que soit sa marque ; étiquette dans
+  l'interface et capteur « Vision nocturne » dans Home Assistant.
+- **Mettre une caméra en pause** (page de la caméra, liste des caméras, et
+  interrupteur « Caméra active » dans Home Assistant) : plus de connexion,
+  d'enregistrement ni de détection jusqu'à la reprise ou au prochain
+  redémarrage de RustNVR. Demandé sur le forum HACF.
+- **Droits par caméra** (Paramètres → Utilisateurs) : un compte lecteur peut
+  être limité à certaines caméras. Les autres n'existent pas pour lui : ni
+  direct, ni enregistrements, ni événements, ni images, ni exports. Appliqué
+  tout de suite, sans reconnexion.
+- **Notifications ntfy et Telegram** (Paramètres → Webhooks) : chaque webhook
+  a maintenant un type, choisi en tête du formulaire — webhook JSON, Discord,
+  **ntfy** (une notification sur le téléphone, depuis ntfy.sh ou votre propre
+  serveur) ou **Telegram** (un message d'un bot). Titre lisible (« Personne ·
+  Jardin »), détail et image jointe, pour tous les types d'appel. Les
+  webhooks Discord existants sont reconnus tels quels.
+- **Notifications personnalisées** (Paramètres → Webhooks → « Personnaliser
+  les messages ») : titre et texte au choix pour chaque type d'appel, avec
+  des variables (`{objet} devant {camera} à {heure}`), priorité ntfy et
+  envoi sans son sur Telegram. Et pour tous les webhooks : **au plus une
+  notification toutes les X minutes par caméra**, pour ne pas en recevoir dix
+  quand quelqu'un traîne devant la caméra (les pannes passent toujours).
+- **Webhook « Erreur d'enregistrement »** : un appel quand l'enregistrement
+  d'une caméra échoue (disque plein, erreur d'écriture…), un seul même si
+  RustNVR réessaie, puis un autre quand il reprend. Message Discord aussi.
+- **Activité des comptes** (Paramètres, administrateurs) : qui s'est connecté,
+  depuis quelle adresse, les connexions refusées, et qui a modifié quoi
+  (réglages, caméras, comptes, exports). Gardé 180 jours.
+
+### Documentation
+- Le guide d'installation et d'utilisation est maintenant le
+  **[wiki](https://github.com/Guiyomee/RustNVR/wiki)**, en français et en anglais : Docker, Proxmox,
+  Debian / Ubuntu, caméras, stockage, détection et IA, notifications, Home
+  Assistant, comptes et sécurité, dépannage. `docs/DOCKER.md`,
+  `docs/INSTALLATION.md` et `docs/HOME_ASSISTANT.md` y renvoient.
+
+### Corrections
+- La création d'un compte affichait « Réponse du serveur illisible » alors
+  que le compte était bien créé.
+
+### Sécurité
+- Un compte lecteur n'a plus les pages Caméras et Stockage, et ses
+  Paramètres se limitent à l'apparence et à son mot de passe ; le serveur ne
+  lui donne plus les réglages (général, MQTT, points de stockage).
+
 ## 2026.11.06 (2026-11-11)
 
 ### Nouveautés
@@ -34,14 +88,14 @@ Rien pour l'instant.
   comme une caméra.
 - **PTZ** : une caméra non motorisée qui a un port ONVIF (sonnette, caméra
   fixe) n'affiche plus de panneau « Pilotage PTZ » en erreur.
-
-### Autres
-- Dépendances à jour (jiff, toml, md-5, lucide-react, tailwindcss), proposées
-  par Dependabot ; quatre bibliothèques devenues inutiles disparaissent.
 - Un sous-flux ajouté (ou remis) à une caméra existante sans retaper le mot
   de passe utilise maintenant celui qui est enregistré, comme le formulaire
   l'annonce (« inchangé ») ; il partait sans mot de passe et la caméra le
   refusait indéfiniment.
+
+### Autres
+- Dépendances à jour (jiff, toml, md-5, lucide-react, tailwindcss), proposées
+  par Dependabot ; quatre bibliothèques devenues inutiles disparaissent.
 
 ## 2026.11.05 (2026-11-09)
 

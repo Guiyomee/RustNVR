@@ -63,8 +63,9 @@ curl -fsSLO https://raw.githubusercontent.com/Guiyomee/RustNVR/main/packaging/in
 sudo bash install.sh
 ```
 
-Puis `https://<serveur>:8080/`, compte `admin`. Détails :
-[Docker](docs/DOCKER.md) · [Installation et Proxmox](docs/INSTALLATION.md).
+Puis `https://<serveur>:8080/`, compte `admin`. Le guide complet est dans
+le **[wiki](https://github.com/Guiyomee/RustNVR/wiki)** : [Docker](https://github.com/Guiyomee/RustNVR/wiki/FR-Docker) ·
+[Proxmox](https://github.com/Guiyomee/RustNVR/wiki/FR-Proxmox) · [Debian / Ubuntu](https://github.com/Guiyomee/RustNVR/wiki/FR-Debian).
 
 ## Fonctions
 
@@ -141,8 +142,10 @@ plaques, re-diffusion des flux. RustNVR vise l'enregistrement fiable et
 
 ## Documentation
 
-**[Docker](docs/DOCKER.md)** · **[Installation, Proxmox](docs/INSTALLATION.md)** ·
-**[Home Assistant](docs/HOME_ASSISTANT.md)** · [MQTT](docs/MQTT.md) ·
+**[Wiki : guide d'installation et d'utilisation](https://github.com/Guiyomee/RustNVR/wiki)** (caméras, stockage,
+détection, notifications, Home Assistant, comptes, dépannage).
+
+Référence : [MQTT](docs/MQTT.md) ·
 [IA](docs/AI.md) · [Fonctionnalités](docs/FONCTIONNALITES.md) ·
 [Développer](docs/DEVELOPPEMENT.md) · [Versions](CHANGELOG.md) · [Architecture](ARCHITECTURE.md) ·
 [Interface](FRONTEND.md) · [API](API_CONTRACT.md) ·

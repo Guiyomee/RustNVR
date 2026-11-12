@@ -33,6 +33,14 @@ export function useReadOnly(): string | null {
   return user?.role === 'viewer' ? t('Compte en lecture seule (rôle lecteur) : seuls les administrateurs peuvent modifier.', 'Read-only account (viewer role): only administrators can make changes.') : null
 }
 
+/**
+ * True for a viewer account: it has no page to manage the cameras, the
+ * storage or the settings (the server refuses them too).
+ */
+export function useIsViewer(): boolean {
+  return useAuth().user?.role === 'viewer'
+}
+
 const inputCls = 'mt-1 h-10 w-full rounded-md border border-line bg-bg-2 px-3 text-sm text-fg outline-none focus:border-accent'
 
 function AuthForm({ setup, onDone }: { setup: boolean; onDone: () => void }) {

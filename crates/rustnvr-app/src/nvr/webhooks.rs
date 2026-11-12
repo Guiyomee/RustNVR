@@ -1,9 +1,13 @@
 //! Webhooks: an HTTP POST with the event as JSON (and its picture) to the
 //! configured addresses, on motion, recognized objects and end of an event,
 //! on crossings of lines, when a recording destination fails or recovers,
-//! and when a camera goes offline or comes back.
+//! when a camera goes offline or comes back, and when the recording of a
+//! camera fails or works again.
 //! Discord webhooks, which refuse that JSON, get a Discord message instead
-//! (an embed, the picture attached).
+//! (an embed, the picture attached); ntfy topics a notification (the
+//! picture attached), Telegram bots a message to their chat (a photo with
+//! its caption). These three share one message (title, text, colour),
+//! written as a Discord embed and rendered for each service when sent.
 //!
 //! Each webhook has its own bounded queue, served by its own task: a slow or
 //! unreachable address delays neither the NVR nor the other webhooks.
@@ -13,7 +17,7 @@ use super::Shared;
 use base64::Engine as _;
 use bytes::Bytes;
 use rustnvr_api::{ControlError, WebhookTestResult};
-use rustnvr_core::config::{MANAGED_WEBHOOKS_FILE, WebhookConfig, WebhookEvent};
+use rustnvr_core::config::{MANAGED_WEBHOOKS_FILE, WebhookConfig, WebhookEvent, WebhookKind};
 use rustnvr_core::{CameraId, DetectionEvent, NvrEvent, StreamRole, StreamState};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -37,8 +41,12 @@ const RETRY_AFTER: Duration = Duration::from_secs(5);
 /// Events followed at the same time, at most (older ones forgotten).
 const FOLLOWED: usize = 500;
 
-/// Name of the picture attached to Discord messages.
+/// Name of the picture attached to Discord, ntfy and Telegram messages.
 const DISCORD_PICTURE: &str = "evenement.jpg";
+/// Telegram's bot API.
+const TELEGRAM_API: &str = "https://api.telegram.org";
+/// Longest caption of a Telegram photo (characters).
+const TELEGRAM_CAPTION: usize = 1024;
 /// Characters of an error answer quoted in the error, at most.
 const REASON_CHARS: usize = 160;
 
@@ -46,8 +54,279 @@ const REASON_CHARS: usize = 160;
 enum Body {
     /// RustNVR's JSON (n8n, Node-RED, Home Assistant, scripts…).
     Json(Value),
-    /// A Discord message (`payload_json`) and its picture, attached.
-    Discord { payload: Value, jpeg: Option<Bytes> },
+    /// A message and its picture: a Discord message (`payload_json`, the
+    /// picture attached), rendered for ntfy and Telegram when sent.
+    Message {
+        payload: Value,
+        jpeg: Option<Bytes>,
+        delivery: Delivery,
+    },
+}
+
+/// How a message is delivered, as chosen for its kind of call.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Delivery {
+    /// ntfy priority (1 to 5); `None`: high for a failure, else ntfy's.
+    priority: Option<u8>,
+    /// Telegram: without a sound.
+    silent: bool,
+}
+
+/// Values of the variables of a custom message (`{camera}`…).
+type Vars = Vec<(&'static str, String)>;
+
+/// Variables written with an accent, as French users type them.
+const ACCENTED: [(&str, &str); 3] = [
+    ("{durée}", "{duree}"),
+    ("{échecs}", "{echecs}"),
+    ("{caméra}", "{camera}"),
+];
+
+/// `template` with its variables replaced; unknown ones stay as written.
+fn render(template: &str, vars: &[(&'static str, String)]) -> String {
+    let mut out = template.to_owned();
+    for (accented, plain) in ACCENTED {
+        out = out.replace(accented, plain);
+    }
+    for (name, value) in vars {
+        out = out.replace(&format!("{{{name}}}"), value);
+    }
+    out
+}
+
+/// At most `max` characters of `text`.
+fn cut(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
+/// The message for `hook` and a call of `kind`: `payload` (the default
+/// message) with the title and text chosen for that kind, if any.
+fn message(
+    hook: &WebhookConfig,
+    kind: WebhookEvent,
+    mut payload: Value,
+    jpeg: Option<Bytes>,
+    vars: &[(&'static str, String)],
+) -> Body {
+    let chosen = hook.messages.get(&kind);
+    if let Some(m) = chosen {
+        let embed = &mut payload["embeds"][0];
+        if let Some(title) = m.title.as_deref().filter(|t| !t.trim().is_empty()) {
+            // Discord's limits.
+            embed["title"] = cut(render(title.trim(), vars).trim(), 256).into();
+        }
+        if let Some(text) = m.text.as_deref().filter(|t| !t.trim().is_empty()) {
+            embed["description"] = cut(render(text.trim(), vars).trim(), 4000).into();
+        }
+    }
+    Body::Message {
+        payload,
+        jpeg,
+        delivery: Delivery {
+            priority: chosen.and_then(|m| m.priority),
+            silent: chosen.is_some_and(|m| m.silent),
+        },
+    }
+}
+
+/// `{heure}` and `{date}` of `at_ms`, in the server's local time.
+fn when_vars(at_ms: i64) -> Vars {
+    let local =
+        jiff::Timestamp::from_millisecond(at_ms).map(|t| t.to_zoned(jiff::tz::TimeZone::system()));
+    let format = |f: &str| {
+        local
+            .as_ref()
+            .map(|t| t.strftime(f).to_string())
+            .unwrap_or_default()
+    };
+    vec![("heure", format("%H:%M:%S")), ("date", format("%d/%m/%Y"))]
+}
+
+/// Variables of a call about an event.
+fn event_vars(event: &DetectionEvent, camera_name: &str) -> Vars {
+    let objet = match event.objects.first() {
+        Some(o) => object_name(&o.label).to_owned(),
+        None if event.kind == rustnvr_core::EventKind::Manual => "Événement manuel".to_owned(),
+        None => "Mouvement".to_owned(),
+    };
+    let objets = event
+        .objects
+        .iter()
+        .map(|o| {
+            format!(
+                "{} {:.0} %",
+                object_name(&o.label),
+                f64::from(o.score) * 100.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let mut vars = vec![
+        ("camera", camera_name.to_owned()),
+        ("objet", objet),
+        ("objets", objets),
+        ("zones", event.zones.join(", ")),
+        (
+            "duree",
+            event
+                .end_ms
+                .map(|end| duration_text(end - event.start_ms))
+                .unwrap_or_default(),
+        ),
+    ];
+    vars.extend(when_vars(event.end_ms.unwrap_or(event.start_ms)));
+    vars
+}
+
+/// Whether `hook` gets messages (Discord, ntfy, Telegram) rather than
+/// RustNVR's JSON.
+fn gets_messages(hook: &WebhookConfig) -> bool {
+    hook.kind() != WebhookKind::Json
+}
+
+/// Title, text and colour of a message (its Discord embed).
+struct Note {
+    title: String,
+    text: String,
+    color: u64,
+}
+
+fn note(payload: &Value) -> Note {
+    let embed = &payload["embeds"][0];
+    Note {
+        title: embed["title"].as_str().unwrap_or("RustNVR").to_owned(),
+        text: embed["description"].as_str().unwrap_or_default().to_owned(),
+        color: embed["color"].as_u64().unwrap_or(0),
+    }
+}
+
+/// Emoji tags of a ntfy notification, after the colour of the message:
+/// red (a failure), green (back to normal).
+fn ntfy_tags(color: u64) -> Option<&'static str> {
+    match color {
+        0xEF_44_44 => Some("rotating_light"),
+        0x22_C5_5E => Some("white_check_mark"),
+        _ => None,
+    }
+}
+
+/// The ntfy notification of a message: title and tags in the query (it
+/// takes UTF-8, headers do not); the text as the body, or, with a picture,
+/// the picture as the body (an attachment) and the text in the query.
+fn ntfy_request(
+    client: &reqwest::Client,
+    hook: &WebhookConfig,
+    payload: &Value,
+    jpeg: Option<&Bytes>,
+    delivery: Delivery,
+) -> Result<reqwest::RequestBuilder, Failure> {
+    let note = note(payload);
+    let mut url = reqwest::Url::parse(hook.url.trim()).map_err(|_| Failure {
+        status: None,
+        message: "adresse du sujet ntfy invalide".to_owned(),
+    })?;
+    let text = if note.text.is_empty() {
+        note.title.clone()
+    } else {
+        note.text.clone()
+    };
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("title", &note.title);
+        let tags = ntfy_tags(note.color);
+        if let Some(tags) = tags {
+            query.append_pair("tags", tags);
+        }
+        match delivery.priority {
+            Some(p) => {
+                query.append_pair("priority", &p.to_string());
+            }
+            None if tags == Some("rotating_light") => {
+                query.append_pair("priority", "high");
+            }
+            None => {}
+        }
+        if jpeg.is_some() {
+            query.append_pair("message", &text);
+            query.append_pair("filename", DISCORD_PICTURE);
+        }
+    }
+    let mut request = client.post(url);
+    if let Some(token) = hook
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        request = request.bearer_auth(token);
+    }
+    Ok(match jpeg {
+        Some(jpeg) => request.body(jpeg.clone()),
+        None => request.body(text),
+    })
+}
+
+/// `<`, `>` and `&` written for Telegram's HTML.
+fn telegram_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// The Telegram message of a message: the title in bold, then the text; a
+/// photo with this caption when there is a picture.
+fn telegram_request(
+    client: &reqwest::Client,
+    hook: &WebhookConfig,
+    payload: &Value,
+    jpeg: Option<&Bytes>,
+    delivery: Delivery,
+) -> Result<reqwest::RequestBuilder, Failure> {
+    let note = note(payload);
+    let token = hook.token.as_deref().unwrap_or_default().trim();
+    let chat = hook
+        .chat_id
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    // Cut before escaping, never in the middle of `&amp;`.
+    let room = TELEGRAM_CAPTION.saturating_sub(note.title.chars().count() + 2);
+    let body: String = note.text.chars().take(room).collect();
+    let mut text = format!("<b>{}</b>", telegram_escape(&note.title));
+    if !body.is_empty() {
+        text.push('\n');
+        text.push_str(&telegram_escape(&body));
+    }
+    let failed = || Failure {
+        status: None,
+        message: "échec de l'envoi".to_owned(),
+    };
+    Ok(match jpeg {
+        Some(jpeg) => {
+            let picture = reqwest::multipart::Part::bytes(jpeg.to_vec())
+                .file_name(DISCORD_PICTURE)
+                .mime_str("image/jpeg")
+                .map_err(|_| failed())?;
+            let form = reqwest::multipart::Form::new()
+                .text("chat_id", chat)
+                .text("caption", text)
+                .text("parse_mode", "HTML")
+                .text("disable_notification", delivery.silent.to_string())
+                .part("photo", picture);
+            client
+                .post(format!("{TELEGRAM_API}/bot{token}/sendPhoto"))
+                .multipart(form)
+        }
+        None => client
+            .post(format!("{TELEGRAM_API}/bot{token}/sendMessage"))
+            .json(&json!({
+                "chat_id": chat,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_notification": delivery.silent,
+            })),
+    })
 }
 
 /// One call to make.
@@ -75,17 +354,41 @@ fn client() -> reqwest::Client {
 
 /// Posts `body` to `hook`; the HTTP status, or why it failed.
 async fn post(client: &reqwest::Client, hook: &WebhookConfig, body: &Body) -> Result<u16, Failure> {
-    let request = client.post(&hook.url);
-    let request = match body {
-        Body::Json(value) => request.json(value),
-        Body::Discord {
-            payload,
-            jpeg: None,
-        } => request.json(payload),
-        Body::Discord {
-            payload,
-            jpeg: Some(jpeg),
-        } => {
+    let request = match (hook.kind(), body) {
+        (_, Body::Json(value)) => client.post(&hook.url).json(value),
+        (
+            WebhookKind::Ntfy,
+            Body::Message {
+                payload,
+                jpeg,
+                delivery,
+            },
+        ) => ntfy_request(client, hook, payload, jpeg.as_ref(), *delivery)?,
+        (
+            WebhookKind::Telegram,
+            Body::Message {
+                payload,
+                jpeg,
+                delivery,
+            },
+        ) => telegram_request(client, hook, payload, jpeg.as_ref(), *delivery)?,
+        (
+            _,
+            Body::Message {
+                payload,
+                jpeg: None,
+                ..
+            },
+        ) => client.post(&hook.url).json(payload),
+        (
+            _,
+            Body::Message {
+                payload,
+                jpeg: Some(jpeg),
+                ..
+            },
+        ) => {
+            let request = client.post(&hook.url);
             let picture = reqwest::multipart::Part::bytes(jpeg.to_vec())
                 .file_name(DISCORD_PICTURE)
                 .mime_str("image/jpeg")
@@ -125,12 +428,16 @@ async fn post(client: &reqwest::Client, hook: &WebhookConfig, body: &Body) -> Re
 }
 
 /// Short reason quoted from an error answer: the `message` of a JSON answer
-/// (Discord, most APIs), else the start of a plain text answer; nothing for
-/// an empty answer or an HTML page.
+/// (Discord, most APIs; `description` for Telegram, `error` for ntfy), else
+/// the start of a plain text answer; nothing for an empty answer or an
+/// HTML page.
 fn reason(text: &str) -> Option<String> {
     let text = text.trim();
     let message = match serde_json::from_str::<Value>(text) {
-        Ok(v) => v.get("message").and_then(Value::as_str)?.to_owned(),
+        Ok(v) => ["message", "description", "error"]
+            .iter()
+            .find_map(|k| v.get(*k).and_then(Value::as_str))?
+            .to_owned(),
         Err(_) if text.is_empty() || text.starts_with('<') => return None,
         Err(_) => text.to_owned(),
     };
@@ -206,6 +513,7 @@ fn kind_name(kind: WebhookEvent) -> &'static str {
         WebhookEvent::Crossing => "crossing",
         WebhookEvent::Storage => "storage",
         WebhookEvent::Camera => "camera",
+        WebhookEvent::Recording => "recording",
     }
 }
 
@@ -359,8 +667,8 @@ fn discord_payload(
     payload
 }
 
-/// What to post to `hook` for `event`: a Discord message for a Discord
-/// address, RustNVR's JSON otherwise.
+/// What to post to `hook` for `event`: a message for Discord, ntfy and
+/// Telegram, RustNVR's JSON otherwise.
 fn request(
     hook: &WebhookConfig,
     kind: &str,
@@ -368,11 +676,20 @@ fn request(
     camera_name: &str,
     jpeg: Option<&Bytes>,
 ) -> Body {
-    if hook.is_discord() {
-        Body::Discord {
-            payload: discord_payload(kind, event, camera_name, jpeg.is_some()),
-            jpeg: jpeg.cloned(),
-        }
+    if gets_messages(hook) {
+        // The test call shows the message chosen for motion.
+        let call = match kind {
+            "objects" => WebhookEvent::Objects,
+            "end" => WebhookEvent::End,
+            _ => WebhookEvent::Motion,
+        };
+        message(
+            hook,
+            call,
+            discord_payload(kind, event, camera_name, jpeg.is_some()),
+            jpeg.cloned(),
+            &event_vars(event, camera_name),
+        )
     } else {
         Body::Json(body(kind, event, camera_name, jpeg.map(|b| &b[..])))
     }
@@ -481,6 +798,19 @@ fn discord_message(
     payload
 }
 
+/// Variables of a crossing.
+fn crossing_vars(c: &CrossingCall<'_>) -> Vars {
+    let mut vars = vec![
+        ("camera", c.camera_name.to_owned()),
+        ("ligne", c.line.to_owned()),
+        ("sens", direction_text(c.forward).to_owned()),
+        ("compte", c.today.to_string()),
+        ("objet", c.object.map_or("Passage", object_name).to_owned()),
+    ];
+    vars.extend(when_vars(c.at_ms));
+    vars
+}
+
 /// Discord message for a crossing.
 fn crossing_discord(c: &CrossingCall<'_>, with_picture: bool) -> Value {
     let what = c.object.map_or("Passage", object_name);
@@ -514,6 +844,25 @@ fn storage_body(destination: &str, name: &str, problem: Option<&str>, at_ms: i64
     })
 }
 
+/// Variables of a change of a destination.
+fn storage_vars(name: &str, problem: Option<&str>, at_ms: i64) -> Vars {
+    let mut vars = vec![
+        ("stockage", name.to_owned()),
+        (
+            "etat",
+            if problem.is_some() {
+                "dégradé"
+            } else {
+                "rétabli"
+            }
+            .to_owned(),
+        ),
+        ("erreur", problem.unwrap_or_default().to_owned()),
+    ];
+    vars.extend(when_vars(at_ms));
+    vars
+}
+
 /// Discord message when a destination changes state.
 fn storage_discord(name: &str, problem: Option<&str>, at_ms: i64) -> Value {
     match problem {
@@ -545,6 +894,54 @@ async fn camera_name(shared: &Shared, camera: &rustnvr_core::CameraId) -> String
         .find(|c| c.id == *camera)
         .and_then(|c| c.name.clone())
         .unwrap_or_else(|| camera.as_str().to_owned())
+}
+
+/// The « at most one notification every N minutes per camera » of each
+/// webhook: the first event of a camera goes through with all its calls
+/// (motion, objects, end), the next ones within the wait are left out
+/// whole; line crossings are counted apart.
+#[derive(Default)]
+struct Cooldowns {
+    /// Last call let through, per webhook, camera, and events / crossings.
+    last: HashMap<(String, String, bool), Instant>,
+    /// Whether the calls of an event go through, per webhook.
+    decided: HashMap<(String, i64), bool>,
+}
+
+impl Cooldowns {
+    /// Whether `hook` may be called about `event` (decided at its first call).
+    fn event(&mut self, hook: &WebhookConfig, event: &DetectionEvent, now: Instant) -> bool {
+        if hook.cooldown_minutes == 0 {
+            return true;
+        }
+        let key = (Queues::key(hook), event.id);
+        if let Some(ok) = self.decided.get(&key) {
+            return *ok;
+        }
+        let ok = self.fresh(hook, event.camera.as_str(), false, now);
+        if self.decided.len() > FOLLOWED {
+            self.decided.clear();
+        }
+        self.decided.insert(key, ok);
+        ok
+    }
+
+    /// Whether `hook` may be called about a crossing of `camera`.
+    fn crossing(&mut self, hook: &WebhookConfig, camera: &str, now: Instant) -> bool {
+        hook.cooldown_minutes == 0 || self.fresh(hook, camera, true, now)
+    }
+
+    fn fresh(&mut self, hook: &WebhookConfig, camera: &str, crossing: bool, now: Instant) -> bool {
+        let key = (Queues::key(hook), camera.to_owned(), crossing);
+        let wait = Duration::from_secs(u64::from(hook.cooldown_minutes) * 60);
+        match self.last.get(&key) {
+            Some(at) if now.saturating_duration_since(*at) < wait => false,
+            _ => {
+                self.last.insert(key, now);
+                true
+            }
+        }
+    }
 }
 
 /// The calls waiting for each webhook (one queue and one sending task per
@@ -693,9 +1090,146 @@ impl Availability {
 /// Whether a webhook wants the « camera » calls of `camera` (its objects
 /// filter does not apply).
 fn wants_camera(hook: &WebhookConfig, camera: &str) -> bool {
+    wants_about(hook, WebhookEvent::Camera, camera)
+}
+
+/// Whether a webhook wants the calls of `kind` about `camera`, whatever its
+/// objects filter.
+fn wants_about(hook: &WebhookConfig, kind: WebhookEvent, camera: &str) -> bool {
     hook.enabled
-        && hook.events.contains(&WebhookEvent::Camera)
+        && hook.events.contains(&kind)
         && (hook.cameras.is_empty() || hook.cameras.iter().any(|c| c == camera))
+}
+
+/// The recording of a camera failed, or works again after a failure.
+#[derive(Debug, PartialEq)]
+enum RecordingChange {
+    Failed {
+        camera: CameraId,
+        error: String,
+    },
+    Back {
+        camera: CameraId,
+        failed_for: Duration,
+        /// Write failures in the meantime (the recorder retries, waiting
+        /// longer each time).
+        errors: u32,
+    },
+}
+
+impl RecordingChange {
+    fn camera(&self) -> &CameraId {
+        match self {
+            RecordingChange::Failed { camera, .. } | RecordingChange::Back { camera, .. } => camera,
+        }
+    }
+}
+
+/// Cameras whose recording failed: since when and how many times. Only the
+/// first failure is announced (the recorder retries by itself, a full disk
+/// would otherwise send a call at each try), then the first segment written
+/// again.
+#[derive(Default)]
+struct Failures {
+    cameras: HashMap<CameraId, (Instant, u32)>,
+}
+
+impl Failures {
+    /// A write failure of `camera`: announced if it is the first one.
+    fn error(&mut self, camera: &CameraId, error: &str, now: Instant) -> Option<RecordingChange> {
+        if let Some((_, errors)) = self.cameras.get_mut(camera) {
+            *errors = errors.saturating_add(1);
+            return None;
+        }
+        self.cameras.insert(camera.clone(), (now, 1));
+        Some(RecordingChange::Failed {
+            camera: camera.clone(),
+            error: error.to_owned(),
+        })
+    }
+
+    /// A segment of `camera` was written: its return, after a failure.
+    fn segment(&mut self, camera: &CameraId, now: Instant) -> Option<RecordingChange> {
+        let (since, errors) = self.cameras.remove(camera)?;
+        Some(RecordingChange::Back {
+            camera: camera.clone(),
+            failed_for: now.saturating_duration_since(since),
+            errors,
+        })
+    }
+}
+
+/// JSON sent when the recording of a camera fails or works again.
+fn recording_body(change: &RecordingChange, camera_name: &str, at_ms: i64) -> Value {
+    let (ok, error, failed_for, errors) = match change {
+        RecordingChange::Failed { error, .. } => (false, Some(error.as_str()), None, 1),
+        RecordingChange::Back {
+            failed_for, errors, ..
+        } => (true, None, Some(failed_for), *errors),
+    };
+    json!({
+        "type": "recording",
+        "camera": change.camera().as_str(),
+        "camera_name": camera_name,
+        "recording": {
+            "ok": ok,
+            "at_ms": at_ms,
+            "error": error,
+            "errors": errors,
+            "failed_ms": failed_for.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+        },
+        "rustnvr": rustnvr_core::release_version(),
+    })
+}
+
+/// Variables of the recording of a camera failing or working again.
+fn recording_vars(change: &RecordingChange, camera_name: &str, at_ms: i64) -> Vars {
+    let (etat, error, failed_for, errors) = match change {
+        RecordingChange::Failed { error, .. } => ("en erreur", error.as_str(), None, 1),
+        RecordingChange::Back {
+            failed_for, errors, ..
+        } => ("rétabli", "", Some(failed_for), *errors),
+    };
+    let mut vars = vec![
+        ("camera", camera_name.to_owned()),
+        ("etat", etat.to_owned()),
+        ("erreur", error.to_owned()),
+        ("echecs", errors.to_string()),
+        (
+            "duree",
+            failed_for
+                .map(|d| duration_text(i64::try_from(d.as_millis()).unwrap_or(i64::MAX)))
+                .unwrap_or_default(),
+        ),
+    ];
+    vars.extend(when_vars(at_ms));
+    vars
+}
+
+/// Discord message when the recording of a camera fails or works again.
+fn recording_discord(change: &RecordingChange, camera_name: &str, at_ms: i64) -> Value {
+    match change {
+        RecordingChange::Failed { error, .. } => discord_message(
+            format!("Erreur d'enregistrement · {camera_name}"),
+            0xEF_44_44,
+            format!("L'enregistrement a échoué : {error}\nRustNVR réessaie tout seul."),
+            at_ms,
+            false,
+        ),
+        RecordingChange::Back {
+            failed_for, errors, ..
+        } => discord_message(
+            format!("Enregistrement rétabli · {camera_name}"),
+            0x22_C5_5E,
+            format!(
+                "De nouveau enregistrée après {} ({errors} échec{}).",
+                duration_text(i64::try_from(failed_for.as_millis()).unwrap_or(i64::MAX)),
+                if *errors > 1 { "s" } else { "" }
+            ),
+            at_ms,
+            false,
+        ),
+    }
 }
 
 /// JSON sent when a camera goes offline or comes back.
@@ -718,6 +1252,25 @@ fn camera_body(change: &CameraChange, camera_name: &str, at_ms: i64) -> Value {
         },
         "rustnvr": rustnvr_core::release_version(),
     })
+}
+
+/// Variables of a camera going offline or coming back.
+fn camera_vars(change: &CameraChange, camera_name: &str, at_ms: i64) -> Vars {
+    let ms = |d: &Duration| i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
+    let (etat, error, down_for) = match change {
+        CameraChange::Offline {
+            error, down_for, ..
+        } => ("hors ligne", error.as_deref(), down_for),
+        CameraChange::Online { down_for, .. } => ("rétablie", None, down_for),
+    };
+    let mut vars = vec![
+        ("camera", camera_name.to_owned()),
+        ("etat", etat.to_owned()),
+        ("erreur", error.unwrap_or_default().to_owned()),
+        ("duree", duration_text(ms(down_for))),
+    ];
+    vars.extend(when_vars(at_ms));
+    vars
 }
 
 /// Discord message when a camera goes offline or comes back.
@@ -761,6 +1314,8 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
     let mut events = shared.engine.events.subscribe();
     let mut sent: HashMap<i64, Sent> = HashMap::new();
     let mut availability = Availability::default();
+    let mut failures = Failures::default();
+    let mut cooldowns = Cooldowns::default();
     let mut ticker = tokio::time::interval(AVAILABILITY_CHECK);
     loop {
         let event = tokio::select! {
@@ -770,6 +1325,8 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                 Ok(e @ (NvrEvent::Detection(_)
                     | NvrEvent::Crossing { .. }
                     | NvrEvent::StorageState { .. }
+                    | NvrEvent::RecorderError { .. }
+                    | NvrEvent::SegmentFinished(_)
                     | NvrEvent::StreamState { role: StreamRole::Main, .. })) => Some(e),
                 Ok(_) => continue,
                 Err(RecvError::Lagged(n)) => {
@@ -788,6 +1345,13 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
             }
             Some(_) => Vec::new(),
         };
+        let recording = match &event {
+            Some(NvrEvent::RecorderError {
+                camera, message, ..
+            }) => failures.error(camera, message, now),
+            Some(NvrEvent::SegmentFinished(s)) => failures.segment(&s.camera, now),
+            _ => None,
+        };
         let hooks = shared
             .webhooks
             .read()
@@ -803,13 +1367,38 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
             let name = camera_name(&shared, camera).await;
             let at_ms = jiff::Timestamp::now().as_millisecond();
             for hook in hooks.iter().filter(|h| wants_camera(h, camera.as_str())) {
-                let body = if hook.is_discord() {
-                    Body::Discord {
-                        payload: camera_discord(&change, &name, at_ms),
-                        jpeg: None,
-                    }
+                let body = if gets_messages(hook) {
+                    message(
+                        hook,
+                        WebhookEvent::Camera,
+                        camera_discord(&change, &name, at_ms),
+                        None,
+                        &camera_vars(&change, &name, at_ms),
+                    )
                 } else {
                     Body::Json(camera_body(&change, &name, at_ms))
+                };
+                queues.push(hook, body);
+            }
+        }
+        if let Some(change) = recording {
+            let camera = change.camera();
+            let name = camera_name(&shared, camera).await;
+            let at_ms = jiff::Timestamp::now().as_millisecond();
+            for hook in hooks
+                .iter()
+                .filter(|h| wants_about(h, WebhookEvent::Recording, camera.as_str()))
+            {
+                let body = if gets_messages(hook) {
+                    message(
+                        hook,
+                        WebhookEvent::Recording,
+                        recording_discord(&change, &name, at_ms),
+                        None,
+                        &recording_vars(&change, &name, at_ms),
+                    )
+                } else {
+                    Body::Json(recording_body(&change, &name, at_ms))
                 };
                 queues.push(hook, body);
             }
@@ -836,16 +1425,19 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                     today,
                     object: object.as_deref(),
                 };
-                for hook in hooks
-                    .iter()
-                    .filter(|h| wants_crossing(h, call.camera, call.object))
-                {
+                for hook in hooks.iter().filter(|h| {
+                    wants_crossing(h, call.camera, call.object)
+                        && cooldowns.crossing(h, call.camera, now)
+                }) {
                     let jpeg = picture.as_ref().filter(|_| hook.image);
-                    let body = if hook.is_discord() {
-                        Body::Discord {
-                            payload: crossing_discord(&call, jpeg.is_some()),
-                            jpeg: jpeg.cloned(),
-                        }
+                    let body = if gets_messages(hook) {
+                        message(
+                            hook,
+                            WebhookEvent::Crossing,
+                            crossing_discord(&call, jpeg.is_some()),
+                            jpeg.cloned(),
+                            &crossing_vars(&call),
+                        )
                     } else {
                         Body::Json(crossing_body(&call, jpeg.map(|b| &b[..])))
                     };
@@ -863,11 +1455,14 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                     .iter()
                     .filter(|h| h.enabled && h.events.contains(&WebhookEvent::Storage))
                 {
-                    let body = if hook.is_discord() {
-                        Body::Discord {
-                            payload: storage_discord(&name, problem.as_deref(), at_ms),
-                            jpeg: None,
-                        }
+                    let body = if gets_messages(hook) {
+                        message(
+                            hook,
+                            WebhookEvent::Storage,
+                            storage_discord(&name, problem.as_deref(), at_ms),
+                            None,
+                            &storage_vars(&name, problem.as_deref(), at_ms),
+                        )
                     } else {
                         Body::Json(storage_body(&destination, &name, problem.as_deref(), at_ms))
                     };
@@ -899,8 +1494,10 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
         }
         let camera_name = camera_name(&shared, &event.camera).await;
         for kind in kinds {
-            let targets: Vec<&WebhookConfig> =
-                hooks.iter().filter(|h| wanted(h, kind, &event)).collect();
+            let targets: Vec<&WebhookConfig> = hooks
+                .iter()
+                .filter(|h| wanted(h, kind, &event) && cooldowns.event(h, &event, now))
+                .collect();
             if targets.is_empty() {
                 continue;
             }
@@ -1007,6 +1604,9 @@ mod tests {
         WebhookConfig {
             name: "n8n".into(),
             url: "http://127.0.0.1:9/hook".into(),
+            kind: None,
+            token: None,
+            chat_id: None,
             enabled: true,
             cameras: Vec::new(),
             objects: Vec::new(),
@@ -1016,6 +1616,8 @@ mod tests {
                 WebhookEvent::End,
             ],
             image: true,
+            messages: Default::default(),
+            cooldown_minutes: 0,
         }
     }
 
@@ -1181,6 +1783,77 @@ mod tests {
     }
 
     #[test]
+    fn recording_failures_are_announced_once_then_their_end() {
+        let jardin = CameraId::new("jardin").expect("id");
+        let garage = CameraId::new("garage").expect("id");
+        let t0 = Instant::now();
+        let mut f = Failures::default();
+        assert_eq!(f.segment(&jardin, t0), None, "nothing failed");
+        let first = f.error(&jardin, "No space left on device", t0);
+        assert_eq!(
+            first,
+            Some(RecordingChange::Failed {
+                camera: jardin.clone(),
+                error: "No space left on device".into()
+            })
+        );
+        // The retries of the recorder are not announced again.
+        assert_eq!(f.error(&jardin, "No space left on device", t0), None);
+        assert_eq!(f.error(&jardin, "No space left on device", t0), None);
+        assert_eq!(f.segment(&garage, t0), None, "another camera");
+        let back = f.segment(&jardin, t0 + Duration::from_secs(90));
+        assert_eq!(
+            back,
+            Some(RecordingChange::Back {
+                camera: jardin.clone(),
+                failed_for: Duration::from_secs(90),
+                errors: 3
+            })
+        );
+        assert_eq!(f.segment(&jardin, t0), None, "announced once");
+
+        let hook = WebhookConfig {
+            events: vec![WebhookEvent::Recording],
+            cameras: vec!["jardin".into()],
+            objects: vec!["person".into()],
+            ..hook()
+        };
+        assert!(
+            wants_about(&hook, WebhookEvent::Recording, "jardin"),
+            "objects ignored"
+        );
+        assert!(!wants_about(&hook, WebhookEvent::Recording, "garage"));
+        assert!(
+            !wants_about(&self::hook(), WebhookEvent::Recording, "jardin"),
+            "not chosen"
+        );
+
+        let j = recording_body(first.as_ref().expect("failed"), "Jardin", 5);
+        assert_eq!(j["type"], "recording");
+        assert_eq!(j["recording"]["ok"], false);
+        assert_eq!(j["recording"]["error"], "No space left on device");
+        let j = recording_body(back.as_ref().expect("back"), "Jardin", 5);
+        assert_eq!(
+            (
+                &j["recording"]["ok"],
+                &j["recording"]["errors"],
+                &j["recording"]["failed_ms"]
+            ),
+            (&json!(true), &json!(3), &json!(90_000))
+        );
+        let d = recording_discord(first.as_ref().expect("failed"), "Jardin", 5);
+        assert_eq!(d["embeds"][0]["title"], "Erreur d'enregistrement · Jardin");
+        let d = recording_discord(back.as_ref().expect("back"), "Jardin", 5);
+        assert_eq!(d["embeds"][0]["title"], "Enregistrement rétabli · Jardin");
+        assert!(
+            d["embeds"][0]["description"]
+                .as_str()
+                .is_some_and(|s| s.contains("3 échecs")),
+            "{d}"
+        );
+    }
+
+    #[test]
     fn crossing_and_storage_calls() {
         let crossings = WebhookConfig {
             events: vec![WebhookEvent::Crossing],
@@ -1237,9 +1910,10 @@ mod tests {
         let mut e = event("jardin", &["person", "car"]);
         e.zones = vec!["Allée".into()];
         let jpeg = Bytes::from_static(b"\xff\xd8");
-        let Body::Discord {
+        let Body::Message {
             payload,
             jpeg: sent,
+            ..
         } = request(&discord, "objects", &e, "Jardin", Some(&jpeg))
         else {
             panic!("Discord address: Discord message expected");
@@ -1255,9 +1929,10 @@ mod tests {
         assert_eq!(payload["attachments"][0]["filename"], "evenement.jpg");
         assert_eq!(embed["timestamp"], "1970-01-01T00:00:00.001Z");
         // Without picture: no attachment announced.
-        let Body::Discord {
+        let Body::Message {
             payload,
             jpeg: None,
+            ..
         } = request(&discord, "motion", &e, "Jardin", None)
         else {
             panic!("Discord message without picture expected");
@@ -1287,7 +1962,9 @@ mod tests {
         assert_eq!(reason("  bad\n token ").as_deref(), Some("bad token"));
         assert_eq!(reason(""), None);
         assert_eq!(reason("<html><body>Bad Request</body></html>"), None);
-        assert_eq!(reason(r#"{"error": "x"}"#), None);
+        // ntfy's error answers.
+        assert_eq!(reason(r#"{"error": "x"}"#).as_deref(), Some("x"));
+        assert_eq!(reason(r#"{"code": 1}"#), None);
         let long = reason(&"é".repeat(500)).expect("reason");
         assert_eq!(long.chars().count(), REASON_CHARS + 1);
         assert_eq!(duration_text(44_600), "45 s");
@@ -1347,9 +2024,10 @@ mod tests {
         )
         .await;
         let hook = WebhookConfig { url, ..hook() };
-        let body = Body::Discord {
+        let body = Body::Message {
             payload: discord_payload("motion", &event("jardin", &[]), "Jardin", true),
             jpeg: Some(Bytes::from_static(b"\xff\xd8JPEG")),
+            delivery: Delivery::default(),
         };
         let failure = post(&client(), &hook, &body)
             .await
@@ -1366,6 +2044,292 @@ mod tests {
         assert!(request.contains("name=\"files[0]\"; filename=\"evenement.jpg\""));
         assert!(request.contains("Content-Type: image/jpeg"));
         assert!(request.contains("JPEG"));
+    }
+
+    #[tokio::test]
+    async fn posts_ntfy_notifications_with_the_picture_attached() {
+        let (url, server) = one_request("200 OK", r#"{"id": "x"}"#).await;
+        let hook = WebhookConfig {
+            url: url.replace("/api/webhooks/1/token", "/jardin-a1b2"),
+            kind: Some(WebhookKind::Ntfy),
+            token: Some("tk_secret".into()),
+            ..hook()
+        };
+        let body = request(
+            &hook,
+            "objects",
+            &event("jardin", &["person"]),
+            "Jardin",
+            Some(&Bytes::from_static(b"\xff\xd8JPEG")),
+        );
+        assert_eq!(post(&client(), &hook, &body).await.expect("sent"), 200);
+        let request = String::from_utf8_lossy(&server.await.expect("server")).into_owned();
+        let first = request.lines().next().unwrap_or_default();
+        assert!(
+            first.starts_with("POST /jardin-a1b2?title=Personne+%C2%B7+Jardin"),
+            "{first}"
+        );
+        assert!(first.contains("&filename=evenement.jpg"), "{first}");
+        assert!(first.contains("&message=Personne+90+%25"), "{first}");
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer tk_secret"),
+            "{request}"
+        );
+        assert!(request.ends_with("JPEG"), "the picture is the body");
+
+        // A failure: tagged, high priority, the text as the body.
+        let (url, server) = one_request(
+            "403 Forbidden",
+            r#"{"code": 40301, "http": 403, "error": "forbidden"}"#,
+        )
+        .await;
+        let hook = WebhookConfig {
+            url,
+            token: None,
+            ..hook
+        };
+        let lost = Body::Message {
+            payload: storage_discord("NAS", Some("/nas n'est pas monté"), 1),
+            jpeg: None,
+            delivery: Delivery::default(),
+        };
+        let failure = post(&client(), &hook, &lost).await.expect_err("refused");
+        assert_eq!(failure.message, "réponse 403 : forbidden");
+        let request = String::from_utf8_lossy(&server.await.expect("server")).into_owned();
+        assert!(
+            request.contains("tags=rotating_light&priority=high"),
+            "{request}"
+        );
+        assert!(!request.to_ascii_lowercase().contains("authorization"));
+        assert!(request.ends_with("/nas n'est pas monté"), "{request}");
+    }
+
+    #[test]
+    fn telegram_messages_go_to_the_bot_api() {
+        let hook = WebhookConfig {
+            url: String::new(),
+            kind: Some(WebhookKind::Telegram),
+            token: Some("123:AAH-secret".into()),
+            chat_id: Some("-10042".into()),
+            ..hook()
+        };
+        let payload = discord_payload("objects", &event("jardin", &["person"]), "Jardin <1>", true);
+        let text = telegram_request(&client(), &hook, &payload, None, Delivery::default())
+            .expect("request")
+            .build()
+            .expect("built");
+        assert_eq!(
+            text.url().as_str(),
+            "https://api.telegram.org/bot123:AAH-secret/sendMessage"
+        );
+        let sent: Value =
+            serde_json::from_slice(text.body().and_then(|b| b.as_bytes()).expect("body"))
+                .expect("json");
+        assert_eq!(sent["chat_id"], "-10042");
+        assert_eq!(sent["parse_mode"], "HTML");
+        assert!(
+            sent["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("<b>Personne · Jardin &lt;1&gt;</b>\nPersonne 90 %")),
+            "{sent}"
+        );
+        let photo = telegram_request(
+            &client(),
+            &hook,
+            &payload,
+            Some(&Bytes::from_static(b"\xff\xd8JPEG")),
+            Delivery::default(),
+        )
+        .expect("request")
+        .build()
+        .expect("built");
+        assert!(photo.url().as_str().ends_with("/sendPhoto"));
+        assert!(
+            photo
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.starts_with("multipart/form-data"))
+        );
+        assert_eq!(hook.host(), "api.telegram.org", "logs never show the token");
+        assert_eq!(
+            reason(
+                r#"{"ok": false, "error_code": 400, "description": "Bad Request: chat not found"}"#
+            ),
+            Some("Bad Request: chat not found".into())
+        );
+    }
+
+    #[test]
+    fn custom_messages_replace_the_default_ones() {
+        let mut hook = WebhookConfig {
+            url: "https://discord.com/api/webhooks/1/token".into(),
+            ..hook()
+        };
+        hook.messages.insert(
+            WebhookEvent::Objects,
+            rustnvr_core::config::WebhookMessage {
+                title: Some("  {objet} devant {caméra} ".into()),
+                text: Some("{objets} à {heure} ({zones}) {inconnue}".into()),
+                priority: Some(5),
+                silent: true,
+            },
+        );
+        let mut e = event("jardin", &["person"]);
+        e.zones = vec!["Allée".into()];
+        let Body::Message {
+            payload, delivery, ..
+        } = request(&hook, "objects", &e, "Jardin", None)
+        else {
+            panic!("a message expected");
+        };
+        let embed = &payload["embeds"][0];
+        assert_eq!(embed["title"], "Personne devant Jardin");
+        let text = embed["description"].as_str().unwrap_or_default();
+        assert!(
+            text.starts_with("Personne 90 % à ") && text.ends_with(" (Allée) {inconnue}"),
+            "{text}"
+        );
+        assert_eq!(
+            delivery,
+            Delivery {
+                priority: Some(5),
+                silent: true
+            }
+        );
+        // Kinds without a chosen message keep the default one.
+        let Body::Message {
+            payload, delivery, ..
+        } = request(&hook, "motion", &e, "Jardin", None)
+        else {
+            panic!("a message expected");
+        };
+        assert_eq!(payload["embeds"][0]["title"], "Mouvement · Jardin");
+        assert_eq!(delivery, Delivery::default());
+
+        // The variables of the other calls.
+        let vars = |v: Vars| v.into_iter().collect::<HashMap<_, _>>();
+        let offline = CameraChange::Offline {
+            camera: CameraId::new("garage").expect("id"),
+            error: Some("délai dépassé".into()),
+            down_for: Duration::from_secs(75),
+        };
+        let v = vars(camera_vars(&offline, "Garage", 0));
+        assert_eq!(
+            (
+                v["etat"].as_str(),
+                v["erreur"].as_str(),
+                v["duree"].as_str()
+            ),
+            ("hors ligne", "délai dépassé", "1 min 15 s")
+        );
+        let v = vars(storage_vars("NAS", None, 0));
+        assert_eq!(
+            (v["stockage"].as_str(), v["etat"].as_str()),
+            ("NAS", "rétabli")
+        );
+        let back = RecordingChange::Back {
+            camera: CameraId::new("garage").expect("id"),
+            failed_for: Duration::from_secs(30),
+            errors: 4,
+        };
+        assert_eq!(vars(recording_vars(&back, "Garage", 0))["echecs"], "4");
+        assert_eq!(
+            render(
+                "{durée} {échecs}",
+                &[("duree", "1 s".into()), ("echecs", "2".into())]
+            ),
+            "1 s 2"
+        );
+        assert!(vars(when_vars(0))["date"].contains("1970"));
+    }
+
+    #[test]
+    fn at_most_one_event_per_camera_within_the_wait() {
+        let hook = WebhookConfig {
+            cooldown_minutes: 10,
+            ..hook()
+        };
+        let t0 = Instant::now();
+        let later = |s| t0 + Duration::from_secs(s);
+        let mut c = Cooldowns::default();
+        let first = event("jardin", &[]);
+        let mut second = event("jardin", &[]);
+        second.id = 2;
+        let mut other = event("garage", &[]);
+        other.id = 3;
+        assert!(c.event(&hook, &first, t0));
+        assert!(
+            c.event(&hook, &first, later(300)),
+            "every call of the first event"
+        );
+        assert!(
+            !c.event(&hook, &second, later(60)),
+            "another event within 10 min"
+        );
+        assert!(
+            !c.event(&hook, &second, later(700)),
+            "decided once for the event"
+        );
+        assert!(c.event(&hook, &other, later(60)), "another camera");
+        let mut third = event("jardin", &[]);
+        third.id = 4;
+        assert!(c.event(&hook, &third, later(601)), "after the wait");
+        // Crossings are counted apart from events.
+        assert!(c.crossing(&hook, "jardin", later(602)));
+        assert!(!c.crossing(&hook, "jardin", later(900)));
+        // Without a wait, everything goes.
+        let free = self::hook();
+        assert!(c.event(&free, &second, later(1)) && c.crossing(&free, "jardin", later(1)));
+    }
+
+    #[test]
+    fn ntfy_and_telegram_follow_the_delivery_chosen() {
+        let ntfy = WebhookConfig {
+            url: "https://ntfy.sh/maison".into(),
+            kind: Some(WebhookKind::Ntfy),
+            ..hook()
+        };
+        let lost = storage_discord("NAS", Some("absent"), 1);
+        let quiet = Delivery {
+            priority: Some(2),
+            silent: false,
+        };
+        let r = ntfy_request(&client(), &ntfy, &lost, None, quiet)
+            .expect("request")
+            .build()
+            .expect("built");
+        assert!(
+            r.url().as_str().ends_with("tags=rotating_light&priority=2"),
+            "{}",
+            r.url()
+        );
+        let r = ntfy_request(&client(), &ntfy, &lost, None, Delivery::default())
+            .expect("request")
+            .build()
+            .expect("built");
+        assert!(r.url().as_str().ends_with("priority=high"), "{}", r.url());
+        let telegram = WebhookConfig {
+            url: String::new(),
+            kind: Some(WebhookKind::Telegram),
+            token: Some("123:AAH-secret".into()),
+            chat_id: Some("42".into()),
+            ..hook()
+        };
+        let silent = Delivery {
+            priority: None,
+            silent: true,
+        };
+        let r = telegram_request(&client(), &telegram, &lost, None, silent)
+            .expect("request")
+            .build()
+            .expect("built");
+        let sent: Value =
+            serde_json::from_slice(r.body().and_then(|b| b.as_bytes()).expect("body"))
+                .expect("json");
+        assert_eq!(sent["disable_notification"], true);
     }
 
     #[test]

@@ -566,3 +566,265 @@ async fn a_sub_stream_added_later_uses_the_stored_password() {
     assert_eq!(stored.matches("s3cret").count(), 1, "{stored}");
     assert!(nvr.shutdown().await);
 }
+
+/// A camera paused from the API stops (no connection, no recording) until
+/// it is resumed; the pause is never stored, and works for a camera of
+/// config.toml too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_camera_is_paused_until_resumed_or_restarted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = MockServerConfig::new(Fixture::h264());
+    cfg.frame_interval = Duration::from_millis(5);
+    let camera = MockRtspServer::start(cfg).await.unwrap();
+    let url = camera.url();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+            [storage]
+            recordings_dir = "{rec}"
+            [recording]
+            segment_seconds = 5
+            [metrics]
+            log_interval_seconds = 0
+            [web]
+            listen = "127.0.0.1:0"
+            static_dir = "/nonexistent-rustnvr-web"
+            [[cameras]]
+            id = "fixe"
+            main = {{ url = "{url}" }}
+            "#,
+            rec = dir.path().join("rec").display()
+        ),
+    )
+    .unwrap();
+    let config = Config::load_with_env(&config_path, |_| None).unwrap();
+    let events = event_bus(1024);
+    let mut rx = events.subscribe();
+    let nvr = Nvr::start(&config, events).await.unwrap();
+    let addr = nvr.web_addr().unwrap();
+    let records = |mut rx: tokio::sync::broadcast::Receiver<NvrEvent>, wait: u64| async move {
+        tokio::time::timeout(Duration::from_secs(wait), async move {
+            loop {
+                match rx.recv().await {
+                    Ok(NvrEvent::SegmentFinished(s)) if s.camera.as_str() == "fixe" => return,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        std::future::pending::<()>().await;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .is_ok()
+    };
+    assert!(
+        records(rx.resubscribe(), 15).await,
+        "records before the pause"
+    );
+
+    let (status, cam) = http(
+        addr,
+        "PUT",
+        "/api/v1/cameras/fixe/pause",
+        Some(r#"{"paused":true}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{cam}");
+    assert_eq!(
+        (cam["paused"].as_bool(), cam["status"].as_str()),
+        (Some(true), Some("paused"))
+    );
+    // Stopped: no segment any more (a segment lasts 0.25 s at this speed).
+    rx = rx.resubscribe();
+    assert!(
+        !records(rx.resubscribe(), 3).await,
+        "nothing recorded while paused"
+    );
+    assert_eq!(stream_states(addr, "fixe").await.0, "paused");
+    // Never stored: config.toml cameras have no file, and none is written.
+    assert!(!dir.path().join(MANAGED_CAMERAS_FILE).exists());
+    let (status, _) = http(
+        addr,
+        "PUT",
+        "/api/v1/cameras/fixe/pause",
+        Some(r#"{"paused":true}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "pausing twice changes nothing");
+
+    let (status, cam) = http(
+        addr,
+        "PUT",
+        "/api/v1/cameras/fixe/pause",
+        Some(r#"{"paused":false}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{cam}");
+    assert_eq!(cam["paused"], false);
+    assert!(
+        records(rx.resubscribe(), 15).await,
+        "records again once resumed"
+    );
+    assert_eq!(stream_states(addr, "fixe").await.0, "online");
+
+    let (status, _) = http(
+        addr,
+        "PUT",
+        "/api/v1/cameras/nulle-part/pause",
+        Some(r#"{"paused":true}"#),
+    )
+    .await;
+    assert_eq!(status, 404);
+    nvr.shutdown().await;
+}
+
+/// A fake ONVIF camera: answers the clock, its record, the capabilities
+/// (no PTZ) and a restart; the requests it received.
+async fn onvif_camera() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut req = Vec::new();
+                let mut buf = [0u8; 8192];
+                loop {
+                    let Ok(n) = s.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&req);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if req.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&req).into_owned();
+                log.lock().unwrap().push(text.clone());
+                let inner = if text.contains("GetSystemDateAndTime") {
+                    "<tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime><tt:UTCDateTime><tt:Time><tt:Hour>8</tt:Hour><tt:Minute>0</tt:Minute><tt:Second>0</tt:Second></tt:Time><tt:Date><tt:Year>2030</tt:Year><tt:Month>1</tt:Month><tt:Day>2</tt:Day></tt:Date></tt:UTCDateTime></tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse>".to_owned()
+                } else if text.contains("GetDeviceInformation") {
+                    "<tds:GetDeviceInformationResponse><tds:Manufacturer>EZVIZ</tds:Manufacturer><tds:Model>CS-C6N</tds:Model><tds:FirmwareVersion>V5.3.0</tds:FirmwareVersion><tds:SerialNumber>Q12345678</tds:SerialNumber><tds:HardwareId>88</tds:HardwareId></tds:GetDeviceInformationResponse>".to_owned()
+                } else if text.contains("SystemReboot") {
+                    "<tds:SystemRebootResponse><tds:Message>Rebooting</tds:Message></tds:SystemRebootResponse>".to_owned()
+                } else {
+                    // GetCapabilities: no PTZ service.
+                    "<tds:GetCapabilitiesResponse><tds:Capabilities/></tds:GetCapabilitiesResponse>"
+                        .to_owned()
+                };
+                let body = format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?><env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="d" xmlns:tt="s"><env:Body>{inner}</env:Body></env:Envelope>"#
+                );
+                let answer = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/soap+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(answer.as_bytes()).await;
+            });
+        }
+    });
+    (port, seen)
+}
+
+/// A camera with an ONVIF port: its record (maker, model, firmware, serial
+/// number) is read and kept, and it can be restarted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn onvif_camera_record_and_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (onvif_port, seen) = onvif_camera().await;
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+            [storage]
+            recordings_dir = "{rec}"
+            [metrics]
+            log_interval_seconds = 0
+            [web]
+            listen = "127.0.0.1:0"
+            static_dir = "/nonexistent-rustnvr-web"
+            [[cameras]]
+            id = "salon"
+            main = {{ url = "rtsp://127.0.0.1:1/stream", username = "admin", password = "pw" }}
+            onvif = {{ port = {onvif_port} }}
+            [[cameras]]
+            id = "fixe"
+            main = {{ url = "rtsp://127.0.0.1:1/stream" }}
+            "#,
+            rec = dir.path().join("rec").display()
+        ),
+    )
+    .unwrap();
+    let config = Config::load_with_env(&config_path, |_| None).unwrap();
+    let nvr = Nvr::start(&config, event_bus(256)).await.unwrap();
+    let addr = nvr.web_addr().unwrap();
+
+    let (status, device) = http(addr, "GET", "/api/v1/cameras/salon/device", None).await;
+    assert_eq!(status, 200, "{device}");
+    assert_eq!(
+        (
+            device["manufacturer"].as_str(),
+            device["model"].as_str(),
+            device["firmware"].as_str(),
+            device["serial"].as_str(),
+            device["hardware"].as_str()
+        ),
+        (
+            Some("EZVIZ"),
+            Some("CS-C6N"),
+            Some("V5.3.0"),
+            Some("Q12345678"),
+            Some("88")
+        )
+    );
+    // Kept: asking again does not call the camera; `refresh=1` does.
+    let count = |what: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.contains(what))
+            .count()
+    };
+    let read = count("GetDeviceInformation");
+    let _ = http(addr, "GET", "/api/v1/cameras/salon/device", None).await;
+    assert_eq!(count("GetDeviceInformation"), read);
+    let (status, _) = http(addr, "GET", "/api/v1/cameras/salon/device?refresh=1", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(count("GetDeviceInformation"), read + 1);
+
+    let (status, answer) = http(addr, "POST", "/api/v1/cameras/salon/reboot", Some("{}")).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["message"], "Rebooting");
+    assert_eq!(count("<tds:SystemReboot/>"), 1);
+
+    // Without an ONVIF port: a clear refusal.
+    let (status, err) = http(addr, "GET", "/api/v1/cameras/fixe/device", None).await;
+    assert_eq!(status, 400, "{err}");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("port ONVIF")
+    );
+    let (status, _) = http(addr, "POST", "/api/v1/cameras/fixe/reboot", Some("{}")).await;
+    assert_eq!(status, 400);
+    nvr.shutdown().await;
+}

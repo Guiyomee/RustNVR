@@ -9,6 +9,7 @@ import { Button } from '../components/ui/Button'
 import { Card, CardHeader } from '../components/ui/Card'
 import { Meter } from '../components/ui/Meter'
 import { Sparkline } from '../components/ui/Sparkline'
+import { useIsViewer } from '../auth/AuthGate'
 import { StatCard } from '../components/ui/StatCard'
 import { Segmented } from '../components/ui/Tabs'
 import { EmptyState, ErrorState, LoadingState, Unavailable } from '../components/ui/States'
@@ -147,6 +148,7 @@ function EventsStat() {
 }
 
 export function OverviewPage() {
+  const viewer = useIsViewer()
   const cameras = useLive((s) => s.cameras)
   const loaded = useLive((s) => s.loaded)
   const error = useLive((s) => s.error)
@@ -227,9 +229,11 @@ export function OverviewPage() {
                 {t('Par ligne', 'Per row')}
                 <Segmented label={t('Caméras par ligne', 'Cameras per row')} options={COLUMN_OPTIONS} value={columns} onChange={setColumns} />
               </span>
-              <Link to="/cameras" className="text-xs text-accent hover:underline">
-                {t('Gérer les caméras', 'Manage cameras')}
-              </Link>
+              {!viewer && (
+                <Link to="/cameras" className="text-xs text-accent hover:underline">
+                  {t('Gérer les caméras', 'Manage cameras')}
+                </Link>
+              )}
             </div>
           </div>
           {!loaded ? (

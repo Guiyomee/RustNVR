@@ -1,4 +1,4 @@
-import { CircleOff, MonitorOff, VideoOff } from 'lucide-react'
+import { CircleOff, CirclePause, MonitorOff, VideoOff } from 'lucide-react'
 import { memo, useEffect, useState } from 'react'
 import { useCapability, useIsDemo } from '../../data/DataContext'
 import { demoPicture, demoSpec } from '../../data/demo/fixtures'
@@ -89,7 +89,11 @@ function StatusPanel({ camera, liveAvailable, large }: { camera: Camera; liveAva
   let detail = liveAvailable
     ? t('Aucune image pour le moment.', 'No picture yet.')
     : t('Ce serveur RustNVR ne diffuse pas le direct (version antérieure). Les enregistrements sont visibles dans « Lecture ».', 'This RustNVR server does not stream the live view (older version). Recordings can be seen in « Playback ».')
-  if (camera.status === 'disabled') {
+  if (camera.status === 'paused') {
+    icon = <CirclePause className={`${iconCls} text-warn`} aria-hidden />
+    title = t('Caméra en pause', 'Camera paused')
+    detail = t('Ni connexion ni enregistrement jusqu’à la reprise (bouton « Reprendre ») ou au prochain redémarrage de RustNVR.', 'No connection nor recording until it is resumed (« Resume » button) or RustNVR restarts.')
+  } else if (camera.status === 'disabled') {
     icon = <CircleOff className={`${iconCls} text-muted`} aria-hidden />
     title = t('Caméra désactivée', 'Camera off')
     detail = t('Activez-la dans config.toml (enabled = true).', 'Turn it on in config.toml (enabled = true).')

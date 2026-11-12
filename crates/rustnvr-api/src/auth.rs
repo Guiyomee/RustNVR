@@ -9,6 +9,11 @@
 //! - Role `viewer`: read only (GET); `admin`: everything. Requests that change
 //!   something must also come from this origin (`Origin` check, in addition
 //!   to `SameSite`).
+//! - A viewer may be limited to some cameras: the others do not exist for
+//!   it (404 on their routes, left out of every list), and the settings
+//!   (general, MQTT, storage destinations) are read by administrators only.
+//! - Logins, failed ones too, and every request that changes something are
+//!   written to the activity log (`GET /audit`, administrators).
 //! - Five failed logins in 15 minutes from one address or for one account
 //!   block further attempts for 15 minutes.
 //! - Without any account and without `web.username`, access is open (the
@@ -57,17 +62,80 @@ pub struct Principal {
     pub username: Option<String>,
     /// `admin` or `viewer`.
     pub role: &'static str,
+    /// Cameras this account sees (`None`: all of them; always `None` for an
+    /// administrator).
+    pub cameras: Option<Vec<String>>,
 }
 
 impl Principal {
     pub(crate) fn admin(&self) -> bool {
         self.role == "admin"
     }
+
+    /// An account with a role, seeing `cameras` if it is a viewer.
+    fn new(username: Option<String>, role: &str, cameras: Option<Vec<String>>) -> Self {
+        let role = role_name(role);
+        Self {
+            username,
+            role,
+            cameras: cameras.filter(|_| role != "admin"),
+        }
+    }
+
+    /// Whether this account may see `camera`.
+    pub(crate) fn sees(&self, camera: &str) -> bool {
+        self.cameras
+            .as_ref()
+            .is_none_or(|list| list.iter().any(|c| c == camera))
+    }
 }
 
 /// True for a viewer account (open access, without accounts, is not one).
 pub(crate) fn is_viewer(principal: Option<&axum::Extension<Principal>>) -> bool {
     principal.is_some_and(|p| !p.admin())
+}
+
+/// Whether the account of a request may see `camera` (no account: yes).
+pub(crate) fn sees(principal: Option<&axum::Extension<Principal>>, camera: &str) -> bool {
+    principal.is_none_or(|p| p.sees(camera))
+}
+
+/// The cameras the account of a request is limited to (`None`: all).
+pub(crate) fn scope(principal: Option<&axum::Extension<Principal>>) -> Option<Vec<String>> {
+    principal.and_then(|p| p.cameras.clone())
+}
+
+/// How often the long connections (WebSocket of the state, live views) read
+/// the rights of their account again.
+pub(crate) const RIGHTS_PERIOD: Duration = Duration::from_secs(5);
+
+/// Whether the account of a live view may still watch `camera`: false once
+/// the account is removed or limited to other cameras.
+pub(crate) async fn still_sees(state: &ApiState, principal: &Principal, camera: &str) -> bool {
+    refreshed(state, principal)
+        .await
+        .is_some_and(|p| p.sees(camera))
+}
+
+/// The rights of `principal` as they are now, for a long connection (the
+/// WebSocket) opened before an administrator changed them; `None` when the
+/// account no longer exists.
+pub(crate) async fn refreshed(state: &ApiState, principal: &Principal) -> Option<Principal> {
+    let (Some(db), Some(name)) = (state.database.get(), principal.username.as_deref()) else {
+        return Some(principal.clone());
+    };
+    if !state.has_users.load(std::sync::atomic::Ordering::Relaxed) {
+        return Some(principal.clone());
+    }
+    match db.user_secret(name).await {
+        Ok(Some((_, role))) => {
+            let cameras = db.user_cameras(name).await.ok().flatten();
+            Some(Principal::new(Some(name.to_owned()), &role, cameras))
+        }
+        Ok(None) => None,
+        // A database error is not a reason to cut a connection.
+        Err(_) => Some(principal.clone()),
+    }
 }
 
 fn role_name(role: &str) -> &'static str {
@@ -227,42 +295,34 @@ impl ApiState {
 /// The principal of a request, if its credentials are valid.
 async fn identify(state: &ApiState, headers: &HeaderMap) -> Option<Principal> {
     if !state.auth_required() {
-        return Some(Principal {
-            username: None,
-            role: "admin",
-        });
+        return Some(Principal::new(None, "admin", None));
     }
     let db = state.database.get();
     if let (Some(db), Some(token)) = (db, cookie(headers, SESSION_COOKIE))
-        && let Ok(Some((username, role))) = db
+        && let Ok(Some((username, role, cameras))) = db
             .session_user(&token_hash(&token), unix_ms(SystemTime::now()))
             .await
     {
-        return Some(Principal {
-            username: Some(username),
-            role: role_name(&role),
-        });
+        return Some(Principal::new(Some(username), &role, cameras));
     }
     let (user, password) = basic_credentials(headers)?;
     if let Some(db) = db
         && state.has_users.load(std::sync::atomic::Ordering::Relaxed)
     {
         let (hash, role) = db.user_secret(&user).await.ok()??;
-        let ok = check_password(hash, password).await;
-        return ok.then(|| Principal {
-            username: Some(user),
-            role: role_name(&role),
-        });
+        if !check_password(hash, password).await {
+            return None;
+        }
+        // Unreadable rights: no camera rather than all of them.
+        let cameras = db.user_cameras(&user).await.unwrap_or(Some(Vec::new()));
+        return Some(Principal::new(Some(user), &role, cameras));
     }
     // Configuration credentials (no database, or no account yet).
     let (u, p) = state.auth.as_ref()?;
     // Evaluate both comparisons to avoid revealing which one failed.
     let ok = constant_time_eq(user.as_bytes(), u.as_bytes())
         & constant_time_eq(password.as_bytes(), p.expose().as_bytes());
-    ok.then_some(Principal {
-        username: Some(user),
-        role: "admin",
-    })
+    ok.then(|| Principal::new(Some(user), "admin", None))
 }
 
 /// The address a request comes from: the peer of the connection, or, when
@@ -354,6 +414,99 @@ fn viewer_may(method: &Method, path: &str) -> bool {
                 .is_some_and(|id| !id.is_empty() && !id.contains('/')))
 }
 
+/// Settings read by administrators only: a viewer has no page showing them,
+/// and they name servers, shares and accounts.
+fn admin_only_read(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/v1/settings"
+            | "/api/v1/mqtt"
+            | "/api/v1/storage/destinations"
+            | "/api/v1/devices/video"
+            | "/api/v1/audit"
+    )
+}
+
+/// The camera a route is about, from its path: `/cameras/{id}…`,
+/// `/recordings/{destination}/{camera}/…` and `/ai/captures/{camera}/…`.
+///
+/// The path is read as sent: an identifier written with `%xx` matches no
+/// camera of an account limited to some, which is then refused.
+fn path_camera(path: &str) -> Option<&str> {
+    let mut parts = path.strip_prefix("/api/v1/")?.split('/');
+    match parts.next()? {
+        "cameras" => parts.next(),
+        "recordings" => parts.nth(1),
+        "ai" => (parts.next()? == "captures")
+            .then(|| parts.next())
+            .flatten(),
+        _ => None,
+    }
+}
+
+/// Requests written to the activity log: those that change something.
+/// Left out: what only looks or tests (live view, connection tests, network
+/// search), camera moves, and the login routes, which write their own line.
+fn audited(method: &Method, path: &str) -> bool {
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return false;
+    }
+    let Some(route) = path.strip_prefix("/api/v1") else {
+        return false;
+    };
+    !(matches!(
+        route,
+        "/auth/login"
+            | "/auth/setup"
+            | "/cameras/probe"
+            | "/cameras/usb/preview"
+            | "/ai/test"
+            | "/ai/probe"
+            | "/webhooks/test"
+            | "/updates/check"
+            | "/backup/inspect"
+    ) || route.starts_with("/discovery/")
+        || route.ends_with("/live/webrtc")
+        || route.ends_with("/probe")
+        || route.ends_with("/ptz/move")
+        || route.ends_with("/ptz/stop")
+        || route.ends_with("/goto"))
+}
+
+/// Lines of the activity log kept: this many days, and this many lines.
+pub const AUDIT_DAYS: u64 = 180;
+/// See [`AUDIT_DAYS`].
+pub const AUDIT_LINES: u32 = 50_000;
+
+impl ApiState {
+    /// Adds a line to the activity log (nothing without a database).
+    pub(crate) async fn audit(
+        &self,
+        username: Option<&str>,
+        client: &str,
+        action: &str,
+        status: u16,
+    ) {
+        let Some(db) = self.database.get() else {
+            return;
+        };
+        // A name typed at the login page is anything: keep it short.
+        let username = username.map(|u| u.chars().take(64).collect::<String>());
+        if let Err(e) = db
+            .add_audit(
+                unix_ms(SystemTime::now()),
+                username.as_deref(),
+                client,
+                action,
+                status,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "cannot write the activity log");
+        }
+    }
+}
+
 /// True when a state-changing request (or a WebSocket) comes from a page of
 /// another origin.
 ///
@@ -433,16 +586,17 @@ pub(crate) async fn require_auth(
     if public(&path) && state.database.get().is_some() {
         return next.run(req).await;
     }
+    let client = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| state.client_ip(c.0.ip(), req.headers()).to_string())
+        .unwrap_or_default();
     // Basic credentials, accepted on every route, are guessed like the login
     // page: same lockout (by address and by account).
-    let basic_keys = basic_credentials(req.headers()).map(|(user, _)| {
-        let ip = req
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|c| state.client_ip(c.0.ip(), req.headers()).to_string())
-            .unwrap_or_default();
-        [format!("ip:{ip}"), format!("user:{user}")]
-    });
+    let basic_user = basic_credentials(req.headers()).map(|(user, _)| user);
+    let basic_keys = basic_user
+        .as_ref()
+        .map(|user| [format!("ip:{client}"), format!("user:{user}")]);
     if let Some(keys) = &basic_keys
         && state.auth_required()
         && let Some(wait) = state.login_guard.blocked(keys)
@@ -466,7 +620,10 @@ pub(crate) async fn require_auth(
             Some(_) => state.login_guard.succeeded(keys),
             None => {
                 state.login_guard.failed(keys);
-                tracing::warn!(client = %keys[0].trim_start_matches("ip:"), "failed Basic authentication");
+                tracing::warn!(%client, "failed Basic authentication");
+                state
+                    .audit(basic_user.as_deref(), &client, "login_failed", 401)
+                    .await;
             }
         }
     }
@@ -489,16 +646,43 @@ pub(crate) async fn require_auth(
         }
         return response;
     };
-    if !principal.admin() && !viewer_may(req.method(), &path) {
-        return ApiError::new(
+    let method = req.method().clone();
+    let username = principal.username.clone();
+    let response = if !principal.admin() && !viewer_may(&method, &path) {
+        ApiError::new(
             StatusCode::FORBIDDEN,
             "forbidden",
             "ce compte ne peut que consulter (rôle lecteur)",
         )
-        .into_response();
+        .into_response()
+    } else if !principal.admin() && admin_only_read(&path) {
+        ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "ces réglages sont réservés aux administrateurs",
+        )
+        .into_response()
+    } else if let Some(camera) = path_camera(&path)
+        && !principal.sees(camera)
+    {
+        // As for a camera that does not exist: nothing says there is one.
+        ApiError::not_found(format!("no camera {camera:?}")).into_response()
+    } else {
+        req.extensions_mut().insert(principal);
+        next.run(req).await
+    };
+    if audited(&method, &path) {
+        let route = path.strip_prefix("/api/v1").unwrap_or(&path);
+        state
+            .audit(
+                username.as_deref(),
+                &client,
+                &format!("{method} {route}"),
+                response.status().as_u16(),
+            )
+            .await;
     }
-    req.extensions_mut().insert(principal);
-    next.run(req).await
+    response
 }
 
 fn session_cookie(token: &str, secure: bool) -> HeaderValue {
@@ -563,6 +747,7 @@ async fn open_session(
     username: &str,
     role: &str,
     headers: &HeaderMap,
+    client: &str,
 ) -> Result<Response, ApiError> {
     let db = state
         .database
@@ -573,11 +758,13 @@ async fn open_session(
     db.create_session(&hash, username, now, now + SESSION_DAYS * 86_400_000)
         .await
         .map_err(|e| ApiError::unavailable(e.to_string()))?;
-    let mut response = Json(Principal {
-        username: Some(username.to_owned()),
-        role: role_name(role),
-    })
-    .into_response();
+    let cameras = db
+        .user_cameras(username)
+        .await
+        .map_err(|e| ApiError::unavailable(e.to_string()))?;
+    state.audit(Some(username), client, "login", 200).await;
+    let mut response =
+        Json(Principal::new(Some(username.to_owned()), role, cameras)).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         session_cookie(&token, over_https(state, headers)),
@@ -596,7 +783,7 @@ pub(crate) async fn login(
         .database
         .get()
         .ok_or_else(|| ApiError::unavailable("accounts need the database"))?;
-    let client = state.client_ip(peer.ip(), &headers);
+    let client = state.client_ip(peer.ip(), &headers).to_string();
     let keys = [format!("ip:{client}"), format!("user:{}", input.username)];
     if let Some(wait) = state.login_guard.blocked(&keys) {
         return Err(ApiError::new(
@@ -625,6 +812,9 @@ pub(crate) async fn login(
     let Some(role) = verified else {
         state.login_guard.failed(&keys);
         tracing::warn!(user = %input.username, %client, "failed login");
+        state
+            .audit(Some(&input.username), &client, "login_failed", 401)
+            .await;
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "bad_credentials",
@@ -633,7 +823,7 @@ pub(crate) async fn login(
     };
     state.login_guard.succeeded(&keys);
     tracing::info!(user = %input.username, %client, "login");
-    open_session(&state, &input.username, &role, &headers).await
+    open_session(&state, &input.username, &role, &headers, &client).await
 }
 
 /// `POST /auth/logout`.
@@ -686,6 +876,7 @@ async fn hash(password: String) -> Result<String, ApiError> {
 /// `POST /auth/setup`: creates the first administrator (only without accounts).
 pub(crate) async fn setup(
     State(state): State<Arc<ApiState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(input): Json<LoginInput>,
 ) -> Result<Response, ApiError> {
@@ -724,7 +915,11 @@ pub(crate) async fn setup(
     }
     state.set_has_users(true);
     tracing::info!(user = %input.username, "first administrator created");
-    open_session(&state, &input.username, "admin", &headers).await
+    let client = state.client_ip(peer.ip(), &headers).to_string();
+    state
+        .audit(Some(&input.username), &client, "POST /auth/setup", 200)
+        .await;
+    open_session(&state, &input.username, "admin", &headers, &client).await
 }
 
 #[derive(Deserialize)]
@@ -778,6 +973,8 @@ pub(crate) struct UserDto {
     username: String,
     role: &'static str,
     created_ms: i64,
+    /// Cameras a viewer sees (`null`: all of them).
+    cameras: Option<Vec<String>>,
 }
 
 /// `GET /users` (admin).
@@ -807,6 +1004,7 @@ pub(crate) async fn users(
                 role: role_name(&u.role),
                 username: u.username,
                 created_ms: u.created_ms,
+                cameras: u.cameras,
             })
             .collect(),
     ))
@@ -821,6 +1019,36 @@ pub(crate) struct UserInput {
     password: Option<String>,
     #[serde(default)]
     role: Option<String>,
+    /// Cameras a viewer sees: absent, unchanged; `null`, all of them.
+    #[serde(default, deserialize_with = "given")]
+    cameras: Option<Option<Vec<String>>>,
+}
+
+/// A field that was sent, `null` included (told apart from an absent one).
+fn given<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// The cameras given for an account, checked: they must exist.
+fn check_cameras(
+    state: &ApiState,
+    cameras: Option<Vec<String>>,
+) -> Result<Option<Vec<String>>, ApiError> {
+    let Some(mut list) = cameras else {
+        return Ok(None);
+    };
+    list.sort();
+    list.dedup();
+    if let Some(unknown) = list.iter().find(|id| state.camera(id).is_none()) {
+        return Err(ApiError::bad_request(format!(
+            "caméra inconnue : {unknown:?}"
+        )));
+    }
+    Ok(Some(list))
 }
 
 fn parse_role(role: Option<&str>) -> Result<Option<&'static str>, ApiError> {
@@ -862,6 +1090,7 @@ pub(crate) async fn create_user(
         .ok_or_else(|| ApiError::bad_request("mot de passe obligatoire"))?;
     check_new_password(&password)?;
     let role = parse_role(input.role.as_deref())?.unwrap_or("viewer");
+    let cameras = check_cameras(&state, input.cameras.flatten())?;
     let hash = hash(password).await?;
     if !db
         .create_user(&username, &hash, role, unix_ms(SystemTime::now()))
@@ -874,12 +1103,17 @@ pub(crate) async fn create_user(
             "identifiant déjà utilisé",
         ));
     }
+    if cameras.is_some() {
+        db.set_user_cameras(&username, cameras.as_deref())
+            .await
+            .map_err(|e| ApiError::unavailable(e.to_string()))?;
+    }
     state.set_has_users(true);
     tracing::info!(user = %username, role, "account created");
     Ok(StatusCode::CREATED)
 }
 
-/// `PUT /users/{name}` (admin): new password and/or role.
+/// `PUT /users/{name}` (admin): new password, role and/or visible cameras.
 pub(crate) async fn update_user(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -890,6 +1124,10 @@ pub(crate) async fn update_user(
         .get()
         .ok_or_else(|| ApiError::unavailable("accounts need the database"))?;
     let role = parse_role(input.role.as_deref())?;
+    let cameras = input
+        .cameras
+        .map(|c| check_cameras(&state, c))
+        .transpose()?;
     if role == Some("viewer") {
         let (_, current) = db
             .user_secret(&name)
@@ -917,6 +1155,12 @@ pub(crate) async fn update_user(
         .map_err(|e| ApiError::unavailable(e.to_string()))?
     {
         return Err(ApiError::not_found(format!("aucun compte {name:?}")));
+    }
+    // Read at every request: in effect at once, without logging out.
+    if let Some(cameras) = &cameras {
+        db.set_user_cameras(&name, cameras.as_deref())
+            .await
+            .map_err(|e| ApiError::unavailable(e.to_string()))?;
     }
     if hash.is_some() || role.is_some() {
         // Sessions carry the old rights: log the account out everywhere.
@@ -954,6 +1198,66 @@ pub(crate) async fn delete_user(
     state.set_has_users(remaining);
     tracing::info!(user = %name, "account deleted");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /audit` parameters.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuditQuery {
+    /// Lines older than this one (the `id` of the last line received).
+    before: Option<i64>,
+    limit: Option<u32>,
+}
+
+/// A line of the activity log.
+#[derive(Serialize)]
+pub(crate) struct AuditDto {
+    id: i64,
+    at_ms: i64,
+    /// Account (`null`: none known).
+    username: Option<String>,
+    /// Address of the client.
+    client: String,
+    /// `login`, `login_failed`, or `METHOD /path` of a request.
+    action: String,
+    /// HTTP status of the answer.
+    status: u16,
+}
+
+/// `GET /audit?before=&limit=` (administrators): the activity of the
+/// accounts, newest first.
+pub(crate) async fn audit(
+    State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<Principal>>,
+    axum::extract::Query(q): axum::extract::Query<AuditQuery>,
+) -> Result<Json<Vec<AuditDto>>, ApiError> {
+    if is_viewer(principal.as_ref()) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "le journal d'activité est réservé aux administrateurs",
+        ));
+    }
+    let db = state
+        .database
+        .get()
+        .ok_or_else(|| ApiError::unavailable("the activity log needs the database"))?;
+    let list = db
+        .audit(q.before, q.limit.unwrap_or(100).clamp(1, 500))
+        .await
+        .map_err(|e| ApiError::unavailable(e.to_string()))?;
+    Ok(Json(
+        list.into_iter()
+            .map(|e| AuditDto {
+                id: e.id,
+                at_ms: e.at_ms,
+                username: e.username,
+                client: e.client,
+                action: e.action,
+                status: e.status,
+            })
+            .collect(),
+    ))
 }
 
 #[cfg(test)]

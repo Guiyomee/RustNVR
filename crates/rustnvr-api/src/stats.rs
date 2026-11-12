@@ -120,6 +120,7 @@ fn compute(
 /// `GET /events/stats?days=7|30`.
 pub(crate) async fn stats(
     State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
     Query(q): Query<StatsQuery>,
 ) -> Result<Json<StatsDto>, ApiError> {
     let days = q.days.unwrap_or(7);
@@ -131,10 +132,11 @@ pub(crate) async fn stats(
         .get()
         .ok_or_else(|| ApiError::unavailable("base de données indisponible : pas d'événements"))?;
     let now = unix_ms(std::time::SystemTime::now());
-    let events = db
+    let mut events = db
         .event_summaries(now - i64::from(days) * DAY_MS, now + 1)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
+    events.retain(|(camera, ..)| crate::auth::sees(principal.as_ref(), camera));
     Ok(Json(compute(
         &events,
         days,
@@ -249,6 +251,7 @@ fn count_crossings(
 /// `GET /crossings?days=7|30`: crossings of the lines drawn on the cameras.
 pub(crate) async fn crossings(
     State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
     Query(q): Query<StatsQuery>,
 ) -> Result<Json<CrossingsDto>, ApiError> {
     let days = q.days.unwrap_or(7);
@@ -260,14 +263,16 @@ pub(crate) async fn crossings(
         .get()
         .ok_or_else(|| ApiError::unavailable("base de données indisponible"))?;
     let now = unix_ms(std::time::SystemTime::now());
-    let list = db
+    let mut list = db
         .crossings(now - i64::from(days) * DAY_MS, now + 1)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    let presence = match state.control.get() {
+    let mut presence = match state.control.get() {
         Some(c) => c.presence().await,
         None => Vec::new(),
     };
+    list.retain(|(camera, ..)| crate::auth::sees(principal.as_ref(), camera));
+    presence.retain(|(camera, ..)| crate::auth::sees(principal.as_ref(), camera));
     Ok(Json(count_crossings(
         &list,
         &presence,

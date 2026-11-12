@@ -134,6 +134,14 @@ fn download_name(file: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
+/// The camera of an extract, from its download name
+/// (`<camera>_<date-time>_<seconds>s[-h264].mp4`; the camera may contain `_`).
+fn export_camera(name: &str) -> Option<&str> {
+    let mut parts = name.rsplitn(3, '_');
+    let (_seconds, _stamp) = (parts.next()?, parts.next()?);
+    parts.next()
+}
+
 /// Removes the extracts left over (by a restart, for instance).
 async fn prune(dir: &std::path::Path) {
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
@@ -358,11 +366,18 @@ pub(crate) async fn prepare(
 /// `GET /exports/{file}`: downloads a prepared extract.
 pub(crate) async fn download(
     State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
     Path(file): Path<String>,
     req: Request,
 ) -> Result<Response, ApiError> {
     let gone = || ApiError::not_found("extrait introuvable ou expiré, relancez l'export");
     let name = download_name(&file).ok_or_else(gone)?.to_owned();
+    // The extract of a camera this account does not see: as if there were none.
+    if crate::auth::scope(principal.as_ref()).is_some()
+        && !export_camera(&name).is_some_and(|c| crate::auth::sees(principal.as_ref(), c))
+    {
+        return Err(gone());
+    }
     let path = state.export_dir().join(&file);
     if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
         return Err(gone());
@@ -451,6 +466,19 @@ mod tests {
         assert_eq!(key_frame_before(&path, 9_000), 4_000);
         let missing = std::path::Path::new("/nonexistent");
         assert_eq!(key_frame_before(missing, 9_000), 0);
+    }
+
+    #[test]
+    fn finds_the_camera_of_an_extract() {
+        assert_eq!(
+            export_camera("jardin_20261103-101500_60s.mp4"),
+            Some("jardin")
+        );
+        assert_eq!(
+            export_camera("porte_d-entree_20261103-101500_5s-h264.mp4"),
+            Some("porte_d-entree")
+        );
+        assert_eq!(export_camera("sans-date.mp4"), None);
     }
 
     #[test]

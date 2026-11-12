@@ -84,7 +84,9 @@ pub fn to_annex_b(mut data: &[u8], prefix: &[u8]) -> Vec<u8> {
 }
 
 /// Starts a viewer session for `offer` (SDP); returns the SDP answer. The
-/// session ends when the viewer leaves, the stream ends or `cancel` fires.
+/// session ends when the viewer leaves, the stream ends or `cancel` fires;
+/// `cancel` is cancelled when it ends, so that a task watching the session
+/// stops with it.
 pub async fn start_session(
     offer: &str,
     source: LiveTap,
@@ -118,9 +120,11 @@ pub async fn start_session(
         .map_err(|e| format!("offre refusée : {e}"))?;
     tracing::info!(candidates = ?candidates, "WebRTC viewer session starting");
     tokio::spawn(async move {
+        let ended = cancel.clone();
         if let Err(e) = run(rtc, sockets, source, cancel).await {
             tracing::debug!(error = %e, "WebRTC session ended with an error");
         }
+        ended.cancel();
         tracing::info!("WebRTC viewer session ended");
     });
     Ok(answer.to_sdp_string())

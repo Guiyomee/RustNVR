@@ -58,6 +58,8 @@ pub struct CapabilitiesDto {
     /// USB webcams (V4L2) can be added as cameras (`usb` in the camera
     /// input, `/devices/video` lists them): Linux only.
     pub usb_cameras: bool,
+    /// The activity log of the accounts (`GET /audit`) is kept.
+    pub audit: bool,
 }
 
 /// Process and host status.
@@ -225,6 +227,9 @@ pub enum CameraStatus {
     Stopped,
     /// Camera disabled in the configuration.
     Disabled,
+    /// Camera paused (no connection) until RustNVR restarts or the pause is
+    /// lifted.
+    Paused,
 }
 
 /// Ingestion counters since start.
@@ -272,6 +277,13 @@ pub struct CameraDto {
     pub name: String,
     /// Enabled in the configuration.
     pub enabled: bool,
+    /// Paused for now (`PUT /cameras/{id}/pause`): not connected, not
+    /// recorded, until RustNVR restarts or the pause is lifted.
+    pub paused: bool,
+    /// Films in night vision: its picture is black and white (infrared),
+    /// measured every minute; `null` while not known (camera stopped or
+    /// offline, FFmpeg missing).
+    pub night: Option<bool>,
     /// Continuous recording enabled.
     pub recording_enabled: bool,
     /// A sub stream is configured (not connected yet).

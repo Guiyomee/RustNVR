@@ -14,9 +14,13 @@
 //! | `<p>/<camera>/record_mode/set` | one of these, or `continuous` / `motion` / `off` (command) | — |
 //! | `<p>/<camera>/event/create` | `PRESS` or a number of seconds (command): a manual event | — |
 //! | `<p>/<camera>/capture/take` | any payload (command): a picture now, on `capture` | — |
+//! | `<p>/<camera>/reboot` | any payload (command): restarts the camera (ONVIF) | — |
+//! | `<p>/<camera>/night` | `ON` / `OFF` (night vision: black and white picture), once known | yes |
 //! | `<p>/<camera>/capture` | JPEG of the last picture taken on command | yes |
 //! | `<p>/<camera>/audio` | `ON` / `OFF` (sound recorded) | yes |
 //! | `<p>/<camera>/audio/set` | `ON` / `OFF` (command) | — |
+//! | `<p>/<camera>/active` | `ON` / `OFF` (camera running, not paused) | yes |
+//! | `<p>/<camera>/active/set` | `ON` / `OFF` (command: resume / pause until restart) | — |
 //! | `<p>/<camera>/person` | `ON` / `OFF` (person recognized, optional AI) | yes |
 //! | `<p>/<camera>/snapshot` | JPEG of the last event | yes |
 //! | `<p>/<camera>/<object>/snapshot` | JPEG of the last recognized object of that kind (`person`, `car`…), boxes drawn | yes |
@@ -102,12 +106,34 @@ pub struct CameraView {
     pub motion_active: bool,
     /// Sound recorded with the video.
     pub audio_enabled: bool,
+    /// Enabled and not paused (the « Caméra active » switch).
+    pub active: bool,
+    /// An ONVIF port is set: the camera can be restarted from MQTT.
+    pub onvif: bool,
+    /// Films in night vision, once known.
+    pub night: Option<bool>,
+    /// Maker, model, firmware and serial number read through ONVIF (shown
+    /// on the device in Home Assistant), once read.
+    pub device: Option<DeviceView>,
     /// Object recognition is configured: a « person » sensor is announced.
     pub person_detection: bool,
     /// Lines counting the presence: name, who is inside.
     pub presence: Vec<(String, u64)>,
     /// Names of the PTZ presets of a motorised camera (empty: no selector).
     pub ptz_presets: Vec<String>,
+}
+
+/// The record of a camera, for the Home Assistant device.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeviceView {
+    /// Maker.
+    pub manufacturer: Option<String>,
+    /// Model.
+    pub model: Option<String>,
+    /// Firmware version.
+    pub firmware: Option<String>,
+    /// Serial number.
+    pub serial: Option<String>,
 }
 
 /// NVR-wide figures.
@@ -144,6 +170,13 @@ pub trait NvrView: Send + Sync + 'static {
         camera: CameraId,
         enabled: bool,
     ) -> BoxFuture<'_, Result<(), String>>;
+    /// Resumes a camera, or pauses it until RustNVR restarts (command from
+    /// MQTT).
+    fn set_camera_active(
+        &self,
+        camera: CameraId,
+        active: bool,
+    ) -> BoxFuture<'_, Result<(), String>>;
     /// Starts the presence count of the line of `camera` whose topic level
     /// is `label` again from zero (command from MQTT).
     fn reset_presence(&self, camera: CameraId, label: String) -> BoxFuture<'_, Result<(), String>>;
@@ -159,6 +192,8 @@ pub trait NvrView: Send + Sync + 'static {
     /// Starts an event of `seconds` on `camera` (command from MQTT); its
     /// identifier.
     fn manual_event(&self, camera: CameraId, seconds: u32) -> BoxFuture<'_, Result<i64, String>>;
+    /// Restarts `camera` through ONVIF (command from MQTT).
+    fn reboot_camera(&self, camera: CameraId) -> BoxFuture<'_, Result<(), String>>;
     /// A picture of `camera` now, as a JPEG (command from MQTT).
     fn capture(&self, camera: CameraId) -> BoxFuture<'_, Result<Vec<u8>, String>>;
     /// Pauses motion detection on every camera, or resumes it (command from
@@ -390,12 +425,14 @@ impl Topics {
         self.camera_command(topic, "ptz/preset/set")
     }
 
-    /// Camera and switch of a `<p>/<camera>/motion_detection/set` or
-    /// `<p>/<camera>/audio/set` topic.
+    /// Camera and switch of a `<p>/<camera>/motion_detection/set`,
+    /// `<p>/<camera>/audio/set` or `<p>/<camera>/active/set` topic.
     fn command(&self, topic: &str) -> Option<(CameraId, Switch)> {
         let rest = topic.strip_prefix(&self.prefix)?.strip_prefix('/')?;
         let (cam, switch) = if let Some(cam) = rest.strip_suffix("/motion_detection/set") {
             (cam, Switch::Motion)
+        } else if let Some(cam) = rest.strip_suffix("/active/set") {
+            (cam, Switch::Active)
         } else {
             (rest.strip_suffix("/audio/set")?, Switch::Audio)
         };
@@ -408,6 +445,7 @@ impl Topics {
 enum Switch {
     Motion,
     Audio,
+    Active,
 }
 
 fn on_off(v: bool) -> &'static str {
@@ -570,9 +608,14 @@ impl Client {
             (t.camera(&c.id, "recording"), on_off(c.recording)),
             (t.camera(&c.id, "record_mode"), record_mode_name(c)),
             (t.camera(&c.id, "audio"), on_off(c.audio_enabled)),
+            (t.camera(&c.id, "active"), on_off(c.active)),
         ];
         for (topic, payload) in msgs {
             self.publish(topic, true, payload);
+        }
+        if let Some(night) = c.night {
+            let topic = self.topics.camera(&c.id, "night");
+            self.publish(topic, true, on_off(night));
         }
         if c.person_detection {
             let on = self.persons.contains(&c.id);
@@ -677,6 +720,8 @@ impl Client {
             "snapshot",
             "capture",
             "audio",
+            "active",
+            "night",
             "person",
         ] {
             let topic = self.topics.camera(id, what);
@@ -737,6 +782,12 @@ impl Client {
                 self.publish(topic, true, record_mode_name(c));
                 let topic = self.topics.camera(&c.id, "audio");
                 self.publish(topic, true, on_off(c.audio_enabled));
+                let topic = self.topics.camera(&c.id, "active");
+                self.publish(topic, true, on_off(c.active));
+                if let Some(night) = c.night {
+                    let topic = self.topics.camera(&c.id, "night");
+                    self.publish(topic, true, on_off(night));
+                }
                 self.publish_presence(c);
                 self.publish_ptz(c);
             }
@@ -780,11 +831,13 @@ impl Client {
         for command in [
             "motion_detection/set",
             "audio/set",
+            "active/set",
             "line/+/presence/reset",
             "ptz/preset/set",
             "record_mode/set",
             "event/create",
             "capture/take",
+            "reboot",
         ] {
             let topic = format!("{}/+/{command}", self.topics.prefix);
             if self.client.try_subscribe(topic, QoS::AtLeastOnce).is_err() {
@@ -830,6 +883,15 @@ impl Client {
             tokio::spawn(async move {
                 if let Err(e) = view.manual_event(camera.clone(), seconds).await {
                     tracing::warn!(%camera, error = %e, "MQTT: manual event failed");
+                }
+            });
+            return;
+        }
+        if let Some(camera) = self.topics.camera_command(topic, "reboot") {
+            let view = self.view.clone();
+            tokio::spawn(async move {
+                if let Err(e) = view.reboot_camera(camera.clone()).await {
+                    tracing::warn!(%camera, error = %e, "MQTT: camera restart failed");
                 }
             });
             return;
@@ -886,6 +948,7 @@ impl Client {
             let result = match switch {
                 Switch::Motion => view.set_motion_enabled(camera.clone(), enabled).await,
                 Switch::Audio => view.set_audio_enabled(camera.clone(), enabled).await,
+                Switch::Active => view.set_camera_active(camera.clone(), enabled).await,
             };
             if let Err(e) = result {
                 tracing::warn!(%camera, ?switch, error = %e, "MQTT: command failed");
@@ -1131,8 +1194,13 @@ mod tests {
             parse("home/nvr/jardin/audio/set"),
             Some(("jardin".into(), Switch::Audio))
         );
+        assert_eq!(
+            parse("home/nvr/jardin/active/set"),
+            Some(("jardin".into(), Switch::Active))
+        );
         assert!(parse("home/nvr/jardin/motion").is_none());
         assert!(parse("home/nvr/jardin/audio").is_none());
+        assert!(parse("home/nvr/jardin/active").is_none());
         assert!(parse("other/jardin/motion_detection/set").is_none());
         assert!(parse("home/nvr/a/b/motion_detection/set").is_none());
     }
@@ -1166,6 +1234,10 @@ mod tests {
             motion_enabled: true,
             motion_active: false,
             audio_enabled: false,
+            active: true,
+            onvif: false,
+            night: None,
+            device: None,
             person_detection: false,
             presence: Vec::new(),
             ptz_presets: Vec::new(),
