@@ -486,10 +486,8 @@ async fn recording_file(
         let key = format!("{dest}_{camera}_{}", file.trim_end_matches(".mp4"));
         path = state.playback.get(&state, &path, &key).await?;
     }
-    let response = ServeFile::new(path)
-        .oneshot(req)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    // Serving a file never fails (`Infallible`): a missing file is a 404.
+    let Ok(response) = ServeFile::new(path).oneshot(req).await;
     Ok(response.into_response())
 }
 

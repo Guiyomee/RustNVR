@@ -382,11 +382,9 @@ pub(crate) async fn download(
     if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
         return Err(gone());
     }
-    let mut response = ServeFile::new(&path)
-        .oneshot(req)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
-        .into_response();
+    // Serving a file never fails (`Infallible`): a missing file is a 404.
+    let Ok(response) = ServeFile::new(&path).oneshot(req).await;
+    let mut response = response.into_response();
     if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
         response
             .headers_mut()

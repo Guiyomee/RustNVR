@@ -7,7 +7,9 @@ précautions) sont sur la page de chaque
 
 ## Non publiée
 
-Rien pour l'instant.
+### Corrections
+- L'image Docker de la 2026.11.07 n'avait pas été publiée sur GitHub : le
+  contrôle du code échouait avec Rust 1.100, sorti entre-temps.
 
 ## 2026.11.07 (2026-11-12)
 
