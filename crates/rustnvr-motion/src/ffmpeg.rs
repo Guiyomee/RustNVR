@@ -274,6 +274,76 @@ pub async fn snapshot_jpeg(
     jpeg_from(ffmpeg, &snapshot_args(max_width, masks), input).await
 }
 
+/// The first key frame kept by `source`, as an fMP4 input for FFmpeg (one
+/// picture: enough to measure, much less to decode than [`snapshot_jpeg`]).
+pub(crate) fn key_frame_input(source: &LiveTap) -> Result<Vec<u8>, String> {
+    let (frames, rx) = source.subscribe();
+    drop(rx);
+    let Some(first) = frames.into_iter().next() else {
+        return Err("aucune image récente (caméra hors ligne ?)".to_owned());
+    };
+    let mut input = fmp4::init_segment(&first.params);
+    let mut muxer = LiveMuxer::tolerant(&first);
+    if let Push::Fragment(b) = muxer.push(first) {
+        input.extend_from_slice(&b);
+    }
+    if let Some(b) = muxer.finish() {
+        input.extend_from_slice(&b);
+    }
+    Ok(input)
+}
+
+/// The first picture of `input` (fMP4) as raw `rgb24`, `width` × `height`.
+pub(crate) async fn raw_picture(
+    ffmpeg: &str,
+    width: u32,
+    height: u32,
+    input: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let mut args = base_args(false);
+    args.extend([
+        "-frames:v".to_owned(),
+        "1".to_owned(),
+        "-vf".to_owned(),
+        format!("scale={width}:{height}:flags=area,format=rgb24"),
+        "-f".to_owned(),
+        "rawvideo".to_owned(),
+        "pipe:1".to_owned(),
+    ]);
+    let len = (width * height * 3) as usize;
+    let _permit = SNAPSHOTS
+        .acquire()
+        .await
+        .map_err(|_| "captures indisponibles".to_owned())?;
+    let run = async {
+        let mut p = Ffmpeg::spawn(ffmpeg, &args)?;
+        let mut stdin = p.stdin;
+        let writer = tokio::spawn(async move {
+            let _ = stdin.write_all(&input).await;
+            let _ = stdin.shutdown().await;
+        });
+        let mut output = vec![0u8; len];
+        let read = read_picture(&mut p.stdout, &mut output).await;
+        let _ = writer.await;
+        let _ = p.child.wait().await;
+        match read {
+            Ok(Some(())) => Ok(output),
+            Ok(None) => {
+                let detail = p
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                Err(format!("FFmpeg n'a pas produit d'image {detail}"))
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    };
+    tokio::time::timeout(SNAPSHOT_TIMEOUT, run)
+        .await
+        .map_err(|_| "image trop longue à décoder (délai dépassé)".to_owned())?
+}
+
 /// `jpeg` with the boxes `[x1, y1, x2, y2]` (fractions of the picture)
 /// drawn in blue, as the interface shows them.
 pub async fn boxed_jpeg(ffmpeg: &str, jpeg: Bytes, boxes: &[[f32; 4]]) -> Result<Bytes, String> {

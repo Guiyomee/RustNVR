@@ -92,6 +92,21 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   (reprise automatique après une coupure, rien n'est perdu au redémarrage) ;
   clé du serveur SFTP vérifiée (empreinte fixée ou retenue à la première
   connexion).
+- Vision nocturne mesurée sur l'image (noir et blanc = infrarouge), chaque
+  minute et pour toutes les marques : étiquette dans l'interface, capteur
+  « Vision nocturne » dans Home Assistant — mesure vérifiée avec FFmpeg sur
+  une mire en couleur et en noir et blanc ; ⚠ seuils pas encore vérifiés sur
+  de vraies caméras de nuit.
+- Redémarrer une caméra par ONVIF (bouton de la page de la caméra, bouton
+  Home Assistant) et fiche de la caméra (fabricant, modèle, firmware, numéro
+  de série, dans « Informations techniques » et sur l'appareil Home
+  Assistant) — testés de bout en bout contre une caméra ONVIF simulée ; ⚠ pas
+  encore sur une vraie caméra.
+- Pause d'une caméra (page de la caméra, liste des caméras, interrupteur
+  « Caméra active » de Home Assistant) : ni connexion, ni enregistrement, ni
+  détection jusqu'à la reprise ou au redémarrage de RustNVR (jamais
+  enregistrée) — test de bout en bout avec une caméra simulée ; ⚠ pas encore
+  dans un vrai Home Assistant.
 - Son des caméras enregistré avec la vidéo (AAC tel quel, G.711 converti en
   Opus), désactivable par caméra (interface, MQTT / Home Assistant) ; bouton son
   dans la relecture et dans le direct de la page caméra ; dans le direct WebRTC,
@@ -106,11 +121,15 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   (mode présent / absent) ([MQTT.md](MQTT.md)).
 - Interface dans la barre latérale de Home Assistant (ingress), avec l'app
   « RustNVR Proxy » de ce dépôt
-  ([HOME_ASSISTANT.md](HOME_ASSISTANT.md#5-interface-dans-home-assistant)).
+  ([HOME_ASSISTANT.md](HOME_ASSISTANT.md#interface-dans-home-assistant)).
 - API REST `/api/v1` et WebSocket temps réel
   ([API_CONTRACT.md](../API_CONTRACT.md)) ; comptes administrateur / lecteur
   avec page de connexion (mots de passe Argon2, sessions par cookie, blocage
-  après 5 essais manqués), HTTP Basic pour les scripts.
+  après 5 essais manqués), HTTP Basic pour les scripts. Un lecteur peut être
+  limité à certaines caméras (les autres n'existent pas pour lui) et n'a ni
+  les pages Caméras et Stockage, ni les réglages. Journal d'activité pour les
+  administrateurs (Paramètres → Activité des comptes) : connexions, refusées
+  comprises, et tout ce qui modifie quelque chose, avec le compte et l'adresse.
 - Journaux `tracing` texte ou JSON ; métriques périodiques par caméra
   (i/s, débit, pertes, reconnexions) et processus (CPU, RSS).
 - Aucun secret journalisé : identifiants retirés de l'URL, URL affichées sous

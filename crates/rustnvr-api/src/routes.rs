@@ -106,6 +106,7 @@ async fn capabilities(State(state): State<Arc<ApiState>>) -> Json<CapabilitiesDt
             .unwrap_or_else(|e| e.into_inner())
             .is_some(),
         users: state.database.get().is_some(),
+        audit: state.database.get().is_some(),
         backup: state.control.get().is_some(),
         ptz: state.control.get().is_some(),
         usb_cameras: cfg!(target_os = "linux") && state.control.get().is_some(),
@@ -116,11 +117,16 @@ async fn system(State(state): State<Arc<ApiState>>) -> Json<SystemDto> {
     Json(state.system_dto())
 }
 
-async fn cameras(State(state): State<Arc<ApiState>>) -> Json<Vec<CameraDto>> {
+/// `GET /cameras`: the cameras this account sees.
+async fn cameras(
+    State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<auth::Principal>>,
+) -> Json<Vec<CameraDto>> {
     Json(
         state
             .cameras()
             .iter()
+            .filter(|c| auth::sees(principal.as_ref(), c.id.as_str()))
             .map(|c| state.camera_dto(c))
             .collect(),
     )
@@ -351,7 +357,22 @@ async fn camera_playlist(
         .into_response())
 }
 
-async fn storage(State(state): State<Arc<ApiState>>) -> Result<Json<StorageDto>, ApiError> {
+/// `GET /storage`. An account limited to some cameras gets the totals of
+/// the disks, and the detail of its cameras only.
+async fn storage(
+    State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<auth::Principal>>,
+) -> Result<Json<StorageDto>, ApiError> {
+    let limit = |mut dto: StorageDto| {
+        if auth::scope(principal.as_ref()).is_some() {
+            let sees = |camera: &String| auth::sees(principal.as_ref(), camera);
+            dto.cameras.retain(|c| sees(&c.camera));
+            for d in &mut dto.destinations {
+                d.used_by.retain(sees);
+            }
+        }
+        Json(dto)
+    };
     let mut cache = state.storage_cache.lock().await;
     if let Some((at, dto)) = cache.as_ref()
         && at.elapsed() < STORAGE_CACHE
@@ -359,14 +380,14 @@ async fn storage(State(state): State<Arc<ApiState>>) -> Result<Json<StorageDto>,
         // The default may have changed since: not cached.
         let mut dto = dto.clone();
         dto.default_destination = state.default_destination();
-        return Ok(Json(dto));
+        return Ok(limit(dto));
     }
     let s = state.clone();
     let dto = tokio::task::spawn_blocking(move || storage::compute(&s))
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     *cache = Some((Instant::now(), dto.clone()));
-    Ok(Json(dto))
+    Ok(limit(dto))
 }
 
 /// `GET /storage/destinations`; a viewer gets no account of a remote
@@ -466,10 +487,8 @@ async fn recording_file(
         let key = format!("{dest}_{camera}_{}", file.trim_end_matches(".mp4"));
         path = state.playback.get(&state, &path, &key).await?;
     }
-    let response = ServeFile::new(path)
-        .oneshot(req)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    // Serving a file never fails (`Infallible`): a missing file is a 404.
+    let Ok(response) = ServeFile::new(path).oneshot(req).await;
     Ok(response.into_response())
 }
 
@@ -584,6 +603,10 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
             axum::routing::put(detection::set_audio),
         )
         .route(
+            "/cameras/{id}/pause",
+            axum::routing::put(detection::set_camera_paused),
+        )
+        .route(
             "/detection/pause",
             axum::routing::put(detection::set_detection_paused),
         )
@@ -595,6 +618,8 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route("/cameras/{id}/ptz", get(crate::ptz::presets))
         .route("/cameras/{id}/ptz/move", post(crate::ptz::move_camera))
         .route("/cameras/{id}/ptz/stop", post(crate::ptz::stop))
+        .route("/cameras/{id}/reboot", post(crate::ptz::reboot))
+        .route("/cameras/{id}/device", get(crate::ptz::device))
         .route("/cameras/{id}/ptz/presets", post(crate::ptz::create_preset))
         .route(
             "/cameras/{id}/ptz/presets/{token}",
@@ -655,6 +680,7 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
             "/users/{name}",
             axum::routing::put(auth::update_user).delete(auth::delete_user),
         )
+        .route("/audit", get(auth::audit))
         .route("/ws", get(ws::handler))
         .fallback(api_not_found);
 

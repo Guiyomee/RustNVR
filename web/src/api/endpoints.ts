@@ -127,6 +127,8 @@ export const setSettings = (input: GeneralSettingsInput) => apiSend<GeneralSetti
 export interface AuthUser {
   username: string | null
   role: 'admin' | 'viewer'
+  /** Cameras this account sees (null: all of them; always null for an administrator). */
+  cameras?: string[] | null
 }
 export interface AuthStatus {
   /** Authentication is required. */
@@ -141,6 +143,21 @@ export interface UserAccount {
   username: string
   role: 'admin' | 'viewer'
   created_ms: number
+  /** Cameras a viewer sees (null: all of them). */
+  cameras: string[] | null
+}
+/** A line of the activity log of the accounts (`GET /audit`, administrators). */
+export interface AuditEntry {
+  id: number
+  at_ms: number
+  /** Account (null: none known). */
+  username: string | null
+  /** Address of the client. */
+  client: string
+  /** `login`, `login_failed`, or `METHOD /path` of a request. */
+  action: string
+  /** HTTP status of the answer. */
+  status: number
 }
 export const getAuthStatus = () => apiGet<AuthStatus>('/auth/status')
 export const login = (username: string, password: string) => apiSend<AuthUser>('POST', '/auth/login', { username, password }, 30_000)
@@ -149,12 +166,35 @@ export const setupAdmin = (username: string, password: string) => apiSend<AuthUs
 export const changePassword = (current: string, next: string) => apiSend<null>('PUT', '/auth/password', { current, new: next }, 30_000)
 export const getUsers = () => apiGet<UserAccount[]>('/users')
 export const createUser = (username: string, password: string, role: 'admin' | 'viewer') => apiSend<null>('POST', '/users', { username, password, role }, 30_000)
-export const updateUser = (name: string, change: { password?: string; role?: 'admin' | 'viewer' }) =>
+/** `cameras`: the cameras a viewer sees (null: all of them). */
+export const updateUser = (name: string, change: { password?: string; role?: 'admin' | 'viewer'; cameras?: string[] | null }) =>
   apiSend<null>('PUT', `/users/${encodeURIComponent(name)}`, change, 30_000)
+/** Activity log, newest first; `before`: the id of the last line received, for the next page. */
+export const getAudit = (q: { before?: number; limit?: number } = {}) => {
+  const p = new URLSearchParams()
+  if (q.before != null) p.set('before', String(q.before))
+  if (q.limit != null) p.set('limit', String(q.limit))
+  const query = p.toString()
+  return apiGet<AuditEntry[]>(`/audit${query ? `?${query}` : ''}`)
+}
 export const deleteUser = (name: string) => apiSend<null>('DELETE', `/users/${encodeURIComponent(name)}`)
 
 // Sound recording of a camera (camera_management).
 export const setDetectionPaused = (paused: boolean) => apiSend<{ paused: boolean }>('PUT', '/detection/pause', { paused }, 30_000)
+/** Maker, model, firmware and serial number of a camera (ONVIF); null fields: not given. */
+export interface CameraDevice {
+  manufacturer: string | null
+  model: string | null
+  firmware: string | null
+  serial: string | null
+  hardware: string | null
+}
+/** The record of a camera, as last read (`refresh`: read again from the camera). */
+export const getCameraDevice = (id: string, refresh = false) => apiGet<CameraDevice>(`/cameras/${encodeURIComponent(id)}/device${refresh ? '?refresh=1' : ''}`, 20_000)
+/** Restarts the camera itself through ONVIF; what the camera answered. */
+export const rebootCamera = (id: string) => apiSend<{ message: string }>('POST', `/cameras/${encodeURIComponent(id)}/reboot`, {}, 30_000)
+/** Pauses a camera until it is resumed or RustNVR restarts (never stored). */
+export const setCameraPaused = (id: string, paused: boolean) => apiSend<Camera>('PUT', `/cameras/${encodeURIComponent(id)}/pause`, { paused }, 30_000)
 export const setAudio = (id: string, enabled: boolean) => apiSend<Camera>('PUT', `/cameras/${encodeURIComponent(id)}/audio`, { enabled }, 30_000)
 
 // Object recognition settings (capabilities.settings_write).

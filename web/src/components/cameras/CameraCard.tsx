@@ -1,4 +1,4 @@
-import { GripVertical, Maximize } from 'lucide-react'
+import { GripVertical, Maximize, Moon } from 'lucide-react'
 import { memo, useRef, useState, type ReactNode } from 'react'
 import { useCapability, useIsDemo } from '../../data/DataContext'
 import { useInView } from '../../hooks/useUi'
@@ -35,7 +35,10 @@ export const CameraCard = memo(function CameraCard({ camera, handle }: { camera:
             {camera.name}
           </Link>
         </div>
-        <CameraStatusBadge status={camera.status} demo={demo} />
+        <span className="flex items-center gap-2">
+          {camera.night && <Moon className="size-3.5 text-muted" aria-label={t('Vision nocturne', 'Night vision')} />}
+          <CameraStatusBadge status={camera.status} demo={demo} />
+        </span>
       </header>
       <div
         ref={ref}

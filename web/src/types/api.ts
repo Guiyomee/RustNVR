@@ -25,6 +25,8 @@ export interface Capabilities {
   backup: boolean
   /** Pan, tilt, zoom and presets of motorised cameras (`/cameras/{id}/ptz`), for cameras with `ptz`. */
   ptz?: boolean
+  /** The activity log of the accounts is kept (`/audit`, administrators). */
+  audit?: boolean
   /** USB webcams (V4L2) can be added as cameras (`usb` in the camera input, `/devices/video` lists them). */
   usb_cameras?: boolean
   /** Port of the RTSP republication (`rtsp://host:port/<camera>`, `/<camera>/sub`), while it is served. */
@@ -105,7 +107,8 @@ export interface Gpu {
   busy_percent: number | null
 }
 
-export type CameraStatus = 'online' | 'connecting' | 'retrying' | 'idle' | 'stopped' | 'disabled'
+/** `paused`: stopped from the interface or MQTT until resumed or RustNVR restarts. */
+export type CameraStatus = 'online' | 'connecting' | 'retrying' | 'idle' | 'stopped' | 'disabled' | 'paused'
 
 export interface StreamStats {
   frames: number
@@ -130,6 +133,10 @@ export interface Camera {
   id: string
   name: string
   enabled: boolean
+  /** Paused (not connected, not recorded) until resumed or RustNVR restarts. */
+  paused: boolean
+  /** Films in night vision (black and white picture), measured every minute; null while not known. */
+  night: boolean | null
   recording_enabled: boolean
   has_sub_stream: boolean
   endpoint: string
@@ -715,18 +722,47 @@ export interface ProtectedRange {
   created_ms: number
 }
 
-/** A webhook (`GET /api/v1/webhooks`): HTTP POST with the event as JSON. */
+/** Where the calls of a webhook go: RustNVR's JSON, or a message of a service. */
+export type WebhookKind = 'json' | 'discord' | 'ntfy' | 'telegram'
+
+/** What a webhook is called for. */
+export type WebhookEvent = 'motion' | 'objects' | 'end' | 'crossing' | 'storage' | 'camera' | 'recording'
+
+/** The message chosen for one kind of call (Discord, ntfy, Telegram); absent fields keep the default. */
+export interface WebhookMessage {
+  /** Title, with variables such as `{camera}`. */
+  title?: string | null
+  /** Text under the title, with variables. */
+  text?: string | null
+  /** ntfy priority, 1 (min) to 5 (max). */
+  priority?: number | null
+  /** Telegram: delivered without a sound. */
+  silent?: boolean
+}
+
+/** A webhook (`GET /api/v1/webhooks`): HTTP POST of each event. */
 export interface Webhook {
   name: string
+  /** Address called; the topic for ntfy; unused for Telegram. */
   url: string
+  /** Always given by the server; absent in a webhook being created means `json`. */
+  kind?: WebhookKind
+  /** ntfy: access token (optional); Telegram: token of the bot. */
+  token?: string | null
+  /** Telegram: the chat the bot writes to (a number, or @channel). */
+  chat_id?: string | null
   enabled: boolean
   /** Camera identifiers; empty: all. */
   cameras: string[]
   /** Object labels; empty: every event. */
   objects: string[]
-  events: ('motion' | 'objects' | 'end' | 'crossing' | 'storage' | 'camera')[]
+  events: WebhookEvent[]
   /** The picture is sent (base64 in the JSON). */
   image: boolean
+  /** Messages chosen per kind of call (the others keep the default one). */
+  messages?: Partial<Record<WebhookEvent, WebhookMessage>>
+  /** At most one event, and one line crossing, called per camera every this many minutes; 0 or absent: no limit. */
+  cooldown_minutes?: number
 }
 
 /** POST /api/v1/webhooks/test */

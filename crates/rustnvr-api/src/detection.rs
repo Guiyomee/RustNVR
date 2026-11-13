@@ -52,6 +52,7 @@ pub(crate) struct EventsQuery {
 /// `GET /events?camera=&from=&to=&limit=`: events overlapping the period, newest first.
 pub(crate) async fn events(
     State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<Vec<EventDto>>, ApiError> {
     let db = database(&state)?;
@@ -70,6 +71,7 @@ pub(crate) async fn events(
     let list = db
         .events(&EventFilter {
             camera,
+            cameras: crate::auth::scope(principal.as_ref()),
             from_ms: from,
             to_ms: to,
             limit: q.limit.unwrap_or(200).min(MAX_EVENTS_PER_QUERY),
@@ -87,6 +89,7 @@ fn event_id(id: &str) -> Result<i64, ApiError> {
 /// `GET /events/{id}`.
 pub(crate) async fn event(
     State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
     Path(id): Path<String>,
 ) -> Result<Json<EventDto>, ApiError> {
     let db = database(&state)?;
@@ -94,6 +97,8 @@ pub(crate) async fn event(
         .event(event_id(&id)?)
         .await
         .map_err(internal)?
+        // An event of a camera this account does not see does not exist for it.
+        .filter(|e| crate::auth::sees(principal.as_ref(), e.camera.as_str()))
         .ok_or_else(|| ApiError::not_found(format!("no event {id}")))?;
     Ok(Json(EventDto::from(&e)))
 }
@@ -112,9 +117,17 @@ fn jpeg(body: Vec<u8>, cache: &'static str) -> Response {
 /// `GET /events/{id}/thumbnail`: JPEG taken when the event started.
 pub(crate) async fn thumbnail(
     State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let db = database(&state)?;
+    if crate::auth::scope(principal.as_ref()).is_some() {
+        db.event(event_id(&id)?)
+            .await
+            .map_err(internal)?
+            .filter(|e| crate::auth::sees(principal.as_ref(), e.camera.as_str()))
+            .ok_or_else(|| ApiError::not_found(format!("no thumbnail for event {id}")))?;
+    }
     let path = db
         .thumbnail_path(event_id(&id)?)
         .await
@@ -207,6 +220,29 @@ pub(crate) async fn set_audio(
 ) -> Result<Json<crate::dto::CameraDto>, ApiError> {
     control(&state)?
         .set_audio(id.clone(), input.enabled)
+        .await?;
+    let camera = state
+        .camera(&id)
+        .ok_or_else(|| ApiError::not_found(format!("no camera {id:?}")))?;
+    Ok(Json(state.camera_dto(&camera)))
+}
+
+/// Body of `PUT /cameras/{id}/pause`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CameraPauseInput {
+    paused: bool,
+}
+
+/// `PUT /cameras/{id}/pause`: pauses a camera until RustNVR restarts, or
+/// resumes it.
+pub(crate) async fn set_camera_paused(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    Json(input): Json<CameraPauseInput>,
+) -> Result<Json<crate::dto::CameraDto>, ApiError> {
+    control(&state)?
+        .set_camera_paused(id.clone(), input.paused)
         .await?;
     let camera = state
         .camera(&id)

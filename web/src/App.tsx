@@ -3,7 +3,8 @@ import { AppLayout } from './components/layout/AppLayout'
 import { Button } from './components/ui/Button'
 import { Card } from './components/ui/Card'
 import { EmptyState, LoadingState } from './components/ui/States'
-import { AuthGate } from './auth/AuthGate'
+import { AuthGate, useIsViewer } from './auth/AuthGate'
+import { adminPage } from './components/layout/nav'
 import { DataProvider } from './data/DataContext'
 import { Link, matchPath, useLocation } from './lib/router'
 import { OverviewPage } from './pages/OverviewPage'
@@ -94,9 +95,20 @@ function Shell({ mode }: { mode: string }) {
 
 function Routes() {
   const { path } = useLocation()
+  const viewer = useIsViewer()
   let page: ReactNode
   const detail = matchPath('/cameras/:id', path)
-  if (path === '/') page = <OverviewPage />
+  if (viewer && adminPage(path))
+    page = (
+      <Card>
+        <EmptyState title={t('Page réservée aux administrateurs', 'Page for administrators only')}>
+          <Link to="/" className="text-accent hover:underline">
+            {t("Retour à la vue d'ensemble", "Back to the overview")}
+          </Link>
+        </EmptyState>
+      </Card>
+    )
+  else if (path === '/') page = <OverviewPage />
   else if (path === '/cameras') page = <CamerasPage />
   else if (detail) page = <CameraDetailPage key={detail.id} id={detail.id ?? ''} />
   else if (path === '/events') page = <EventsPage />

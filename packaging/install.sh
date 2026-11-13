@@ -7,7 +7,8 @@
 #   install.sh --archive rustnvr-2026.11.03-linux-x86_64.tar.gz
 #
 # Copied to /usr/local/bin/rustnvr-update: later updates are just
-# `rustnvr-update`. The layout is the one of docs/INSTALLATION.md:
+# `rustnvr-update`. The layout is the one of the guide
+# (https://github.com/Guiyomee/RustNVR/wiki/EN-Debian):
 #   /usr/local/bin/rustnvr, /usr/local/share/rustnvr/web, /etc/rustnvr
 #   (config.toml, rustnvr.env), /var/lib/rustnvr (recordings, data).
 # An update replaces the program and the interface only: the configuration,

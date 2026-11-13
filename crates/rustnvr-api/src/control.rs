@@ -185,6 +185,14 @@ pub trait NvrControl: Send + Sync {
     /// Switches the recording of the sound of a camera (stored with the
     /// camera). Off applies at once; on starts with the next key frame.
     fn set_audio(&self, id: String, enabled: bool) -> BoxFuture<'_, Result<(), ControlError>>;
+    /// Pauses a camera (stopped: no connection, recording, detection or
+    /// live view) or resumes it. Kept in memory only: every camera runs
+    /// again when RustNVR restarts. Any camera, `config.toml` ones included.
+    fn set_camera_paused(
+        &self,
+        id: String,
+        paused: bool,
+    ) -> BoxFuture<'_, Result<(), ControlError>>;
     /// Pauses motion detection on every camera, or resumes it (kept across
     /// restarts; the settings of each camera do not change).
     fn set_detection_paused(&self, paused: bool) -> BoxFuture<'_, Result<(), ControlError>>;
@@ -289,12 +297,38 @@ pub trait NvrControl: Send + Sync {
     /// The presets of a motorised camera (ONVIF PTZ); fails when the camera
     /// has no ONVIF service configured or announces no PTZ.
     fn ptz_presets(&self, camera: String) -> BoxFuture<'_, Result<Vec<PtzPreset>, ControlError>>;
+    /// The record of a camera read through ONVIF (maker, model, firmware,
+    /// serial number), kept from the last reading unless `fresh`.
+    fn camera_device(
+        &self,
+        camera: String,
+        fresh: bool,
+    ) -> BoxFuture<'_, Result<CameraDevice, ControlError>>;
+    /// Restarts a camera through ONVIF (its port must be set); the message
+    /// the camera gives.
+    fn reboot_camera(&self, camera: String) -> BoxFuture<'_, Result<String, ControlError>>;
     /// Moves a motorised camera, or changes its presets.
     fn ptz_command(
         &self,
         camera: String,
         command: PtzCommand,
     ) -> BoxFuture<'_, Result<(), ControlError>>;
+}
+
+/// The record of a camera, as it gives it through ONVIF (`GET
+/// /cameras/{id}/device`); absent fields: not given by the camera.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CameraDevice {
+    /// Maker.
+    pub manufacturer: Option<String>,
+    /// Model.
+    pub model: Option<String>,
+    /// Firmware version.
+    pub firmware: Option<String>,
+    /// Serial number.
+    pub serial: Option<String>,
+    /// Hardware reference.
+    pub hardware: Option<String>,
 }
 
 /// A position stored on a motorised camera.

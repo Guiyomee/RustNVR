@@ -31,6 +31,9 @@ const CAMERA_ENTITIES: &[(&str, &str)] = &[
     ("button", "create_event"),
     ("button", "take_capture"),
     ("camera", "capture"),
+    ("switch", "active"),
+    ("button", "reboot"),
+    ("binary_sensor", "night"),
 ];
 
 /// Discovery node identifier: the client identifier restricted to the
@@ -75,6 +78,32 @@ pub(crate) fn camera_config_topics(prefix: &str, client_id: &str, cam: &CameraId
         .collect()
 }
 
+/// The Home Assistant device of a camera: what it says of itself (maker,
+/// model, firmware, serial number, read through ONVIF) once read, else
+/// « RustNVR / Caméra ».
+fn camera_device(node: &str, c: &CameraView) -> Value {
+    let mut device = json!({
+        "identifiers": [format!("{node}_{}", c.id)],
+        "name": c.name,
+        "manufacturer": "RustNVR",
+        "model": "Caméra",
+        "via_device": node,
+    });
+    if let Some(d) = &c.device {
+        for (key, value) in [
+            ("manufacturer", &d.manufacturer),
+            ("model", &d.model),
+            ("sw_version", &d.firmware),
+            ("serial_number", &d.serial),
+        ] {
+            if let Some(v) = value {
+                device[key] = v.clone().into();
+            }
+        }
+    }
+    device
+}
+
 /// Discovery messages of a camera: `(topic, JSON payload)`.
 pub(crate) fn camera_configs(
     prefix: &str,
@@ -83,13 +112,7 @@ pub(crate) fn camera_configs(
     c: &CameraView,
 ) -> Vec<(String, String)> {
     let node = node_id(client_id);
-    let device = json!({
-        "identifiers": [format!("{node}_{}", c.id)],
-        "name": c.name,
-        "manufacturer": "RustNVR",
-        "model": "Caméra",
-        "via_device": node,
-    });
+    let device = camera_device(&node, c);
     let availability = json!([{ "topic": topics.availability() }]);
     let entity = |what: &str, name: &str| {
         json!({
@@ -246,6 +269,48 @@ pub(crate) fn camera_configs(
         entity("capture", "Capture"),
         json!({ "topic": topics.camera(&c.id, "capture") }),
     );
+    // Pauses the camera until RustNVR restarts (not a configuration switch:
+    // shown with the main controls).
+    push(
+        "switch",
+        "active",
+        entity("active", "Caméra active"),
+        json!({
+            "icon": "mdi:cctv",
+            "state_topic": topics.camera(&c.id, "active"),
+            "command_topic": topics.camera(&c.id, "active/set"),
+            "payload_on": "ON",
+            "payload_off": "OFF",
+        }),
+    );
+    // Only for a camera with an ONVIF port (removed otherwise).
+    if c.onvif {
+        push(
+            "button",
+            "reboot",
+            entity("reboot", "Redémarrer la caméra"),
+            json!({
+                "icon": "mdi:restart",
+                "device_class": "restart",
+                "entity_category": "config",
+                "command_topic": topics.camera(&c.id, "reboot"),
+                "payload_press": "PRESS",
+            }),
+        );
+    } else {
+        push("button", "reboot", Value::Null, Value::Null);
+    }
+    push(
+        "binary_sensor",
+        "night",
+        entity("night", "Vision nocturne"),
+        json!({
+            "icon": "mdi:weather-night",
+            "state_topic": topics.camera(&c.id, "night"),
+            "payload_on": "ON",
+            "payload_off": "OFF",
+        }),
+    );
     out
 }
 
@@ -382,13 +447,7 @@ pub(crate) fn ptz_config(
             "options": c.ptz_presets,
             "command_topic": topics.camera(&c.id, "ptz/preset/set"),
             "optimistic": true,
-            "device": {
-                "identifiers": [format!("{node}_{}", c.id)],
-                "name": c.name,
-                "manufacturer": "RustNVR",
-                "model": "Caméra",
-                "via_device": node,
-            },
+            "device": camera_device(&node, c),
             "availability": [{ "topic": topics.availability() }],
         })
         .to_string(),
@@ -406,13 +465,7 @@ pub(crate) fn presence_configs(
 ) -> Vec<(String, String)> {
     let node = node_id(client_id);
     let label = crate::topic_label(line);
-    let device = json!({
-        "identifiers": [format!("{node}_{}", c.id)],
-        "name": c.name,
-        "manufacturer": "RustNVR",
-        "model": "Caméra",
-        "via_device": node,
-    });
+    let device = camera_device(&node, c);
     let availability = json!([{ "topic": topics.availability() }]);
     let [sensor, button] = presence_config_topics(prefix, client_id, &c.id, &label);
     vec![
@@ -466,6 +519,15 @@ mod tests {
             motion_enabled: true,
             motion_active: false,
             audio_enabled: true,
+            active: true,
+            onvif: true,
+            night: Some(true),
+            device: Some(crate::DeviceView {
+                manufacturer: Some("Dahua".into()),
+                model: Some("IPC-HDW2431T".into()),
+                firmware: Some("2.8".into()),
+                serial: None,
+            }),
             person_detection: true,
             presence: vec![("Porte du garage".into(), 1)],
             ptz_presets: vec!["Portail".into(), "Allée".into()],
@@ -491,6 +553,10 @@ mod tests {
         assert_eq!(v["unique_id"], "rustnvr_jardin_motion");
         assert_eq!(v["state_topic"], "rustnvr/jardin/motion");
         assert_eq!(v["device"]["name"], "Jardin");
+        assert_eq!(v["device"]["manufacturer"], "Dahua");
+        assert_eq!(v["device"]["model"], "IPC-HDW2431T");
+        assert_eq!(v["device"]["sw_version"], "2.8");
+        assert!(v["device"].get("serial_number").is_none(), "not given");
         assert_eq!(v["availability"][0]["topic"], "rustnvr/availability");
         let switch: Value = serde_json::from_str(&configs[3].1).expect("json");
         assert_eq!(
@@ -546,6 +612,21 @@ mod tests {
         let capture: Value = serde_json::from_str(&configs[11].1).expect("json");
         assert_eq!(capture["topic"], "rustnvr/jardin/capture");
         assert_ne!(take["unique_id"], capture["unique_id"]);
+        // Pause until restart.
+        assert_eq!(
+            configs[12].0,
+            "homeassistant/switch/rustnvr/jardin_active/config"
+        );
+        let active: Value = serde_json::from_str(&configs[12].1).expect("json");
+        assert_eq!(active["command_topic"], "rustnvr/jardin/active/set");
+        assert_eq!(active["state_topic"], "rustnvr/jardin/active");
+        assert_eq!(active["name"], "Caméra active");
+        let reboot: Value = serde_json::from_str(&configs[13].1).expect("json");
+        assert_eq!(reboot["command_topic"], "rustnvr/jardin/reboot");
+        assert_eq!(reboot["device_class"], "restart");
+        let night: Value = serde_json::from_str(&configs[14].1).expect("json");
+        assert_eq!(night["state_topic"], "rustnvr/jardin/night");
+        assert_eq!(night["name"], "Vision nocturne");
         // The NVR: a switch pausing detection everywhere.
         let nvr = nvr_configs("homeassistant", "rustnvr", &topics);
         assert_eq!(nvr[0].0, "homeassistant/switch/rustnvr/detection/config");
@@ -564,6 +645,13 @@ mod tests {
         );
         assert!(configs[5].1.is_empty());
         assert!(configs[7].1.is_empty());
+        // Without an ONVIF port, no restart button.
+        let fixed = CameraView {
+            onvif: false,
+            ..cam.clone()
+        };
+        let configs = camera_configs("homeassistant", "rustnvr", &topics, &fixed);
+        assert!(configs[13].1.is_empty());
         // Removal targets exactly the published topics.
         let removal = camera_config_topics("homeassistant", "rustnvr", &cam.id);
         assert_eq!(

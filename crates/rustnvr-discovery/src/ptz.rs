@@ -293,6 +293,10 @@ mod tests {
                                 "<env:Fault><env:Code><env:Value>env:Sender</env:Value><env:Subcode><env:Value>ter:NotImplemented</env:Value></env:Subcode></env:Code><env:Reason><env:Text>This optional method is not implemented</env:Text></env:Reason></env:Fault>",
                             )
                         }
+                    } else if text.contains("SystemReboot") {
+                        soap(
+                            "<tds:SystemRebootResponse><tds:Message>Rebooting in 30 seconds</tds:Message></tds:SystemRebootResponse>",
+                        )
                     } else if text.contains("SetPreset") {
                         soap(
                             "<tptz:SetPresetResponse><tptz:PresetToken>3</tptz:PresetToken></tptz:SetPresetResponse>",
@@ -314,6 +318,29 @@ mod tests {
 
     fn admin() -> Option<(String, Secret)> {
         Some(("admin".to_owned(), Secret::new("pw".to_owned())))
+    }
+
+    #[tokio::test]
+    async fn reboots_the_camera_with_an_administrator_account() {
+        let (url, seen) = camera(false, false).await;
+        let mut client =
+            crate::onvif::Client::new(admin(), Duration::from_secs(5)).expect("client");
+        client.sync_clock(&url).await.expect("clock");
+        let message = client.system_reboot(&url).await.expect("reboot");
+        assert_eq!(message, "Rebooting in 30 seconds");
+        assert!(
+            seen.lock()
+                .expect("log")
+                .last()
+                .is_some_and(|b| b.contains("<tds:SystemReboot/>") && b.contains("UsernameToken"))
+        );
+        // Another account: refused, with the reason.
+        let other = Some(("viewer".to_owned(), Secret::new("pw".to_owned())));
+        let client = crate::onvif::Client::new(other, Duration::from_secs(5)).expect("client");
+        assert!(matches!(
+            client.system_reboot(&url).await,
+            Err(OnvifError::Unauthorized)
+        ));
     }
 
     #[tokio::test]

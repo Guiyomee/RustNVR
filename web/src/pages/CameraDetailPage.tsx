@@ -1,8 +1,11 @@
-import { ArrowLeft, Camera as CameraIcon, CirclePlay, Download, Info, Maximize, Pencil, Radio, Settings2, Shapes, Video } from 'lucide-react'
+import { ArrowLeft, Camera as CameraIcon, CirclePlay, Download, Info, Maximize, Moon, Pencil, Radio, Settings2, Shapes, Video } from 'lucide-react'
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { CameraForm } from '../components/cameras/CameraForm'
 import { CameraPlayer } from '../components/cameras/CameraPlayer'
 import { MotionPanel, MotionStatus } from '../components/cameras/MotionPanel'
+import { CameraRecord } from '../components/cameras/CameraRecord'
+import { PauseButton } from '../components/cameras/PauseButton'
+import { RebootButton } from '../components/cameras/RebootButton'
 import { PtzPanel } from '../components/cameras/PtzPanel'
 import { RecordingBadge } from '../components/cameras/RecordingBadge'
 import { Button } from '../components/ui/Button'
@@ -10,7 +13,7 @@ import { Badge, Card, CardHeader, InfoList } from '../components/ui/Card'
 import { EmptyState, ErrorState, LoadingState } from '../components/ui/States'
 import { CameraStatusBadge } from '../components/ui/StatusIndicator'
 import { Segmented, Tabs } from '../components/ui/Tabs'
-import { useReadOnly } from '../auth/AuthGate'
+import { useIsViewer, useReadOnly } from '../auth/AuthGate'
 import { describeError } from '../api/client'
 import { snapshotUrl } from '../api/endpoints'
 import { useCapability, useData, useIsDemo, useLive } from '../data/DataContext'
@@ -125,6 +128,9 @@ export function CameraDetailPage({ id }: { id: string }) {
   const snapshots = useCapability('snapshots')
   const canManage = useCapability('camera_management') === true
   const readOnly = useReadOnly()
+  // A viewer has no list of cameras to manage: back to the overview.
+  const viewer = useIsViewer()
+  const back = viewer ? '/' : '/cameras'
   const { source, capabilities } = useData()
   const [toggling, setToggling] = useState(false)
   const [tab, setTab] = useState<TabKey>('live')
@@ -150,7 +156,7 @@ export function CameraDetailPage({ id }: { id: string }) {
     return (
       <Card>
         <EmptyState title={t('Caméra introuvable', 'Camera not found')}>
-          {t('Aucune caméra « ', 'No camera « ')}{id} ». <Link to="/cameras" className="text-accent hover:underline">{t('Retour à la liste', 'Back to the list')}</Link>
+          {t('Aucune caméra « ', 'No camera « ')}{id} ». <Link to={back} className="text-accent hover:underline">{t('Retour à la liste', 'Back to the list')}</Link>
         </EmptyState>
       </Card>
     )
@@ -179,8 +185,8 @@ export function CameraDetailPage({ id }: { id: string }) {
   return (
     <>
       <div className="mb-4">
-        <Link to="/cameras" className="inline-flex items-center gap-1 text-xs text-muted hover:text-fg">
-          <ArrowLeft className="size-3.5" aria-hidden />{t(' Caméras', ' Cameras')}
+        <Link to={back} className="inline-flex items-center gap-1 text-xs text-muted hover:text-fg">
+          <ArrowLeft className="size-3.5" aria-hidden />{viewer ? t(" Vue d'ensemble", ' Overview') : t(' Caméras', ' Cameras')}
         </Link>
       </div>
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
@@ -191,6 +197,12 @@ export function CameraDetailPage({ id }: { id: string }) {
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
             <CameraStatusBadge status={camera.status} demo={demo} />
+            {camera.night && (
+              <span className="inline-flex items-center gap-1" title={t('L’image est en noir et blanc : la caméra filme en infrarouge.', 'The picture is black and white: the camera films in infrared.')}>
+                <Moon className="size-3.5" aria-hidden />
+                {t('Vision nocturne', 'Night vision')}
+              </span>
+            )}
             {!demo && <MotionStatus camera={camera} />}
             <span className="font-mono">{camera.endpoint}</span>
             {!demo && <RecordingBadge camera={camera} />}
@@ -198,6 +210,8 @@ export function CameraDetailPage({ id }: { id: string }) {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
+          <PauseButton camera={camera} />
+          <RebootButton camera={camera} />
           <Button
             icon={<Maximize className="size-4" />}
             disabledReason={noLive}
@@ -388,6 +402,7 @@ export function CameraDetailPage({ id }: { id: string }) {
                 )}
               </div>
             </Card>
+            <CameraRecord camera={camera} />
           </div>
         )}
       </div>

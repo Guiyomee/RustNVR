@@ -9,6 +9,40 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+
+/// `GET /cameras/{id}/device` query: `refresh=1` reads the camera again.
+#[derive(Deserialize)]
+pub(crate) struct DeviceQuery {
+    #[serde(default)]
+    refresh: Option<String>,
+}
+
+/// `GET /cameras/{id}/device`: maker, model, firmware and serial number of
+/// the camera (ONVIF).
+pub(crate) async fn device(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<DeviceQuery>,
+) -> Result<Json<crate::control::CameraDevice>, ApiError> {
+    let fresh = q.refresh.as_deref() == Some("1");
+    Ok(Json(control(&state)?.camera_device(id, fresh).await?))
+}
+
+/// Answer of `POST /cameras/{id}/reboot`.
+#[derive(serde::Serialize)]
+pub(crate) struct RebootDto {
+    /// What the camera answered (« Rebooting in 30 seconds »…), possibly empty.
+    message: String,
+}
+
+/// `POST /cameras/{id}/reboot`: restarts the camera through ONVIF.
+pub(crate) async fn reboot(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::state::ApiState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<RebootDto>, crate::routes::ApiError> {
+    let message = crate::routes::control(&state)?.reboot_camera(id).await?;
+    Ok(axum::Json(RebootDto { message }))
+}
 use std::sync::Arc;
 
 /// `GET /cameras/{id}/ptz`.

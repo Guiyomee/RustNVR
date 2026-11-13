@@ -15,8 +15,11 @@
 //!
 //! The server closes the socket when the stream changes (reconnection,
 //! new parameters) or when the client cannot keep up; the client reconnects.
+//! It also closes it within [`crate::auth::RIGHTS_PERIOD`] when the account
+//! may no longer see the camera (the reconnection then gets a 404).
 //! A close reason starting with `transcode:` reports a conversion failure.
 
+use crate::auth::Principal;
 use crate::routes::ApiError;
 use crate::state::ApiState;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
@@ -44,6 +47,7 @@ pub(crate) struct LiveQuery {
 
 pub(crate) async fn handler(
     State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<Principal>>,
     Path(id): Path<String>,
     Query(q): Query<LiveQuery>,
     ws: WebSocketUpgrade,
@@ -89,7 +93,32 @@ pub(crate) async fn handler(
     // The converted stream keeps the sound (passed around FFmpeg); a camera
     // whose sound is not recorded is not heard live either.
     let audio = q.audio.as_deref() == Some("1") && camera.record_audio;
-    Ok(ws.on_upgrade(move |socket| client(state, tap, failure, socket, audio)))
+    let viewer = Viewer {
+        who: principal.map(|p| p.0),
+        camera: id,
+    };
+    Ok(ws.on_upgrade(move |socket| client(state, tap, failure, socket, audio, viewer)))
+}
+
+/// Who watches which camera, to stop when the account loses it.
+struct Viewer {
+    who: Option<Principal>,
+    camera: String,
+}
+
+impl Viewer {
+    /// Resolves once the account may no longer see the camera.
+    async fn withdrawn(&self, state: &ApiState, every: &mut tokio::time::Interval) {
+        let Some(who) = &self.who else {
+            return std::future::pending().await;
+        };
+        loop {
+            every.tick().await;
+            if !crate::auth::still_sees(state, who, &self.camera).await {
+                return;
+            }
+        }
+    }
 }
 
 async fn close(mut socket: WebSocket, reason: &str) {
@@ -177,7 +206,12 @@ async fn client(
     mut failure: Option<watch::Receiver<Option<String>>>,
     mut socket: WebSocket,
     audio: bool,
+    viewer: Viewer,
 ) {
+    let mut rights = tokio::time::interval(crate::auth::RIGHTS_PERIOD);
+    rights.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first tick is now: the rights were just checked.
+    rights.tick().await;
     let (backlog, mut rx) = tap.subscribe();
     let mut muxer = None;
     for frame in backlog {
@@ -189,6 +223,10 @@ async fn client(
         let outcome = tokio::select! {
             _ = state.shutdown.cancelled() => Err("server shutting down".to_owned()),
             reason = conversion_failure(&mut failure) => Err(reason),
+            () = viewer.withdrawn(&state, &mut rights) => {
+                tracing::info!(camera = %viewer.camera, "live view closed: access withdrawn");
+                Err("access to this camera withdrawn".to_owned())
+            }
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
                 Some(Ok(_)) => Ok(()),
@@ -241,6 +279,7 @@ pub(crate) async fn webrtc(
     Path(id): Path<String>,
     Query(q): Query<LiveQuery>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    principal: Option<axum::Extension<Principal>>,
     offer: String,
 ) -> Result<Response, ApiError> {
     let camera = state
@@ -280,9 +319,30 @@ pub(crate) async fn webrtc(
         )));
     }
     let ips = host_ips(peer.ip());
-    let answer = rustnvr_webrtc::start_session(&offer, tap, &ips, state.shutdown.child_token())
+    let session = state.shutdown.child_token();
+    let answer = rustnvr_webrtc::start_session(&offer, tap, &ips, session.clone())
         .await
         .map_err(ApiError::bad_request)?;
+    // Ended within a few seconds when the account loses the camera; the
+    // watch stops with the session (its token is cancelled when it ends).
+    if principal.is_some() {
+        let viewer = Viewer {
+            who: principal.map(|p| p.0),
+            camera: id,
+        };
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut rights = tokio::time::interval(crate::auth::RIGHTS_PERIOD);
+            rights.tick().await;
+            tokio::select! {
+                () = session.cancelled() => {}
+                () = viewer.withdrawn(&state, &mut rights) => {
+                    tracing::info!(camera = %viewer.camera, "WebRTC view closed: access withdrawn");
+                    session.cancel();
+                }
+            }
+        });
+    }
     Ok((
         axum::http::StatusCode::CREATED,
         [(axum::http::header::CONTENT_TYPE, "application/sdp")],

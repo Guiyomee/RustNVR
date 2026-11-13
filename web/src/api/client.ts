@@ -41,7 +41,7 @@ export function apiGet<T>(path: string, timeoutMs = DEFAULT_TIMEOUT_MS, signal?:
   return apiRequest<T>('GET', path, undefined, timeoutMs, signal)
 }
 
-/** POST/PUT/DELETE with a JSON body. Resolves to `null` for 204 responses. */
+/** POST/PUT/DELETE with a JSON body. Resolves to `null` for answers without a body. */
 export function apiSend<T>(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
   return apiRequest<T>(method, path, body, timeoutMs)
 }
@@ -97,7 +97,9 @@ async function apiRequest<T>(method: string, path: string, body: unknown, timeou
   if (response.status === 204) return null as T
   if (file) return (await response.blob()) as T
   try {
-    return (await response.json()) as T
+    // An answer without a body (201 of `POST /users`, for instance) is `null`.
+    const text = await response.text()
+    return (text.trim() === '' ? null : JSON.parse(text)) as T
   } catch {
     throw new ApiError('decode', t('Réponse du serveur illisible', 'Unreadable server answer'), response.status)
   }
