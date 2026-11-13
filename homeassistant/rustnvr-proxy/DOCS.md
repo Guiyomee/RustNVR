@@ -36,5 +36,11 @@ trusted_proxies = ["192.168.1.5", "172.30.32.0/23"]   # IP de Home Assistant, r�
 - **Page de RustNVR mais vidéo absente** : la vue en direct passe par un
   WebSocket ; un reverse proxy placé devant Home Assistant doit les laisser
   passer (c'est déjà nécessaire pour Home Assistant lui-même).
+- **Reste sur la page de connexion, sans message d'erreur** : le navigateur
+  refuse le cookie de session. C'était le cas avec un RustNVR en HTTPS
+  (`https://…`) derrière un Home Assistant en `http://` ; corrigé à partir de
+  la version qui suit 2026.11.07. Un cookie `rustnvr_session` laissé par un
+  accès direct en HTTPS à la même adresse peut aussi bloquer : effacez les
+  cookies du site de Home Assistant.
 - **« cross-origin request refused »** : un reverse proxy devant Home Assistant
   doit transmettre l'en-tête `Host` d'origine (ou `X-Forwarded-Host`).
