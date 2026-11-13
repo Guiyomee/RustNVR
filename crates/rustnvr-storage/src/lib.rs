@@ -43,6 +43,9 @@ pub const MAX_EVENTS_PER_QUERY: u32 = 1000;
 pub struct EventFilter {
     /// Only this camera.
     pub camera: Option<CameraId>,
+    /// Only these cameras (`None`: all of them), for an account that does
+    /// not see every camera.
+    pub cameras: Option<Vec<String>>,
     /// Events overlapping `[from_ms, to_ms)`.
     pub from_ms: i64,
     /// See `from_ms`.
@@ -120,6 +123,31 @@ pub struct UserRecord {
     pub role: String,
     /// Creation time (ms since the Unix epoch).
     pub created_ms: i64,
+    /// Cameras a viewer may see (`None`: all of them).
+    pub cameras: Option<Vec<String>>,
+}
+
+/// A line of the activity log of the accounts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditEntry {
+    /// Identifier, growing with time.
+    pub id: i64,
+    /// When (ms since the Unix epoch).
+    pub at_ms: i64,
+    /// Account, when one is known.
+    pub username: Option<String>,
+    /// Address of the client.
+    pub client: String,
+    /// `login`, `login_failed`, `logout`, or `METHOD /path` of a request.
+    pub action: String,
+    /// HTTP status of the answer.
+    pub status: u16,
+}
+
+/// The `cameras` column of an account: a JSON array, or NULL for all.
+fn cameras_from_row(row: &SqliteRow) -> Result<Option<Vec<String>>, DbError> {
+    let text: Option<String> = row.try_get("cameras")?;
+    Ok(text.map(|t| serde_json::from_str(&t)).transpose()?)
 }
 
 /// The database and the thumbnails directory.
@@ -283,16 +311,19 @@ impl Database {
     /// Events overlapping the filter's period, newest first.
     pub async fn events(&self, f: &EventFilter) -> Result<Vec<DetectionEvent>, DbError> {
         let limit = f.limit.clamp(1, MAX_EVENTS_PER_QUERY);
+        let cameras = f.cameras.as_ref().map(serde_json::to_string).transpose()?;
         // An ongoing event (end_ms NULL) overlaps any period after its start.
         let rows = sqlx::query(
             "SELECT * FROM events \
              WHERE (?1 IS NULL OR camera = ?1) AND start_ms < ?3 AND COALESCE(end_ms, ?3) >= ?2 \
+             AND (?5 IS NULL OR camera IN (SELECT value FROM json_each(?5))) \
              ORDER BY start_ms DESC LIMIT ?4",
         )
         .bind(f.camera.as_ref().map(CameraId::as_str))
         .bind(f.from_ms)
         .bind(f.to_ms)
         .bind(i64::from(limit))
+        .bind(cameras)
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(event_from_row).collect()
@@ -365,15 +396,17 @@ impl Database {
 
     /// Every account, by name.
     pub async fn users(&self) -> Result<Vec<UserRecord>, DbError> {
-        let rows = sqlx::query("SELECT username, role, created_ms FROM users ORDER BY username")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows =
+            sqlx::query("SELECT username, role, created_ms, cameras FROM users ORDER BY username")
+                .fetch_all(&self.pool)
+                .await?;
         rows.iter()
             .map(|r| {
                 Ok(UserRecord {
                     username: r.try_get("username")?,
                     role: r.try_get("role")?,
                     created_ms: r.try_get("created_ms")?,
+                    cameras: cameras_from_row(r)?,
                 })
             })
             .collect()
@@ -387,6 +420,32 @@ impl Database {
             .await?;
         row.map(|r| Ok((r.try_get("password_hash")?, r.try_get("role")?)))
             .transpose()
+    }
+
+    /// Cameras an account may see (`None`: all of them, also for an unknown
+    /// account).
+    pub async fn user_cameras(&self, username: &str) -> Result<Option<Vec<String>>, DbError> {
+        let row = sqlx::query("SELECT cameras FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map_or(Ok(None), |r| cameras_from_row(&r))
+    }
+
+    /// Sets the cameras an account may see (`None`: all of them); false if
+    /// the account does not exist.
+    pub async fn set_user_cameras(
+        &self,
+        username: &str,
+        cameras: Option<&[String]>,
+    ) -> Result<bool, DbError> {
+        let json = cameras.map(serde_json::to_string).transpose()?;
+        let done = sqlx::query("UPDATE users SET cameras = ? WHERE username = ?")
+            .bind(json)
+            .bind(username)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() == 1)
     }
 
     /// Creates an account; false if the name is taken.
@@ -457,21 +516,29 @@ impl Database {
         Ok(())
     }
 
-    /// Account and role of a valid session.
+    /// Account, role and visible cameras (`None`: all) of a valid session.
     pub async fn session_user(
         &self,
         token_hash: &str,
         now_ms: i64,
-    ) -> Result<Option<(String, String)>, DbError> {
+    ) -> Result<Option<(String, String, Option<Vec<String>>)>, DbError> {
         let row = sqlx::query(
-            "SELECT u.username, u.role FROM sessions s JOIN users u ON u.username = s.username \n             WHERE s.token_hash = ? AND s.expires_ms > ?",
+            "SELECT u.username, u.role, u.cameras FROM sessions s \
+             JOIN users u ON u.username = s.username \
+             WHERE s.token_hash = ? AND s.expires_ms > ?",
         )
         .bind(token_hash)
         .bind(now_ms)
         .fetch_optional(&self.pool)
         .await?;
-        row.map(|r| Ok((r.try_get("username")?, r.try_get("role")?)))
-            .transpose()
+        row.map(|r| {
+            Ok((
+                r.try_get("username")?,
+                r.try_get("role")?,
+                cameras_from_row(&r)?,
+            ))
+        })
+        .transpose()
     }
 
     /// Ends a session.
@@ -499,6 +566,68 @@ impl Database {
             .execute(&self.pool)
             .await?
             .rows_affected())
+    }
+
+    /// Adds a line to the activity log of the accounts.
+    pub async fn add_audit(
+        &self,
+        at_ms: i64,
+        username: Option<&str>,
+        client: &str,
+        action: &str,
+        status: u16,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO audit (at_ms, username, client, action, status) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(at_ms)
+        .bind(username)
+        .bind(client)
+        .bind(action)
+        .bind(i64::from(status))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The activity log, newest first: at most `limit` lines, older than the
+    /// line `before` when given (to read the next page).
+    pub async fn audit(&self, before: Option<i64>, limit: u32) -> Result<Vec<AuditEntry>, DbError> {
+        let rows = sqlx::query(
+            "SELECT id, at_ms, username, client, action, status FROM audit \
+             WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
+        )
+        .bind(before)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                let status: i64 = r.try_get("status")?;
+                Ok(AuditEntry {
+                    id: r.try_get("id")?,
+                    at_ms: r.try_get("at_ms")?,
+                    username: r.try_get("username")?,
+                    client: r.try_get("client")?,
+                    action: r.try_get("action")?,
+                    status: u16::try_from(status).unwrap_or(0),
+                })
+            })
+            .collect()
+    }
+
+    /// Forgets the lines of the activity log older than `before_ms`, and the
+    /// oldest ones beyond the `keep` most recent; returns how many went.
+    pub async fn purge_audit(&self, before_ms: i64, keep: u32) -> Result<u64, DbError> {
+        Ok(sqlx::query(
+            "DELETE FROM audit WHERE at_ms < ?1 \
+             OR id <= (SELECT id FROM audit ORDER BY id DESC LIMIT 1 OFFSET ?2)",
+        )
+        .bind(before_ms)
+        .bind(i64::from(keep))
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     /// Camera, start and recognized object labels of every event started in
@@ -822,6 +951,7 @@ mod tests {
 
         let all = db
             .events(&EventFilter {
+                cameras: None,
                 camera: None,
                 from_ms: 0,
                 to_ms: 20_000,
@@ -840,6 +970,7 @@ mod tests {
         // Ongoing events overlap any later period.
         let later = db
             .events(&EventFilter {
+                cameras: None,
                 camera: Some(cam("b")),
                 from_ms: 50_000,
                 to_ms: 60_000,
@@ -851,6 +982,7 @@ mod tests {
         // Overlap: [1000, 5000] is in [4000, 4500).
         let mid = db
             .events(&EventFilter {
+                cameras: None,
                 camera: Some(a.clone()),
                 from_ms: 4_000,
                 to_ms: 4_500,
@@ -949,7 +1081,7 @@ mod tests {
             .expect("session");
         assert_eq!(
             db.session_user("t1", 50).await.expect("s"),
-            Some(("alice".into(), "admin".into()))
+            Some(("alice".into(), "admin".into(), None))
         );
         assert_eq!(
             db.session_user("t1", 100).await.expect("s"),
@@ -976,6 +1108,98 @@ mod tests {
             "sessions removed"
         );
         assert!(db.users().await.expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn viewers_can_be_limited_to_some_cameras() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        assert!(db.create_user("bob", "h", "viewer", 1).await.expect("new"));
+        assert_eq!(db.user_cameras("bob").await.expect("all"), None);
+        let only = vec!["jardin".to_owned()];
+        assert!(db.set_user_cameras("bob", Some(&only)).await.expect("set"));
+        assert!(!db.set_user_cameras("nobody", None).await.expect("unknown"));
+        assert_eq!(
+            db.user_cameras("bob").await.expect("some"),
+            Some(only.clone())
+        );
+        assert_eq!(
+            db.users().await.expect("list")[0].cameras,
+            Some(only.clone())
+        );
+        db.create_session("t", "bob", 10, 100)
+            .await
+            .expect("session");
+        assert_eq!(
+            db.session_user("t", 50).await.expect("s").map(|u| u.2),
+            Some(Some(only.clone()))
+        );
+
+        // Events of the other cameras are left out, the limit counting the rest.
+        for (camera, start) in [("jardin", 1_000), ("garage", 2_000), ("jardin", 3_000)] {
+            db.start_event(&cam(camera), EventKind::Motion, start, 0.1, &[])
+                .await
+                .expect("event");
+        }
+        let seen = |cameras: Option<Vec<String>>, limit| {
+            let db = db.clone();
+            async move {
+                db.events(&EventFilter {
+                    camera: None,
+                    cameras,
+                    from_ms: 0,
+                    to_ms: 10_000,
+                    limit,
+                })
+                .await
+                .expect("events")
+                .iter()
+                .map(|e| (e.camera.to_string(), e.start_ms))
+                .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(seen(None, 10).await.len(), 3);
+        assert_eq!(
+            seen(Some(only), 2).await,
+            vec![("jardin".to_owned(), 3_000), ("jardin".to_owned(), 1_000)]
+        );
+        assert!(seen(Some(Vec::new()), 10).await.is_empty(), "no camera");
+
+        assert!(db.set_user_cameras("bob", None).await.expect("all again"));
+        assert_eq!(db.user_cameras("bob").await.expect("all"), None);
+    }
+
+    #[tokio::test]
+    async fn activity_log_pages_and_is_purged() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        for (at, user, action, status) in [
+            (10, Some("alice"), "login", 200),
+            (20, None, "login_failed", 401),
+            (30, Some("alice"), "PUT /settings", 200),
+            (40, Some("bob"), "POST /cameras/jardin/export", 200),
+        ] {
+            db.add_audit(at, user, "192.0.2.7", action, status)
+                .await
+                .expect("add");
+        }
+        let page = db.audit(None, 3).await.expect("page");
+        assert_eq!(
+            page.iter().map(|e| e.at_ms).collect::<Vec<_>>(),
+            [40, 30, 20]
+        );
+        assert_eq!((page[2].username.as_deref(), page[2].status), (None, 401));
+        let next = db.audit(Some(page[2].id), 3).await.expect("next");
+        assert_eq!(next.len(), 1);
+        assert_eq!(
+            (next[0].username.as_deref(), next[0].action.as_str()),
+            (Some("alice"), "login")
+        );
+        // Older than 15 ms goes, then everything but the 2 most recent.
+        assert_eq!(db.purge_audit(15, 100).await.expect("old"), 1);
+        assert_eq!(db.purge_audit(0, 2).await.expect("many"), 1);
+        let left = db.audit(None, 10).await.expect("left");
+        assert_eq!(left.iter().map(|e| e.at_ms).collect::<Vec<_>>(), [40, 30]);
     }
 
     #[tokio::test]

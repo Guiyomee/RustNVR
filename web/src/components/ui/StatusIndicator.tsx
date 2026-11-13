@@ -27,6 +27,7 @@ export const cameraStatusInfo: Record<CameraStatus, { tone: Tone; label: string 
   idle: { tone: 'neutral', label: t('En attente', 'Waiting') },
   stopped: { tone: 'neutral', label: t('Arrêtée', 'Stopped') },
   disabled: { tone: 'neutral', label: t('Désactivée', 'Off') },
+  paused: { tone: 'warn', label: t('En pause', 'Paused') },
 }
 
 const icons: Record<CameraStatus, typeof CircleCheck> = {
@@ -36,6 +37,7 @@ const icons: Record<CameraStatus, typeof CircleCheck> = {
   idle: CircleDashed,
   stopped: CirclePause,
   disabled: CircleOff,
+  paused: CirclePause,
 }
 
 /** A dot (or icon) plus a label: state is never conveyed by color alone. */

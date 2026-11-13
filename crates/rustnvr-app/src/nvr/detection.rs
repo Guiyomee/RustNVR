@@ -968,6 +968,17 @@ impl NvrView for MqttBridge {
                             .and_then(|r| r.motion.as_ref())
                             .is_some_and(|m| m.status.borrow().active),
                         audio_enabled: c.record.audio,
+                        active: c.enabled && !state.paused.contains(&c.id),
+                        onvif: c.onvif.is_some(),
+                        night: state.night.get(&c.id).copied(),
+                        device: shared.ptz.device(c.id.as_str()).map(|d| {
+                            rustnvr_mqtt::DeviceView {
+                                manufacturer: d.manufacturer,
+                                model: d.model,
+                                firmware: d.firmware,
+                                serial: d.serial,
+                            }
+                        }),
                         person_detection: shared.ai().is_some(),
                         presence: presence
                             .iter()
@@ -1065,6 +1076,20 @@ impl NvrView for MqttBridge {
         })
     }
 
+    fn set_camera_active(
+        &self,
+        camera: CameraId,
+        active: bool,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let shared = self.0.upgrade().ok_or("NVR arrêté")?;
+            Controller(shared)
+                .set_camera_paused(camera.to_string(), !active)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
     fn reset_presence(&self, camera: CameraId, label: String) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move {
             let shared = self.0.upgrade().ok_or("NVR arrêté")?;
@@ -1130,6 +1155,17 @@ impl NvrView for MqttBridge {
                 .await
                 .map_err(|_| "NVR arrêté")?;
             answer.await.map_err(|_| "NVR arrêté")?
+        })
+    }
+
+    fn reboot_camera(&self, camera: CameraId) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let shared = self.0.upgrade().ok_or("NVR arrêté")?;
+            Controller(shared)
+                .reboot_camera(camera.to_string())
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
     }
 

@@ -46,6 +46,11 @@ pub struct CameraSource {
     pub name: Option<String>,
     /// Enabled in the configuration.
     pub enabled: bool,
+    /// Paused until RustNVR restarts or the pause is lifted (not running).
+    pub paused: bool,
+    /// Films in night vision (black and white picture), as last measured;
+    /// `None` while not known.
+    pub night: Option<bool>,
     /// Recording enabled.
     pub recording_enabled: bool,
     /// A sub stream is configured.
@@ -663,10 +668,17 @@ impl ApiState {
             id: c.id.to_string(),
             name: c.name.clone().unwrap_or_else(|| c.id.to_string()),
             enabled: c.enabled,
+            paused: c.paused,
+            night: c.night,
             recording_enabled: c.recording_enabled,
             has_sub_stream: c.has_sub_stream,
             endpoint: c.endpoint.clone(),
-            status: CameraStatus::Disabled,
+            // Replaced by the state of the stream when it runs.
+            status: if c.enabled && c.paused {
+                CameraStatus::Paused
+            } else {
+                CameraStatus::Disabled
+            },
             attempt: None,
             retry_in_ms: None,
             last_error: None,

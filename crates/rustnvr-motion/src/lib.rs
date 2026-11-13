@@ -13,6 +13,7 @@
 pub mod crossing;
 pub mod detector;
 pub mod ffmpeg;
+pub mod night;
 pub mod tracker;
 
 use crate::detector::Detector;

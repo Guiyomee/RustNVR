@@ -1,6 +1,8 @@
 import { useState, type ReactNode } from 'react'
 import { ConfigKey, SettingRow, SettingsSection } from '../components/settings/SettingsSection'
 import { AiSettings } from '../components/settings/AiSettings'
+import { AuditLog } from '../components/settings/AuditLog'
+import { useIsViewer } from '../auth/AuthGate'
 import { BackupSettings } from '../components/settings/BackupSettings'
 import { GeneralSettingsForm } from '../components/settings/GeneralSettingsForm'
 import { RestreamSettings } from '../components/settings/RestreamSettings'
@@ -31,6 +33,7 @@ type Category =
   | 'mqtt'
   | 'network'
   | 'users'
+  | 'audit'
   | 'logs'
   | 'system'
 
@@ -46,6 +49,7 @@ const CATEGORIES: { key: Category; label: string }[] = [
   { key: 'backup', label: t('Sauvegarde', 'Backup') },
   { key: 'network', label: t('Réseau', 'Network') },
   { key: 'users', label: t('Utilisateurs', 'Users') },
+  { key: 'audit', label: t('Activité des comptes', 'Account activity') },
   { key: 'logs', label: t('Journaux', 'Logs') },
   { key: 'system', label: t('Système', 'System') },
 ]
@@ -65,6 +69,12 @@ function ThemeSetting() {
     />
   )
 }
+
+/** A viewer account changes nothing: its preferences and its password only. */
+const VIEWER_CATEGORIES: { key: Category; label: string }[] = [
+  { key: 'general', label: t('Général', 'General') },
+  { key: 'users', label: t('Mon compte', 'My account') },
+]
 
 const FILE_NOTE = t('Ces réglages se modifient dans config.toml (redémarrage requis).', 'These settings are changed in config.toml (restart required).')
 
@@ -190,6 +200,12 @@ function Section({ category }: { category: Category }) {
           <BackupSettings />
         </SettingsSection>
       )
+    case 'audit':
+      return (
+        <SettingsSection title={t('Activité des comptes', 'Account activity')} description={t('Qui s’est connecté, depuis quelle adresse, et qui a modifié quoi.', 'Who signed in, from which address, and who changed what.')} available={cap('audit')}>
+          <AuditLog />
+        </SettingsSection>
+      )
     case 'logs':
       return (
         <SettingsSection title={t('Journaux', 'Logs')} description={t('Derniers messages de RustNVR, mis à jour en direct : connexions des caméras, enregistrement, détection, erreurs.', 'Latest messages of RustNVR, updated live: camera connections, recording, detection, errors.')}>
@@ -249,13 +265,16 @@ function scopeHelp(scope: SystemInfo['service_scope']): string {
 
 export function SettingsPage() {
   const requested = useLocation().query.get('section')
-  const [category, setCategory] = useState<Category>(CATEGORIES.find((c) => c.key === requested)?.key ?? 'general')
+  const categories = useIsViewer() ? VIEWER_CATEGORIES : CATEGORIES
+  const [chosen, setCategory] = useState<Category>(categories.find((c) => c.key === requested)?.key ?? 'general')
+  // A category of the administrators (a link, or the role changed since): the first one.
+  const category = categories.some((c) => c.key === chosen) ? chosen : 'general'
   return (
     <>
       <PageHeader title={t('Paramètres', 'Settings')} />
       <div className="grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
         <nav aria-label={t('Catégories de paramètres', 'Settings categories')} className="flex gap-1 overflow-x-auto lg:flex-col">
-          {CATEGORIES.map((c) => (
+          {categories.map((c) => (
             <button
               key={c.key}
               type="button"

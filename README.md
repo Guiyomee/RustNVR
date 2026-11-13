@@ -63,8 +63,9 @@ curl -fsSLO https://raw.githubusercontent.com/Guiyomee/RustNVR/main/packaging/in
 sudo bash install.sh
 ```
 
-Then open `https://<server>:8080/`, account `admin`. Details (in French for
-now): [Docker](docs/DOCKER.md) · [Install and Proxmox](docs/INSTALLATION.md).
+Then open `https://<server>:8080/`, account `admin`. The full guide is in
+the **[wiki](https://github.com/Guiyomee/RustNVR/wiki)**, in English and French: [Docker](https://github.com/Guiyomee/RustNVR/wiki/EN-Docker) ·
+[Proxmox](https://github.com/Guiyomee/RustNVR/wiki/EN-Proxmox) · [Debian / Ubuntu](https://github.com/Guiyomee/RustNVR/wiki/EN-Debian).
 The interface itself is in English and French.
 
 ## Features
@@ -138,9 +139,10 @@ RustNVR aims at reliable, frugal recording.
 
 ## Documentation
 
-In French for now: **[Docker](docs/DOCKER.md)** ·
-**[Install, Proxmox](docs/INSTALLATION.md)** ·
-**[Home Assistant](docs/HOME_ASSISTANT.md)** · [MQTT](docs/MQTT.md) ·
+**[Wiki: install and user guide](https://github.com/Guiyomee/RustNVR/wiki)**, in English and French (cameras,
+storage, detection, notifications, Home Assistant, accounts, troubleshooting).
+
+Reference, in French: [MQTT](docs/MQTT.md) ·
 [AI](docs/AI.md) · [Features](docs/FONCTIONNALITES.md) ·
 [Development](docs/DEVELOPPEMENT.md) · [Changelog](CHANGELOG.md) · [Architecture](ARCHITECTURE.md) ·
 [Interface](FRONTEND.md) · [API](API_CONTRACT.md) ·

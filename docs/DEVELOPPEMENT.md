@@ -1,8 +1,8 @@
 # Développer RustNVR
 
 Compiler, lancer depuis le dépôt, outils en ligne de commande et tests.
-L'installation sur un serveur est dans [INSTALLATION.md](INSTALLATION.md) ou
-[DOCKER.md](DOCKER.md).
+Installer RustNVR sur un serveur : voir le [wiki](https://github.com/Guiyomee/RustNVR/wiki) (Docker, Proxmox,
+Debian / Ubuntu).
 
 ## Construire
 
@@ -119,3 +119,16 @@ scripts/release.sh 2026.11.05 --notes notes.md
 La version vient de `[workspace.package] version` (Cargo.toml, `2026.11.5`
 pour `2026.11.05`) et de `web/package.json`. Le résumé de chaque version est
 dans [CHANGELOG.md](../CHANGELOG.md).
+
+## Publier une version sur son propre dépôt
+
+1. Changez `version` dans `Cargo.toml` (`[workspace.package]`). Versions
+   « calendrier » : année.mois.numéro de la publication dans le mois, sans zéro
+   en tête pour Cargo (`2026.12.1`). Validez et envoyez (`git push`).
+2. Dans Gitea : Publications (« Releases ») → Nouvelle publication →
+   étiquette `v2026.12.01` sur `main` (le zéro en tête est permis ici), un titre et les nouveautés → Publier.
+
+Les RustNVR qui surveillent le dépôt l'annoncent à la vérification suivante
+(« Vérifier maintenant » pour ne pas attendre). L'étiquette doit
+correspondre à la version de `Cargo.toml`, sinon la version installée se
+croira toujours en retard.

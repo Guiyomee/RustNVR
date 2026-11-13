@@ -37,7 +37,7 @@ pub enum OnvifError {
     Other(String),
 }
 
-/// Maker and model.
+/// Maker, model, firmware and serial number (`GetDeviceInformation`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeviceInfo {
     /// `Manufacturer`.
@@ -46,6 +46,10 @@ pub struct DeviceInfo {
     pub model: Option<String>,
     /// `FirmwareVersion`.
     pub firmware: Option<String>,
+    /// `SerialNumber`.
+    pub serial: Option<String>,
+    /// `HardwareId`.
+    pub hardware: Option<String>,
 }
 
 /// A video stream of the camera (one ONVIF profile).
@@ -233,7 +237,18 @@ impl Client {
         Ok(())
     }
 
-    /// Maker, model, firmware.
+    /// Restarts the camera (`SystemReboot`; needs an administrator account
+    /// of the camera); the message it gives (« Rebooting in 30 seconds »…).
+    pub async fn system_reboot(&self, device_url: &str) -> Result<String, OnvifError> {
+        let body = self.call(device_url, "<tds:SystemReboot/>", true).await?;
+        Ok(body
+            .find("SystemRebootResponse")
+            .and_then(|r| r.text_at(&["Message"]))
+            .map(|m| m.trim().to_owned())
+            .unwrap_or_default())
+    }
+
+    /// Maker, model, firmware, serial number and hardware.
     pub async fn device_information(&self, device_url: &str) -> Result<DeviceInfo, OnvifError> {
         let body = self
             .call(device_url, "<tds:GetDeviceInformation/>", true)
@@ -241,11 +256,19 @@ impl Client {
         let r = body
             .find("GetDeviceInformationResponse")
             .ok_or(OnvifError::NotOnvif)?;
-        let get = |n: &str| r.text_at(&[n]).map(str::to_owned);
+        // Blank values (some cameras send them empty) are left out.
+        let get = |n: &str| {
+            r.text_at(&[n])
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+        };
         Ok(DeviceInfo {
             manufacturer: get("Manufacturer"),
             model: get("Model"),
             firmware: get("FirmwareVersion"),
+            serial: get("SerialNumber"),
+            hardware: get("HardwareId"),
         })
     }
 
@@ -437,7 +460,7 @@ mod tests {
                         )
                     } else if text.contains("GetDeviceInformation") {
                         soap(
-                            "<tds:GetDeviceInformationResponse><tds:Manufacturer>Dahua</tds:Manufacturer><tds:Model>IPC-HDW2431T</tds:Model><tds:FirmwareVersion>2.8</tds:FirmwareVersion></tds:GetDeviceInformationResponse>",
+                            "<tds:GetDeviceInformationResponse><tds:Manufacturer>Dahua</tds:Manufacturer><tds:Model>IPC-HDW2431T</tds:Model><tds:FirmwareVersion>2.8</tds:FirmwareVersion><tds:SerialNumber>7G0123PAZ</tds:SerialNumber><tds:HardwareId> </tds:HardwareId></tds:GetDeviceInformationResponse>",
                         )
                     } else if text.contains("GetCapabilities") {
                         soap(&format!(
@@ -478,6 +501,8 @@ mod tests {
         assert_eq!(found, url);
         assert_eq!(info.manufacturer.as_deref(), Some("Dahua"));
         assert_eq!(info.model.as_deref(), Some("IPC-HDW2431T"));
+        assert_eq!(info.serial.as_deref(), Some("7G0123PAZ"));
+        assert_eq!(info.hardware, None, "blank: left out");
         assert_eq!(streams.len(), 2);
         assert_eq!(
             (

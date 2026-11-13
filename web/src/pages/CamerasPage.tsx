@@ -12,6 +12,7 @@ import { Switch } from '../components/ui/Switch'
 import { useReadOnly } from '../auth/AuthGate'
 import { describeError } from '../api/client'
 import { deleteCamera, probeCamera, setAudio } from '../api/endpoints'
+import { PauseButton } from '../components/cameras/PauseButton'
 import { useCapability, useData, useIsDemo, useLive } from '../data/DataContext'
 import { destinationsLabel, formatBitrate, formatDuration, formatNumber, formatResolution } from '../lib/format'
 import { Link } from '../lib/router'
@@ -29,6 +30,8 @@ function rtspState(c: Camera): string {
       return t(`Échec (tentative ${c.attempt ?? '?'}) · nouvel essai dans ${formatDuration(c.retry_in_ms)}`, `Failed (attempt ${c.attempt ?? '?'}) · retry in ${formatDuration(c.retry_in_ms)}`)
     case 'disabled':
       return t('Non connectée', 'Not connected')
+    case 'paused':
+      return t('En pause jusqu’à la reprise ou au redémarrage', 'Paused until resumed or restarted')
     default:
       return '—'
   }
@@ -62,6 +65,7 @@ function Actions({ camera, onDialog }: { camera: Camera; onDialog: (d: Dialog) =
         disabledReason={demo ? t('Indisponible en mode démo.', 'Not available in demo mode.') : readOnly ? readOnly : manage ? null : t(`Utilisez « rustnvr probe --camera ${camera.id} ».`, `Use « rustnvr probe --camera ${camera.id} ».`)}
         onClick={() => void probe()}
       />
+      <PauseButton camera={camera} compact />
       <IconButton label={t('Modifier', 'Edit')} icon={<Pencil className="size-4" />} onClick={() => onDialog({ kind: 'form', camera })} />
       <IconButton
         label={t('Supprimer', 'Delete')}

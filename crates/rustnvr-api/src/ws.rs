@@ -1,6 +1,9 @@
 //! `/api/v1/ws`: pushes system status, camera states, finished segments and
-//! detection events.
+//! detection events. An account limited to some cameras hears of those only;
+//! its rights are read again every few seconds, the connection being open
+//! for hours.
 
+use crate::auth::Principal;
 use crate::dto::{EventDto, RecordingDto, WsMessage};
 use crate::state::{ApiState, unix_ms};
 use axum::extract::State;
@@ -13,8 +16,18 @@ use tokio::sync::broadcast::error::RecvError;
 
 const SYSTEM_PERIOD: Duration = Duration::from_secs(5);
 
-pub(crate) async fn handler(State(state): State<Arc<ApiState>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| client(state, socket))
+pub(crate) async fn handler(
+    State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<Principal>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let who = principal.map(|p| p.0);
+    ws.on_upgrade(move |socket| client(state, socket, who))
+}
+
+/// Whether the account of this connection sees `camera` (no account: yes).
+fn sees(who: Option<&Principal>, camera: &str) -> bool {
+    who.is_none_or(|p| p.sees(camera))
 }
 
 async fn send(socket: &mut WebSocket, msg: &WsMessage) -> bool {
@@ -27,7 +40,7 @@ async fn send(socket: &mut WebSocket, msg: &WsMessage) -> bool {
     }
 }
 
-async fn send_snapshot(state: &ApiState, socket: &mut WebSocket) -> bool {
+async fn send_snapshot(state: &ApiState, socket: &mut WebSocket, who: Option<&Principal>) -> bool {
     if !send(
         socket,
         &WsMessage::System {
@@ -39,6 +52,9 @@ async fn send_snapshot(state: &ApiState, socket: &mut WebSocket) -> bool {
         return false;
     }
     for c in &state.cameras() {
+        if !sees(who, c.id.as_str()) {
+            continue;
+        }
         if !send(
             socket,
             &WsMessage::Camera {
@@ -75,9 +91,9 @@ fn recording_dto(state: &ApiState, s: &SegmentInfo) -> Option<RecordingDto> {
     })
 }
 
-async fn client(state: Arc<ApiState>, mut socket: WebSocket) {
+async fn client(state: Arc<ApiState>, mut socket: WebSocket, mut who: Option<Principal>) {
     let mut events = state.events.subscribe();
-    if !send_snapshot(&state, &mut socket).await {
+    if !send_snapshot(&state, &mut socket, who.as_ref()).await {
         return;
     }
     let mut ticker = tokio::time::interval(SYSTEM_PERIOD);
@@ -92,14 +108,37 @@ async fn client(state: Arc<ApiState>, mut socket: WebSocket) {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
                 Some(Ok(_)) => true, // clients do not send commands yet
             },
-            _ = ticker.tick() => send(&mut socket, &WsMessage::System { system: Box::new(state.system_dto()) }).await,
+            _ = ticker.tick() => {
+                // The account may have been removed, or limited to other cameras.
+                let before = who.clone();
+                if let Some(p) = &who {
+                    match crate::auth::refreshed(&state, p).await {
+                        Some(now) => who = Some(now),
+                        None => {
+                            let _ = socket.send(Message::Close(None)).await;
+                            return;
+                        }
+                    }
+                }
+                if who != before {
+                    let cameras = state.cameras().iter().filter(|c| sees(who.as_ref(), c.id.as_str())).map(|c| state.camera_dto(c)).collect();
+                    if !send(&mut socket, &WsMessage::Cameras { cameras }).await {
+                        return;
+                    }
+                }
+                send(&mut socket, &WsMessage::System { system: Box::new(state.system_dto()) }).await
+            },
             event = events.recv() => match event {
+                // Nothing about a camera this account does not see.
+                Ok(NvrEvent::StreamState { camera, .. } | NvrEvent::RecorderError { camera, .. } | NvrEvent::MotionSettingsChanged { camera, .. } | NvrEvent::Crossing { camera, .. }) if !sees(who.as_ref(), camera.as_str()) => true,
+                Ok(NvrEvent::SegmentFinished(info)) if !sees(who.as_ref(), info.camera.as_str()) => true,
+                Ok(NvrEvent::Detection(event)) if !sees(who.as_ref(), event.camera.as_str()) => true,
                 Ok(NvrEvent::StreamState { camera, .. }) => match state.camera(camera.as_str()) {
                     Some(c) => send(&mut socket, &WsMessage::Camera { camera: Box::new(state.camera_dto(&c)) }).await,
                     None => true,
                 },
                 Ok(NvrEvent::CamerasChanged) => {
-                    let cameras = state.cameras().iter().map(|c| state.camera_dto(c)).collect();
+                    let cameras = state.cameras().iter().filter(|c| sees(who.as_ref(), c.id.as_str())).map(|c| state.camera_dto(c)).collect();
                     send(&mut socket, &WsMessage::Cameras { cameras }).await
                 }
                 Ok(NvrEvent::SegmentFinished(info)) => match recording_dto(&state, &info) {
@@ -136,7 +175,7 @@ async fn client(state: Arc<ApiState>, mut socket: WebSocket) {
                 // The state of the destinations comes with `system`; the presence counts with `GET /crossings`.
                 Ok(NvrEvent::Snapshot { .. } | NvrEvent::ObjectSnapshot { .. } | NvrEvent::StorageState { .. } | NvrEvent::Presence { .. }) => true,
                 // Missed events: resend the full state.
-                Err(RecvError::Lagged(_)) => send_snapshot(&state, &mut socket).await,
+                Err(RecvError::Lagged(_)) => send_snapshot(&state, &mut socket, who.as_ref()).await,
                 Err(RecvError::Closed) => return,
             },
         };

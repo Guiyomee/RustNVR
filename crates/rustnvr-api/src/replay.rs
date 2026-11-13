@@ -15,8 +15,11 @@ use std::sync::Arc;
 /// `GET /ai/captures`: days with kept pictures, the most recent first.
 pub(crate) async fn days(
     State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
 ) -> Result<Json<Vec<CaptureDay>>, ApiError> {
-    Ok(Json(control(&state)?.captures().await?))
+    let mut days = control(&state)?.captures().await?;
+    days.retain(|d| crate::auth::sees(principal.as_ref(), &d.camera));
+    Ok(Json(days))
 }
 
 /// `GET /ai/captures/{camera}/{day}`: the kept pictures of a day.

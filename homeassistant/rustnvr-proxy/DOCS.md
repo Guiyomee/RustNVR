@@ -4,7 +4,7 @@ Affiche l'interface de RustNVR dans Home Assistant (panneau « RustNVR » de la
 barre latérale), sans ouvrir de port supplémentaire : Home Assistant authentifie
 l'accès (ingress) et l'app relaie vers votre serveur RustNVR.
 
-Il faut une version de RustNVR **postérieure à 2026.11.06** : les précédentes
+Il faut une version de RustNVR **postérieure à 2026.11.07** : les précédentes
 ne savent pas s'afficher sous ingress.
 
 ## Réglage

@@ -13,6 +13,19 @@ export const NAV_ITEMS = [
   { to: '/about', label: t('À propos', 'About'), icon: Info },
 ] as const
 
+/** Pages of the administrators: a viewer cannot change anything there. */
+const ADMIN_PAGES: readonly string[] = ['/cameras', '/storage']
+
+/** True for a page a viewer account has no use of (the detail of a camera stays). */
+export function adminPage(path: string): boolean {
+  return ADMIN_PAGES.includes(path)
+}
+
+/** The menu of an account. */
+export function navItems(viewer: boolean) {
+  return viewer ? NAV_ITEMS.filter((item) => !adminPage(item.to)) : NAV_ITEMS
+}
+
 export function isActive(itemTo: string, path: string): boolean {
   return itemTo === '/' ? path === '/' : path === itemTo || path.startsWith(`${itemTo}/`)
 }

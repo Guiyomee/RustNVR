@@ -4,7 +4,8 @@ import { useIsDemo } from '../../data/DataContext'
 import { Badge } from '../ui/Card'
 import { IconButton } from '../ui/Button'
 import { Logo } from './Logo'
-import { NAV_ITEMS, isActive } from './nav'
+import { useIsViewer } from '../../auth/AuthGate'
+import { isActive, navItems } from './nav'
 import { t } from '../../lib/i18n'
 
 interface Props {
@@ -18,9 +19,10 @@ interface Props {
 export function Sidebar({ collapsed, onToggleCollapsed, mobileOpen, onCloseMobile }: Props) {
   const { path } = useLocation()
   const demo = useIsDemo()
+  const items = navItems(useIsViewer())
   const nav = (compact: boolean, onNavigate?: () => void) => (
     <nav aria-label={t('Navigation principale', 'Main navigation')} className="flex flex-col gap-1 px-2">
-      {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
+      {items.map(({ to, label, icon: Icon }) => {
         const active = isActive(to, path)
         return (
           <Link

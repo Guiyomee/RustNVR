@@ -686,7 +686,7 @@ st_admin_password() {
 st_rustnvr_version() {
     [ -z "$ARCHIVE" ] || { skip; return; }
     local v
-    v=$(wt --title "RUSTNVR" --inputbox "\nVersion à installer (v2026.11.06 ; vide : la dernière) :" 10 72 "$var_rustnvr_version") || return 1
+    v=$(wt --title "RUSTNVR" --inputbox "\nVersion à installer (v2026.11.07 ; vide : la dernière) :" 10 72 "$var_rustnvr_version") || return 1
     var_rustnvr_version=$v
 }
 st_recordings() {
@@ -1128,7 +1128,7 @@ if is_yes "$var_gpu"; then
         pct set "$CTID" -dev0 "$var_gpu_device,gid=${RENDER_GID:-0}"
         NEED_REBOOT=1
     else
-        warn "Proxmox VE 8.2 ou plus est nécessaire pour transmettre /dev/dri avec ce script : voir docs/INSTALLATION.md"
+        warn "Proxmox VE 8.2 ou plus est nécessaire pour transmettre /dev/dri avec ce script : voir https://github.com/Guiyomee/RustNVR/wiki/FR-Proxmox"
     fi
 fi
 if [ "$NEED_REBOOT" = 1 ]; then

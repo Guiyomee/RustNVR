@@ -36,6 +36,9 @@ Par caméra (appareil nommé comme la caméra) :
 | Mode d'enregistrement | `select` (configuration) | « Continu », « Sur mouvement » ou « Arrêté » ; la caméra redémarre (quelques secondes sans image) ; caméras de l'interface seulement (celles de `config.toml` ne changent pas, un avertissement est journalisé) |
 | Détection de mouvement | `switch` (configuration) | active ou coupe la détection de la caméra |
 | Enregistrement du son | `switch` (configuration) | enregistre ou non le son de la caméra (caméras de l'interface) |
+| Vision nocturne | `binary_sensor` | la caméra filme en vision nocturne (image en noir et blanc, infrarouge), mesuré chaque minute sur l'image ; publié une fois connu |
+| Redémarrer la caméra | `button` (configuration) | redémarre la caméra par ONVIF ; seulement pour les caméras dont le port ONVIF est réglé (compte administrateur de la caméra nécessaire) |
+| Caméra active | `switch` | coupé : la caméra est mise en pause (ni connexion, ni enregistrement, ni détection) jusqu'à ce qu'on le rallume ou jusqu'au redémarrage de RustNVR, qui ne garde pas la pause ; toutes les caméras, celles de `config.toml` comprises |
 | Personne | `binary_sensor` (`occupancy`) | personne reconnue pendant le mouvement (seulement avec l'IA optionnelle, [AI.md](AI.md)) |
 | Dernier mouvement | `camera` | image prise au début du dernier événement |
 | Dernière personne | `camera` | image où une personne a été reconnue, cadres bleus dessinés (seulement avec l'IA optionnelle) |
@@ -43,6 +46,10 @@ Par caméra (appareil nommé comme la caméra) :
 | Prendre une capture | `button` | image de la caméra tout de suite (flux principal, 1920 px de large au plus, masques de confidentialité appliqués), publiée sur l'entité « Capture » |
 | Capture | `camera` | dernière image prise par le bouton « Prendre une capture » |
 | Position PTZ | `select` | caméras motorisées (port ONVIF réglé) : choisir une position enregistrée y envoie la caméra ; les options sont les noms des positions, lus au démarrage et après chaque ajout ou suppression depuis l'interface (une position créée dans l'appli du fabricant apparaît au prochain démarrage) |
+
+Pour une caméra dont le port ONVIF est réglé, l'appareil Home Assistant
+porte ce que la caméra dit d'elle-même (fabricant, modèle, firmware, numéro
+de série), lu au démarrage ; sinon « RustNVR / Caméra ».
 
 Pour RustNVR (appareil « RustNVR ») : « Caméras en ligne », « Espace disque
 faible » (problème) et « Disque des
@@ -75,6 +82,10 @@ retenus vides).
 | `<p>/<caméra>/motion_detection/set` | commande `ON` / `OFF` | — |
 | `<p>/<caméra>/audio` | `ON` / `OFF` (son enregistré) | oui |
 | `<p>/<caméra>/audio/set` | commande `ON` / `OFF` | — |
+| `<p>/<caméra>/night` | `ON` / `OFF` (vision nocturne), publié une fois connu | oui |
+| `<p>/<caméra>/reboot` | n'importe quel message (commande) : redémarre la caméra par ONVIF | — |
+| `<p>/<caméra>/active` | `ON` / `OFF` (caméra en marche, pas en pause) | oui |
+| `<p>/<caméra>/active/set` | commande `ON` (reprendre) / `OFF` (pause jusqu'au redémarrage) | — |
 | `<p>/<caméra>/person` | `ON` / `OFF` (personne reconnue, IA optionnelle) | oui |
 | `<p>/<caméra>/recording` | `ON` / `OFF` | oui |
 | `<p>/<caméra>/record_mode` | `Continu` / `Sur mouvement` / `Arrêté` | oui |

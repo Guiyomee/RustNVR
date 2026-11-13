@@ -8,7 +8,7 @@ use crate::camera::CameraId;
 use crate::rtsp::{RtspTarget, RtspTargetError};
 use crate::secret::Secret;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -1016,7 +1016,9 @@ struct ManagedWebhooksFile {
 }
 
 /// What a webhook is called for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, serde::Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookEvent {
     /// Motion detected: sent once the picture of the event is taken.
@@ -1034,20 +1036,82 @@ pub enum WebhookEvent {
     /// A camera has sent no picture for a minute (offline), or is back
     /// after that. Limited by cameras, not by objects.
     Camera,
+    /// The recording of a camera failed (disk full, write error…), then a
+    /// segment of it was written again. Limited by cameras, not by objects.
+    Recording,
 }
 
 fn default_webhook_events() -> Vec<WebhookEvent> {
     vec![WebhookEvent::Motion, WebhookEvent::Objects]
 }
 
-/// An address called (HTTP POST, JSON) on detection events.
+/// Longest custom title or text of a webhook message (characters).
+pub const WEBHOOK_TEMPLATE_CHARS: usize = 500;
+/// Longest wait between two notifications of a camera (minutes: a day).
+pub const WEBHOOK_COOLDOWN_MAX: u32 = 1440;
+
+/// The message of a webhook for one kind of call, in place of the default
+/// one (Discord, ntfy, Telegram; RustNVR's JSON never changes).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebhookMessage {
+    /// Title, with variables such as `{camera}`; absent or blank: the
+    /// default title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Text under the title, with variables; absent or blank: the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// ntfy priority, 1 (min) to 5 (max); absent: high for a failure,
+    /// ntfy's default otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
+    /// Telegram: delivered without a sound.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub silent: bool,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
+/// Where the calls of a webhook go, and in which form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookKind {
+    /// RustNVR's JSON (n8n, Node-RED, Home Assistant, scripts…).
+    Json,
+    /// A Discord message (an embed, the picture attached).
+    Discord,
+    /// A ntfy notification: `url` is the topic (`https://ntfy.sh/topic`),
+    /// `token` an optional access token.
+    Ntfy,
+    /// A Telegram message from a bot (`token`) to a chat (`chat_id`).
+    Telegram,
+}
+
+/// An address called (HTTP POST) on detection events.
 #[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookConfig {
     /// Name shown in the interface.
     pub name: String,
-    /// `http://` or `https://` address (may carry a token: never logged).
+    /// `http://` or `https://` address (may carry a token: never logged);
+    /// unused for Telegram.
+    #[serde(default)]
     pub url: String,
+    /// Form of the calls. Absent (files written before it existed): Discord
+    /// for a Discord address, RustNVR's JSON otherwise; see [`Self::kind`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<WebhookKind>,
+    /// ntfy: access token (optional); Telegram: token of the bot. A secret:
+    /// never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Telegram: the chat the bot writes to (a person, a group or a
+    /// channel: a number, or `@channel`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
     /// Calls are made.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1065,9 +1129,32 @@ pub struct WebhookConfig {
     /// The JPEG picture is sent too (base64 in the JSON).
     #[serde(default = "default_true")]
     pub image: bool,
+    /// Messages chosen per kind of call (the others keep the default).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub messages: BTreeMap<WebhookEvent, WebhookMessage>,
+    /// At most one event, and one line crossing, called per camera every
+    /// this many minutes; 0: no limit. Failures (storage, camera,
+    /// recording) always go through.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cooldown_minutes: u32,
 }
 
 impl WebhookConfig {
+    /// Form of the calls (see [`WebhookKind`]).
+    pub fn kind(&self) -> WebhookKind {
+        self.kind.unwrap_or(if self.is_discord() {
+            WebhookKind::Discord
+        } else {
+            WebhookKind::Json
+        })
+    }
+
+    /// The same webhook with its form written out (for the interface).
+    pub fn with_kind(mut self) -> Self {
+        self.kind = Some(self.kind());
+        self
+    }
+
     /// Configuration errors.
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -1075,27 +1162,94 @@ impl WebhookConfig {
         if self.name.trim().is_empty() {
             out.push("webhook : nom manquant".to_owned());
         }
-        if !(self.url.starts_with("http://") || self.url.starts_with("https://"))
-            || self.url.len() < 10
-        {
-            out.push(format!("{what} : adresse http:// ou https:// attendue"));
+        let kind = self.kind();
+        let address = (self.url.starts_with("http://") || self.url.starts_with("https://"))
+            && self.url.len() >= 10;
+        match kind {
+            WebhookKind::Telegram => {
+                let token = self.token.as_deref().unwrap_or_default();
+                // « 123456789:AA… » as given by @BotFather.
+                let token_ok = token.split_once(':').is_some_and(|(id, key)| {
+                    !id.is_empty()
+                        && id.chars().all(|c| c.is_ascii_digit())
+                        && key.len() >= 20
+                        && key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                });
+                if !token_ok {
+                    out.push(format!(
+                        "{what} : jeton du bot Telegram attendu (123456789:AA…, donné par @BotFather)"
+                    ));
+                }
+                let chat = self.chat_id.as_deref().unwrap_or_default();
+                let chat_ok = chat
+                    .strip_prefix('-')
+                    .unwrap_or(chat)
+                    .parse::<u64>()
+                    .is_ok()
+                    || chat.strip_prefix('@').is_some_and(|n| {
+                        n.len() >= 4 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    });
+                if !chat_ok {
+                    out.push(format!(
+                        "{what} : identifiant de conversation Telegram attendu (un nombre, ou @canal)"
+                    ));
+                }
+            }
+            _ if !address => out.push(format!("{what} : adresse http:// ou https:// attendue")),
+            WebhookKind::Discord if !self.is_discord() => out.push(format!(
+                "{what} : adresse de webhook Discord attendue (https://discord.com/api/webhooks/…)"
+            )),
+            WebhookKind::Ntfy
+                if self
+                    .token
+                    .as_deref()
+                    .is_some_and(|t| t.chars().any(|c| c.is_whitespace() || c.is_control())) =>
+            {
+                out.push(format!("{what} : jeton ntfy sans espace attendu"));
+            }
+            _ => {}
         }
         if self.events.is_empty() {
             out.push(format!("{what} : choisissez au moins un type d'appel"));
+        }
+        if self.cooldown_minutes > WEBHOOK_COOLDOWN_MAX {
+            out.push(format!(
+                "{what} : {WEBHOOK_COOLDOWN_MAX} minutes au plus entre deux notifications"
+            ));
+        }
+        for m in self.messages.values() {
+            let long = [&m.title, &m.text]
+                .into_iter()
+                .flatten()
+                .any(|t| t.chars().count() > WEBHOOK_TEMPLATE_CHARS);
+            if long {
+                out.push(format!(
+                    "{what} : {WEBHOOK_TEMPLATE_CHARS} caractères au plus par titre ou texte"
+                ));
+            }
+            if m.priority.is_some_and(|p| !(1..=5).contains(&p)) {
+                out.push(format!("{what} : priorité ntfy de 1 à 5"));
+            }
         }
         out
     }
 
     /// Host of the address, for logs (never the path nor the query).
     pub fn host(&self) -> &str {
+        // Telegram is never guessed from the address (`kind()` reads it).
+        if self.kind == Some(WebhookKind::Telegram) {
+            return "api.telegram.org";
+        }
         let rest = self.url.split_once("://").map_or(&*self.url, |(_, r)| r);
         let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
         authority.rsplit('@').next().unwrap_or_default()
     }
 
-    /// The address is a Discord webhook: calls are sent as Discord messages
-    /// (an embed, the picture attached) instead of RustNVR's JSON, which
-    /// Discord refuses.
+    /// The address is a Discord webhook: calls are then sent as Discord
+    /// messages (an embed, the picture attached) unless another form is
+    /// chosen, RustNVR's JSON being refused by Discord.
     pub fn is_discord(&self) -> bool {
         let host = self.host().to_ascii_lowercase();
         let host = host.split(':').next().unwrap_or_default();
@@ -2919,12 +3073,123 @@ mod webhook_tests {
         WebhookConfig {
             name: "n8n".into(),
             url: url.into(),
+            kind: None,
+            token: None,
+            chat_id: None,
             enabled: true,
             cameras: Vec::new(),
             objects: Vec::new(),
             events: default_webhook_events(),
             image: true,
+            messages: BTreeMap::new(),
+            cooldown_minutes: 0,
         }
+    }
+
+    #[test]
+    fn custom_webhook_messages_are_checked_and_stored() {
+        let mut h = hook("https://ntfy.sh/maison");
+        h.kind = Some(WebhookKind::Ntfy);
+        h.cooldown_minutes = 10;
+        h.messages.insert(
+            WebhookEvent::Objects,
+            WebhookMessage {
+                title: Some("{objet} devant {camera}".into()),
+                text: None,
+                priority: Some(5),
+                silent: false,
+            },
+        );
+        assert!(h.problems().is_empty(), "{:?}", h.problems());
+        #[derive(serde::Serialize)]
+        struct Stored<'a> {
+            webhooks: &'a [WebhookConfig],
+        }
+        let text = toml::to_string(&Stored {
+            webhooks: std::slice::from_ref(&h),
+        })
+        .expect("toml");
+        assert!(text.contains("cooldown_minutes = 10"), "{text}");
+        assert!(text.contains("[webhooks.messages.objects]"), "{text}");
+        let back: ManagedWebhooksFile = toml::from_str(&text).expect("read back");
+        assert_eq!(back.webhooks[0], h);
+
+        let mut bad = h.clone();
+        bad.cooldown_minutes = WEBHOOK_COOLDOWN_MAX + 1;
+        bad.messages.insert(
+            WebhookEvent::End,
+            WebhookMessage {
+                text: Some("x".repeat(WEBHOOK_TEMPLATE_CHARS + 1)),
+                priority: Some(6),
+                ..WebhookMessage::default()
+            },
+        );
+        assert_eq!(bad.problems().len(), 3, "{:?}", bad.problems());
+    }
+
+    #[test]
+    fn webhooks_of_each_kind_are_checked() {
+        // Files written before the kind existed.
+        assert_eq!(hook("https://n8n.local/x").kind(), WebhookKind::Json);
+        assert_eq!(
+            hook("https://discord.com/api/webhooks/1/a").kind(),
+            WebhookKind::Discord
+        );
+        assert_eq!(
+            hook("https://discord.com/api/webhooks/1/a")
+                .with_kind()
+                .kind,
+            Some(WebhookKind::Discord)
+        );
+        let discord = WebhookConfig {
+            kind: Some(WebhookKind::Discord),
+            ..hook("https://n8n.local/x")
+        };
+        assert_eq!(discord.problems().len(), 1, "not a Discord address");
+        let ntfy = WebhookConfig {
+            kind: Some(WebhookKind::Ntfy),
+            token: Some("tk_abc".into()),
+            ..hook("https://ntfy.sh/jardin-a1b2")
+        };
+        assert!(ntfy.problems().is_empty(), "{:?}", ntfy.problems());
+        assert_eq!(ntfy.host(), "ntfy.sh");
+        let spaced = WebhookConfig {
+            token: Some("tk abc".into()),
+            ..ntfy.clone()
+        };
+        assert_eq!(spaced.problems().len(), 1);
+        let telegram = WebhookConfig {
+            kind: Some(WebhookKind::Telegram),
+            token: Some("123456789:AAHd-secret_secret_secret".into()),
+            chat_id: Some("-1001234567890".into()),
+            ..hook("")
+        };
+        assert!(telegram.problems().is_empty(), "{:?}", telegram.problems());
+        assert_eq!(telegram.host(), "api.telegram.org", "never the token");
+        for (token, chat) in [
+            ("123456789", "42"),
+            ("abc:AAHdsecretsecretsecretsecret", "42"),
+            ("123456789:AAHdsecretsecretsecretsecret", "jardin"),
+        ] {
+            let bad = WebhookConfig {
+                token: Some(token.into()),
+                chat_id: Some(chat.into()),
+                ..telegram.clone()
+            };
+            assert_eq!(bad.problems().len(), 1, "{token} {chat}");
+        }
+        let channel = WebhookConfig {
+            chat_id: Some("@ma_maison".into()),
+            ..telegram
+        };
+        assert!(channel.problems().is_empty());
+        // Read back from a file.
+        let parsed: ManagedWebhooksFile = toml::from_str(
+            "[[webhooks]]\nname = \"t\"\nkind = \"telegram\"\ntoken = \"1:x\"\nchat_id = \"42\"\n",
+        )
+        .expect("toml");
+        assert_eq!(parsed.webhooks[0].kind(), WebhookKind::Telegram);
+        assert_eq!(parsed.webhooks[0].url, "");
     }
 
     #[test]

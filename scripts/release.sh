@@ -126,8 +126,8 @@ say "Prêt dans $OUT"
 
 # --- 6. GitHub export --------------------------------------------------------------
 # Kept out of the public copy: notes for the maintainers and the homelab setup.
-INTERNAL=(CLAUDE.md ROADMAP.md compose.homelab.yaml docs/AJOUTS.md docs/AXES_AMELIORATION.md
-    docs/CAHIER_DES_CHARGES.md docs/MESURES.md docs/VERIFICATION.md)
+INTERNAL=(CLAUDE.md ROADMAP.md compose.homelab.yaml
+    docs/CAHIER_DES_CHARGES.md docs/MESURES.md docs/VERIFICATION.md scripts/push-image.sh)
 if [ -n "$GITHUB" ] && [ "$REHEARSE" = 0 ]; then
     say "Export vers le clone GitHub $GITHUB"
     (

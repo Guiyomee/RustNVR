@@ -21,7 +21,7 @@ members = [
 # Calendar versions: year.month.number of the release in the month. Cargo
 # forbids leading zeros: 2026.11.1 here, published as v2026.11.01 (RustNVR's
 # update check reads both the same).
-version = "2026.11.6"
+version = "2026.11.7"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false

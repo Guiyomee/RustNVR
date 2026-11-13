@@ -3,7 +3,7 @@
 # RustNVR image: the web interface (Node), the program (Rust, with the
 # built-in ONNX recognition), then a small Debian with FFmpeg.
 #
-#   docker compose up -d --build        (see docs/DOCKER.md)
+#   docker compose up -d --build        (see https://github.com/Guiyomee/RustNVR/wiki/EN-Docker)
 
 # --- Web interface -----------------------------------------------------------
 FROM node:24-slim AS web
