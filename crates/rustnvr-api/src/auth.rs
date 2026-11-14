@@ -698,15 +698,26 @@ fn clear_cookie() -> HeaderValue {
     HeaderValue::from_static("rustnvr_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
 }
 
-/// Over built-in HTTPS or behind an HTTPS reverse proxy, the cookie is marked `Secure`.
+/// The cookie is marked `Secure` when the browser's page is HTTPS.
 fn over_https(state: &ApiState, headers: &HeaderMap) -> bool {
-    if state.https.load(std::sync::atomic::Ordering::Relaxed) {
-        return true;
-    }
+    browser_https(
+        state.https.load(std::sync::atomic::Ordering::Relaxed),
+        headers,
+    )
+}
+
+/// Whether the browser reached this server over HTTPS. A reverse proxy says
+/// so with `X-Forwarded-Proto` (the first one, the browser's): it wins over
+/// the built-in HTTPS, which may only be the hop between the proxy and
+/// RustNVR (Home Assistant on `http://…:8123` forwarding to RustNVR over
+/// HTTPS). A `Secure` cookie on an HTTP page is dropped by the browser: the
+/// login would succeed but the session would never come back.
+fn browser_https(builtin: bool, headers: &HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.eq_ignore_ascii_case("https"))
+        .and_then(|v| v.split(',').next())
+        .map_or(builtin, |proto| proto.trim().eq_ignore_ascii_case("https"))
 }
 
 /// `GET /auth/status` (public).
@@ -1312,6 +1323,20 @@ mod tests {
         assert!(fwd("https://nvr.example.org:9000"));
         assert_eq!(hostname("[::1]:8080"), "::1");
         assert_eq!(hostname("nvr.lan"), "nvr.lan");
+    }
+
+    #[test]
+    fn the_cookie_follows_the_browsers_scheme() {
+        let none = HeaderMap::new();
+        assert!(browser_https(true, &none), "built-in HTTPS, no proxy");
+        assert!(!browser_https(false, &none), "plain HTTP, no proxy");
+        let proto = |v: &str| headers(&[("x-forwarded-proto", v)]);
+        // Home Assistant on HTTP, RustNVR behind it over HTTPS: no `Secure`.
+        assert!(!browser_https(true, &proto("http")));
+        // An HTTPS proxy in front of plain HTTP: `Secure`.
+        assert!(browser_https(false, &proto("https")));
+        assert!(browser_https(false, &proto("HTTPS, http")));
+        assert!(!browser_https(true, &proto("http, https")));
     }
 
     /// One address waits after 5 failures; the account itself only after

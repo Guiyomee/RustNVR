@@ -38,6 +38,7 @@ import type { LiveStream } from '../api/endpoints'
 import type { Camera } from '../types/api'
 import { t } from '../lib/i18n'
 import { restreamHost } from '../lib/restream'
+import { withBase } from '../lib/build'
 
 type TabKey = 'live' | 'recordings' | 'detection' | 'config' | 'tech'
 
@@ -92,7 +93,7 @@ function RecordingsTab({ camera }: { camera: Camera }) {
                   {t('Lire', 'Play')}
                 </Button>
                 {r.url ? (
-                  <a href={r.url} download className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line px-2.5 text-xs font-medium hover:bg-line/60">
+                  <a href={withBase(r.url)} download className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line px-2.5 text-xs font-medium hover:bg-line/60">
                     <Download className="size-3.5" aria-hidden /> MP4
                   </a>
                 ) : (

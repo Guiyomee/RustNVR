@@ -119,6 +119,9 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   dernier mouvement par caméra ; commandes : mode d'enregistrement, événement
   manuel, capture tout de suite, pause de la détection sur toutes les caméras
   (mode présent / absent) ([MQTT.md](MQTT.md)).
+- Interface dans la barre latérale de Home Assistant (ingress), avec l'app
+  « RustNVR Proxy » de ce dépôt
+  ([HOME_ASSISTANT.md](HOME_ASSISTANT.md#interface-dans-home-assistant)).
 - API REST `/api/v1` et WebSocket temps réel
   ([API_CONTRACT.md](../API_CONTRACT.md)) ; comptes administrateur / lecteur
   avec page de connexion (mots de passe Argon2, sessions par cookie, blocage

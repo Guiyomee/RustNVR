@@ -7,7 +7,23 @@ précautions) sont sur la page de chaque
 
 ## Non publiée
 
+### Nouveautés
+- **Interface dans Home Assistant** (ingress) : RustNVR s'affiche dans la
+  barre latérale de Home Assistant grâce à la nouvelle app « RustNVR Proxy »
+  (dossier `homeassistant/` ; ce dépôt s'ajoute tel quel au magasin d'apps).
+  RustNVR lit le préfixe `X-Ingress-Path` et l'applique à ses fichiers, à
+  son API et à ses liens, et accepte d'être affiché dans une page de Home
+  Assistant (même origine seulement). Voir
+  [Home Assistant](docs/HOME_ASSISTANT.md#interface-dans-home-assistant).
+
 ### Corrections
+- La lecture d'une période (playlist HLS) désigne ses fichiers par des
+  adresses relatives : elle fonctionne aussi derrière un préfixe.
+- Derrière un proxy en HTTP (Home Assistant sur `http://…:8123` avec
+  « RustNVR Proxy »), un RustNVR en HTTPS marquait son cookie de session
+  `Secure` : le navigateur le refusait et l'interface restait sur la page de
+  connexion. Le cookie suit maintenant le protocole du navigateur
+  (`X-Forwarded-Proto`).
 - L'image Docker de la 2026.11.07 n'avait pas été publiée sur GitHub : le
   contrôle du code échouait avec Rust 1.100, sorti entre-temps.
 

@@ -2,7 +2,7 @@
 // Routes that do not exist yet are documented in API_CONTRACT.md and are not
 // called from here: the data layer reports them as unavailable instead.
 
-import { apiGet, apiSend, apiSendForFile } from './client'
+import { API_BASE, apiGet, apiSend, apiSendForFile } from './client'
 import type {
   BackupPreview,
   BackupRestored,
@@ -81,7 +81,7 @@ export const getRecordings = (id: string, fromMs: number, toMs: number, signal?:
 
 function wsBase(): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${proto}//${window.location.host}/api/v1`
+  return `${proto}//${window.location.host}${API_BASE}`
 }
 
 /** Event WebSocket on the same origin (ws:// or wss://). */
@@ -113,7 +113,7 @@ export const setMotion = (id: string, settings: MotionSettings) =>
   apiSend<MotionSettings>('PUT', `/cameras/${encodeURIComponent(id)}/motion`, settings, 30_000)
 
 /** Current picture of a camera as a JPEG (capabilities.snapshots); `t` defeats caching. */
-export const snapshotUrl = (id: string, t = Date.now()) => `/api/v1/cameras/${encodeURIComponent(id)}/snapshot?t=${t}`
+export const snapshotUrl = (id: string, t = Date.now()) => `${API_BASE}/cameras/${encodeURIComponent(id)}/snapshot?t=${t}`
 
 // MQTT and Home Assistant (capabilities.mqtt).
 export const getMqtt = () => apiGet<MqttView>('/mqtt')
@@ -248,7 +248,7 @@ export const resetPresence = (camera: string, line: string) =>
 // Kept pictures of the object recognition and its replay on them.
 export const getCaptureDays = () => apiGet<CaptureDay[]>('/ai/captures')
 export const captureUrl = (camera: string, day: string, file: string) =>
-  `/api/v1/ai/captures/${encodeURIComponent(camera)}/${encodeURIComponent(day)}/${encodeURIComponent(file)}`
+  `${API_BASE}/ai/captures/${encodeURIComponent(camera)}/${encodeURIComponent(day)}/${encodeURIComponent(file)}`
 export const deleteCaptureDay = (camera: string, day: string) =>
   apiSend<{ deleted: number }>('DELETE', `/ai/captures/${encodeURIComponent(camera)}/${encodeURIComponent(day)}`)
 // Up to 200 pictures, about 0.5 s each with CodeProject.AI on a processor;

@@ -331,6 +331,64 @@ async fn serves_interface_with_client_side_routes() {
 }
 
 #[tokio::test]
+async fn serves_interface_under_home_assistant_ingress() {
+    let (app, f) = app(None, true);
+    std::fs::write(
+        f.web.join("index.html"),
+        "<html><head><link rel=\"icon\" href=\"./favicon.svg\" />\
+         <script type=\"module\" src=\"./assets/app.js\"></script></head></html>",
+    )
+    .unwrap();
+    // Without ingress: absolute addresses, frames refused.
+    for path in ["/", "/index.html", "/cameras/cam"] {
+        let (status, headers, body) = get(&app, path, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        let page = String::from_utf8_lossy(&body);
+        assert!(page.contains("src=\"/assets/app.js\""), "{path}: {page}");
+        assert!(!page.contains("rustnvr-base"));
+        assert_eq!(headers["x-frame-options"], "DENY");
+        assert!(
+            headers["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .ends_with("frame-ancestors 'none'")
+        );
+        assert_eq!(headers["vary"], "x-ingress-path");
+    }
+    // Under ingress: the prefix in the page, frames of the same origin allowed.
+    let ingress = [("x-ingress-path", "/api/hassio_ingress/abc".to_owned())];
+    for path in ["/", "/cameras/cam"] {
+        let (status, headers, body) = get(&app, path, &ingress).await;
+        assert_eq!(status, StatusCode::OK);
+        let page = String::from_utf8_lossy(&body);
+        assert!(
+            page.contains("src=\"/api/hassio_ingress/abc/assets/app.js\""),
+            "{page}"
+        );
+        assert!(page.contains("href=\"/api/hassio_ingress/abc/favicon.svg\""));
+        assert!(
+            page.contains("<meta name=\"rustnvr-base\" content=\"/api/hassio_ingress/abc\" />")
+        );
+        assert_eq!(headers["x-frame-options"], "SAMEORIGIN");
+        assert!(
+            headers["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .ends_with("frame-ancestors 'self'")
+        );
+        assert_eq!(headers["cache-control"], "no-cache");
+    }
+    let (_, headers, _) = get(&app, "/api/v1/health", &ingress).await;
+    assert_eq!(headers["x-frame-options"], "SAMEORIGIN");
+    // A value that is not a plain path is ignored.
+    let bad = [("x-ingress-path", "/x\"><script>".to_owned())];
+    let (_, headers, body) = get(&app, "/", &bad).await;
+    let page = String::from_utf8_lossy(&body);
+    assert!(page.contains("src=\"/assets/app.js\"") && !page.contains("script>\""));
+    assert_eq!(headers["x-frame-options"], "DENY");
+}
+
+#[tokio::test]
 async fn explains_missing_frontend() {
     let (app, _f) = app(None, false);
     let (status, _, body) = get(&app, "/", &[]).await;

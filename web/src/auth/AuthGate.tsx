@@ -9,6 +9,7 @@ import { getAuthStatus, login, logout, setupAdmin, type AuthStatus, type AuthUse
 import { Logo } from '../components/layout/Logo'
 import { Button } from '../components/ui/Button'
 import { LoadingState } from '../components/ui/States'
+import { BASE_PATH } from '../lib/build'
 import { t } from '../lib/i18n'
 
 interface AuthContextValue {
@@ -126,7 +127,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }, [refresh])
   const signOut = useCallback(async () => {
     await logout().catch(() => undefined)
-    window.location.assign(import.meta.env.BASE_URL)
+    window.location.assign(`${BASE_PATH}/`)
   }, [])
 
   // Servers without accounts answer the status route only with Basic
