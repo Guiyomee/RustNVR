@@ -5,6 +5,7 @@
 import { API_BASE, apiGet, apiSend, apiSendForFile } from './client'
 import type {
   BackupPreview,
+  Bookmark,
   BackupRestored,
   CaptureDay,
   CapturePicture,
@@ -101,9 +102,12 @@ export function liveUrl(id: string, opts: { stream?: LiveStream; transcode?: boo
 }
 
 // Detection events (capabilities.events).
-export const getEvents = (q: { camera: string | null; fromMs: number; toMs: number; limit?: number }, signal?: AbortSignal) => {
+export const getEvents = (q: { camera: string | null; fromMs: number; toMs: number; limit?: number; objects?: string[] | null; zones?: string[] | null }, signal?: AbortSignal) => {
   const p = new URLSearchParams({ from: String(Math.floor(q.fromMs)), to: String(Math.ceil(q.toMs)), limit: String(q.limit ?? 500) })
   if (q.camera) p.set('camera', q.camera)
+  // Searched by the server (a month of events), not here.
+  if (q.objects?.length) p.set('objects', q.objects.join(','))
+  if (q.zones?.length) p.set('zones', q.zones.join(','))
   return apiGet<NvrEvent[]>(`/events?${p.toString()}`, 20_000, signal)
 }
 
@@ -194,6 +198,9 @@ export const getCameraDevice = (id: string, refresh = false) => apiGet<CameraDev
 /** Restarts the camera itself through ONVIF; what the camera answered. */
 export const rebootCamera = (id: string) => apiSend<{ message: string }>('POST', `/cameras/${encodeURIComponent(id)}/reboot`, {}, 30_000)
 /** Pauses a camera until it is resumed or RustNVR restarts (never stored). */
+/** Order of the cameras kept on the server (empty: the configuration's order). */
+export const getCameraOrder = (signal?: AbortSignal) => apiGet<{ cameras: string[] }>('/camera-order', undefined, signal)
+export const setCameraOrder = (cameras: string[]) => apiSend<void>('PUT', '/camera-order', { cameras })
 export const setCameraPaused = (id: string, paused: boolean) => apiSend<Camera>('PUT', `/cameras/${encodeURIComponent(id)}/pause`, { paused }, 30_000)
 export const setAudio = (id: string, enabled: boolean) => apiSend<Camera>('PUT', `/cameras/${encodeURIComponent(id)}/audio`, { enabled }, 30_000)
 
@@ -221,6 +228,13 @@ export const exportClip = (id: string, q: { fromMs: number; toMs: number; h264: 
 export const getUpdates = () => apiGet<UpdateStatus>('/updates')
 export const checkUpdates = () => apiSend<UpdateStatus>('POST', '/updates/check', {}, 30_000)
 export const setUpdates = (check: boolean) => apiSend<UpdateStatus>('PUT', '/updates', { check }, 30_000)
+
+// Bookmarks on the timeline (capabilities.bookmarks).
+export const getBookmarks = (fromMs: number, toMs: number, signal?: AbortSignal) =>
+  apiGet<Bookmark[]>(`/bookmarks?from=${Math.floor(fromMs)}&to=${Math.ceil(toMs)}`, undefined, signal)
+export const addBookmark = (q: { camera: string; atMs: number; note: string }) =>
+  apiSend<Bookmark>('POST', '/bookmarks', { camera: q.camera, at_ms: Math.round(q.atMs), note: q.note })
+export const deleteBookmark = (id: number) => apiSend<null>('DELETE', `/bookmarks/${id}`)
 
 // Protected recordings (capabilities.protect): kept whatever the retention.
 export const getProtected = () => apiGet<ProtectedRange[]>('/protected')

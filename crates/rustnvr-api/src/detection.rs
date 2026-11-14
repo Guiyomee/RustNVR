@@ -47,9 +47,29 @@ pub(crate) struct EventsQuery {
     from: Option<i64>,
     to: Option<i64>,
     limit: Option<u32>,
+    /// Comma-separated object labels: events where one was recognized.
+    objects: Option<String>,
+    /// Comma-separated zone names: events in one of them.
+    zones: Option<String>,
 }
 
-/// `GET /events?camera=&from=&to=&limit=`: events overlapping the period, newest first.
+/// `a,b,c` as a list (empty items dropped); `None` when absent or empty.
+fn list_param(value: Option<&str>) -> Result<Option<Vec<String>>, ApiError> {
+    let Some(value) = value else { return Ok(None) };
+    let items: Vec<String> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if items.len() > 64 || items.iter().any(|s| s.len() > 64) {
+        return Err(ApiError::bad_request("too many or too long filter values"));
+    }
+    Ok((!items.is_empty()).then_some(items))
+}
+
+/// `GET /events?camera=&from=&to=&limit=&objects=&zones=`: events
+/// overlapping the period, newest first.
 pub(crate) async fn events(
     State(state): State<Arc<ApiState>>,
     principal: Option<axum::Extension<crate::auth::Principal>>,
@@ -75,6 +95,8 @@ pub(crate) async fn events(
             from_ms: from,
             to_ms: to,
             limit: q.limit.unwrap_or(200).min(MAX_EVENTS_PER_QUERY),
+            objects: list_param(q.objects.as_deref())?,
+            zones: list_param(q.zones.as_deref())?,
         })
         .await
         .map_err(internal)?;
@@ -500,4 +522,48 @@ pub(crate) async fn logs(
         q.limit.unwrap_or(500).min(2000),
     );
     Ok(Json(LogsDto { entries, last_seq }))
+}
+
+/// `PUT /camera-order` body, and answer of `GET /camera-order`.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CameraOrderInput {
+    /// Camera identifiers, first first; empty: the configuration's order.
+    cameras: Vec<String>,
+}
+
+/// `GET /camera-order`: the order chosen in the interface (empty: none).
+pub(crate) async fn camera_order(State(state): State<Arc<ApiState>>) -> Json<CameraOrderInput> {
+    Json(CameraOrderInput {
+        cameras: state.camera_order(),
+    })
+}
+
+/// Most cameras an order may list.
+const MAX_CAMERA_ORDER: usize = 1000;
+
+/// `PUT /camera-order`: the order of the cameras, kept on the server for
+/// every device and account (administrators).
+pub(crate) async fn set_camera_order(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<CameraOrderInput>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    if input.cameras.len() > MAX_CAMERA_ORDER {
+        return Err(ApiError::bad_request("too many cameras"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for id in &input.cameras {
+        if rustnvr_core::CameraId::new(id).is_err() || !seen.insert(id.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "invalid or repeated camera {id:?}"
+            )));
+        }
+    }
+    database(&state)?
+        .set_camera_order(&input.cameras)
+        .await
+        .map_err(internal)?;
+    state.set_camera_order(input.cameras);
+    let _ = state.events.send(rustnvr_core::NvrEvent::CamerasChanged);
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

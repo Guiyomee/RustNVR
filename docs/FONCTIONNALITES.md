@@ -16,7 +16,12 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   clé, nouveaux segments sur changement de paramètres, reconnexion, perte
   d'images ou saut d'horodatage.
 - Écriture sûre : `.mp4.part` → `fsync` → renommage ; récupération
-  automatique au démarrage (troncature au dernier fragment complet).
+  automatique au démarrage (troncature au dernier fragment complet), et 5 min
+  après le retour d'un NAS pour le segment interrompu par sa panne ; la fin
+  de ce segment continue sur le disque local (synchronisation du NAS toutes
+  les 5 s, ces 5 s gardées en mémoire). Après un
+  arrêt brutal, un événement en cours se termine au dernier signe de vie de
+  RustNVR (à 15 s près) — testés ; ⚠ pas encore avec une vraie coupure.
 - Erreurs d'écriture (disque plein) : segment sauvé jusqu'au dernier fragment
   complet, reprise différée.
 - Commandes `probe` (test de connexion), `check-config`, `recover`, `health`
@@ -35,7 +40,9 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   ajoutée depuis l'interface n'enregistre pas par défaut.
 - Caméras motorisées (ONVIF PTZ) : flèches et zoom à maintenir, vitesse et
   positions enregistrées (rappel, ajout, suppression) dans le direct, réservés
-  aux administrateurs ; sélecteur « Position PTZ » dans Home Assistant. Il
+  aux administrateurs ; sélecteur « Position PTZ » et boutons « PTZ gauche /
+  droite / haut / bas / zoom » (un court mouvement par appui) dans Home
+  Assistant (⚠ boutons pas encore essayés dans un vrai Home Assistant). Il
   suffit de régler le port ONVIF de la caméra (essayé sur deux caméras
   motorisées ; une EZVIZ n'applique pas le pivotement gauche / droite en ONVIF).
 - Webcams USB (V4L2) sans programme en plus : choisies dans la liste des
@@ -68,6 +75,13 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   (`storage.ui.toml`) ou dans `config.toml`.
 - Relecture HLS : les segments qui se suivent sont lus sans pause (hls.js, HLS
   natif sur Safari), synchronisation de plusieurs caméras, vitesses ×1 à ×8.
+  Signets sur la timeline (une note sur un moment, liste « Signets du
+  jour ») ; objets reconnus marqués en vert sur la timeline, vignette au
+  survol (⚠ pas encore essayés dans un navigateur).
+- Ordre des caméras gardé par le serveur (glisser les vignettes de la vue
+  d'ensemble) : le même sur tous les appareils, pour tous les comptes et sur
+  toutes les pages — testé par l'API ; ⚠ glisser-déposer pas encore essayé
+  dans un navigateur.
 - Interface Web (React) servie par RustNVR : vue d'ensemble, caméras et état
   RTSP, lecture des enregistrements avec timeline, stockage, paramètres ;
   direct vidéo sans réencodage (≈ 0,5 s de latence mesurée en local) ; option
@@ -80,13 +94,17 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   « Détection ») : FFmpeg décode le sous-flux en petites images grises
   (320 px, 5 images/s), comparées à un fond adaptatif ; zones polygonales avec
   sensibilité par zone, changements d'éclairage ignorés. Événements en base
-  SQLite avec vignette, page Événements, timeline, captures JPEG à la demande.
+  SQLite avec vignette, page Événements (jusqu'à 30 jours, recherche par
+  objet et par zone faite par le serveur), timeline, captures JPEG à la
+  demande. Programmation horaire par caméra : jours et heures où la
+  détection compte (et où une caméra « sur mouvement » enregistre).
   Coût mesuré : 2,4 % d'un cœur pour FFmpeg sur un sous-flux H.265 768×432.
 - IA optionnelle, désactivée par défaut et sans modèle fourni : l'image de
   chaque événement est analysée par un modèle YOLOX exécuté par RustNVR
   (31 ms par image, sans autre programme) ou envoyée à un serveur DeepStack /
   CodeProject.AI (objets reconnus dans l'API, MQTT et l'interface) ; un seuil
-  plus exigeant la nuit est possible ([AI.md](AI.md)).
+  plus exigeant la nuit est possible, à heures fixes ou dès que la caméra
+  passe en vision nocturne ([AI.md](AI.md)).
 - Stockage S3 (Amazon, MinIO, Backblaze, Wasabi…) et SFTP : les segments
   sont écrits dans un dossier d'attente local puis envoyés un par un
   (reprise automatique après une coupure, rien n'est perdu au redémarrage) ;
@@ -119,9 +137,17 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   dernier mouvement par caméra ; commandes : mode d'enregistrement, événement
   manuel, capture tout de suite, pause de la détection sur toutes les caméras
   (mode présent / absent) ([MQTT.md](MQTT.md)).
+- Notifications (Paramètres → Webhooks) : webhook JSON, Discord, ntfy et
+  Telegram, pour les mouvements, objets reconnus, passages de ligne et les
+  pannes (stockage, caméra hors ligne, erreur d'enregistrement) ; messages
+  personnalisés, au plus une notification toutes les X minutes par caméra,
+  programmation horaire (les pannes passent toujours) et, pour Discord, ntfy
+  et Telegram, une courte vidéo de l'événement en second message (H.264,
+  masques compris ; conversion vérifiée avec FFmpeg, ⚠ pas encore reçue sur
+  un vrai téléphone).
 - Interface dans la barre latérale de Home Assistant (ingress), avec l'app
   « RustNVR Proxy » de ce dépôt
-  ([HOME_ASSISTANT.md](HOME_ASSISTANT.md#interface-dans-home-assistant)).
+  ([wiki](https://github.com/Guiyomee/RustNVR/wiki/FR-Home-Assistant)).
 - API REST `/api/v1` et WebSocket temps réel
   ([API_CONTRACT.md](../API_CONTRACT.md)) ; comptes administrateur / lecteur
   avec page de connexion (mots de passe Argon2, sessions par cookie, blocage

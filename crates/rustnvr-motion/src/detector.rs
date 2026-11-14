@@ -291,6 +291,7 @@ mod tests {
             objects: Vec::new(),
             masks: Vec::new(),
             lines: Vec::new(),
+            schedule: Vec::new(),
         }
     }
 

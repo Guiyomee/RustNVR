@@ -13,6 +13,8 @@ export interface EventQuery {
   fromMs: number
   toMs: number
   kinds: EventKind[] | null
+  /** Only events in one of these zones (motion zones, or the zone of a recognized object); null: all. */
+  zones?: string[] | null
 }
 
 export interface DataSource {

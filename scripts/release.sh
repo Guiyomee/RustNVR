@@ -10,7 +10,9 @@
 # 2. exports HEAD with LF line endings (git archive) and refuses any CR in it
 #    (a CRLF export once shipped migrations that refused every database);
 # 3. builds the interface (node:24) and the program on Debian 12 (rust:1-bookworm,
-#    so that it runs on Debian 12 and 13), packages the archive and its .sha256;
+#    so that it runs on Debian 12 and 13), after fmt and clippy -D warnings with
+#    that latest stable Rust (the GitHub image of 2026.11.07 was missed for a
+#    warning a new Rust brought), packages the archive and its .sha256;
 # 4. tests a first installation on Debian 12 and 13, and the update from the
 #    latest published release (or --previous);
 # 5. copies the archive, its .sha256 and the notes to --out (default
@@ -83,12 +85,16 @@ CR=$(run -v "$(host "$WORK/src"):/src:ro" debian:12 \
 say "Interface (node:24)"
 run -v "$(host "$WORK/src"):/src" -w /src/web node:24-bookworm \
     sh -c 'npm ci --silent --no-audit --no-fund >/dev/null && npm run build >/dev/null && ls dist/index.html >/dev/null'
-say "Programme (Debian 12 : quelques minutes)"
+say "Contrôles (fmt, clippy) et programme (Debian 12 : quelques minutes)"
 run -v rnvr-cargo-registry:/usr/local/cargo/registry -v rnvr-bookworm-target:/target \
     -v "$(host "$WORK/src"):/src" -v "$(host "$WORK/dist"):/out" rust:1-bookworm bash -c '
         set -euo pipefail
         apt-get update -qq && apt-get install -y -qq --no-install-recommends cmake clang >/dev/null
         cd /src && export CARGO_TARGET_DIR=/target
+        rustup component add clippy rustfmt >/dev/null 2>&1 || true
+        rustc --version
+        cargo fmt --all --check
+        cargo clippy --locked --workspace --all-targets -- -D warnings 2>&1 | tail -n 1
         cargo build --release --locked -p rustnvr-app 2>&1 | tail -n 1
         cargo test --release --locked -p rustnvr-storage migrations_are 2>&1 | grep "test result"
         cp /target/release/rustnvr /out/rustnvr'

@@ -11,6 +11,7 @@ pub mod sysinfo;
 
 pub mod auth;
 mod backup;
+mod bookmarks;
 pub mod control;
 mod detection;
 mod devices;

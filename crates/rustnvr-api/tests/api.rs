@@ -23,6 +23,7 @@ struct Fixture {
     root: std::path::PathBuf,
     web: std::path::PathBuf,
     _state_tx: watch::Sender<StreamState>,
+    state: Arc<ApiState>,
 }
 
 fn write_segment(root: &Path) {
@@ -102,6 +103,7 @@ fn app(auth: Option<(&str, &str)>, with_frontend: bool) -> (axum::Router, Fixtur
             record_mode: Default::default(),
             retention: Default::default(),
             motion: None,
+            motion_off_schedule: false,
         },
         CameraSource {
             id: CameraId::new("off").unwrap(),
@@ -126,6 +128,7 @@ fn app(auth: Option<(&str, &str)>, with_frontend: bool) -> (axum::Router, Fixtur
             record_mode: Default::default(),
             retention: Default::default(),
             motion: None,
+            motion_off_schedule: false,
         },
     ];
     let auth = auth.map(|(u, p)| (u.to_owned(), Secret::new(p)));
@@ -136,7 +139,7 @@ fn app(auth: Option<(&str, &str)>, with_frontend: bool) -> (axum::Router, Fixtur
         auth,
         LiveSettings::default(),
     );
-    let router = router(state, &web);
+    let router = router(state.clone(), &web);
     (
         router,
         Fixture {
@@ -144,6 +147,7 @@ fn app(auth: Option<(&str, &str)>, with_frontend: bool) -> (axum::Router, Fixtur
             root,
             web,
             _state_tx: state_tx,
+            state,
         },
     )
 }
@@ -386,6 +390,112 @@ async fn serves_interface_under_home_assistant_ingress() {
     let page = String::from_utf8_lossy(&body);
     assert!(page.contains("src=\"/assets/app.js\"") && !page.contains("script>\""));
     assert_eq!(headers["x-frame-options"], "DENY");
+}
+
+#[tokio::test]
+async fn keeps_one_camera_order_for_every_device() {
+    let (app, f) = app(None, false);
+    let ids = |body: &Bytes| -> Vec<String> {
+        json(body)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let order = r#"{"cameras":["off","cam"]}"#;
+    // Without a database: nowhere to keep it.
+    let (status, _) = send_json(&app, "PUT", "/api/v1/camera-order", order).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let db = rustnvr_storage::Database::open(f._dir.path())
+        .await
+        .unwrap();
+    f.state.set_database(db.clone());
+    let (_, _, body) = get(&app, "/api/v1/cameras", &[]).await;
+    assert_eq!(ids(&body), ["cam", "off"], "configuration order");
+    let (status, _) = send_json(&app, "PUT", "/api/v1/camera-order", order).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, _, body) = get(&app, "/api/v1/cameras", &[]).await;
+    assert_eq!(ids(&body), ["off", "cam"]);
+    assert_eq!(db.camera_order().await.unwrap(), ["off", "cam"]);
+    let (_, _, body) = get(&app, "/api/v1/camera-order", &[]).await;
+    assert_eq!(json(&body)["cameras"], serde_json::json!(["off", "cam"]));
+    // A camera not placed comes after the others.
+    let (status, _) = send_json(
+        &app,
+        "PUT",
+        "/api/v1/camera-order",
+        r#"{"cameras":["off"]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, _, body) = get(&app, "/api/v1/cameras", &[]).await;
+    assert_eq!(ids(&body), ["off", "cam"]);
+    for bad in [
+        r#"{"cameras":["cam","cam"]}"#,
+        r#"{"cameras":["../x"]}"#,
+        r#"{"order":[]}"#,
+    ] {
+        let (status, _) = send_json(&app, "PUT", "/api/v1/camera-order", bad).await;
+        assert!(status.is_client_error(), "{bad}: {status}");
+    }
+    // Empty: back to the configuration's order.
+    let (status, _) = send_json(&app, "PUT", "/api/v1/camera-order", r#"{"cameras":[]}"#).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, _, body) = get(&app, "/api/v1/cameras", &[]).await;
+    assert_eq!(ids(&body), ["cam", "off"]);
+}
+
+#[tokio::test]
+async fn bookmarks_mark_moments_of_a_camera() {
+    let (app, f) = app(None, false);
+    let note = r#"{"camera":"cam","at_ms":1793557400000,"note":" Livraison colis "}"#;
+    let (status, _) = send_json(&app, "POST", "/api/v1/bookmarks", note).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "no database");
+    let db = rustnvr_storage::Database::open(f._dir.path())
+        .await
+        .unwrap();
+    f.state.set_database(db);
+    let (_, _, body) = get(&app, "/api/v1/capabilities", &[]).await;
+    assert_eq!(json(&body)["bookmarks"], true);
+    let (status, created) = send_json(&app, "POST", "/api/v1/bookmarks", note).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["note"], "Livraison colis");
+    assert_eq!(created["camera"], "cam");
+    for (bad, expected) in [
+        (
+            r#"{"camera":"nope","at_ms":1793557400000,"note":"x"}"#,
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            r#"{"camera":"cam","at_ms":1793557400000,"note":"  "}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            r#"{"camera":"cam","at_ms":-5,"note":"x"}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (status, _) = send_json(&app, "POST", "/api/v1/bookmarks", bad).await;
+        assert_eq!(status, expected, "{bad}");
+    }
+    let (status, _, body) = get(
+        &app,
+        "/api/v1/bookmarks?from=1793550000000&to=1793560000000",
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list = json(&body);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["at_ms"], 1_793_557_400_000_i64);
+    let (status, _, _) = get(&app, "/api/v1/bookmarks?from=10&to=5", &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let id = created["id"].as_i64().unwrap();
+    let (status, _) = send_json(&app, "DELETE", &format!("/api/v1/bookmarks/{id}"), "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send_json(&app, "DELETE", &format!("/api/v1/bookmarks/{id}"), "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

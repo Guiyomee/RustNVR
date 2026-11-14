@@ -9,6 +9,7 @@ import { OBJECT_GROUPS, objectLabel } from '../../lib/objects'
 import type { Webhook, WebhookEvent, WebhookKind, WebhookMessage } from '../../types/api'
 import { Button } from '../ui/Button'
 import { ErrorState, LoadingState } from '../ui/States'
+import { ScheduleEditor } from '../ui/ScheduleEditor'
 import { Switch } from '../ui/Switch'
 import { t } from '../../lib/i18n'
 
@@ -285,6 +286,15 @@ function HookEditor({ hook, onChange, onRemove, disabled }: { hook: Webhook; onC
               <span className="block text-xs text-muted">{kind === 'json' ? t('JPEG en base64 dans le JSON', 'JPEG in base64 inside the JSON') : t('JPEG joint au message', 'JPEG attached to the message')}</span>
             </span>
           </label>
+          {kind !== 'json' && (
+            <label className="flex items-start gap-2">
+              <input type="checkbox" className="mt-0.5 size-4 accent-accent" disabled={disabled} checked={hook.clip ?? false} onChange={(e) => set('clip', e.target.checked)} />
+              <span>
+                {t('Envoyer aussi une courte vidéo', 'Also send a short video')}
+                <span className="block text-xs text-muted">{t('7 à 15 s à partir de 2 s avant l’événement, en second message, environ une minute après (le temps que l’enregistrement soit fini)', '7 to 15 s from 2 s before the event, as a second message, about a minute later (once the recording is finished)')}</span>
+              </span>
+            </label>
+          )}
         </div>
       </div>
       <label className="flex flex-wrap items-center gap-2 text-sm">
@@ -306,6 +316,16 @@ function HookEditor({ hook, onChange, onRemove, disabled }: { hook: Webhook; onC
           )}
         </span>
       </label>
+      <div className="space-y-1">
+        <p className="text-sm">{t('Programmation', 'Schedule')}</p>
+        <p className="text-xs text-muted">
+          {t(
+            'Jours et heures où les détections sont envoyées (mouvement, objets, passages), selon l’heure de début de l’événement. Les pannes (stockage, caméra, enregistrement) passent toujours.',
+            'Days and hours when detections are sent (motion, objects, crossings), by the start time of the event. Failures (storage, camera, recording) always go through.',
+          )}
+        </p>
+        <ScheduleEditor value={hook.schedule ?? []} onChange={(schedule) => set('schedule', schedule)} disabled={disabled} what={t('les détections sont envoyées', 'detections are sent')} />
+      </div>
       {kind !== 'json' && <MessagesEditor hook={hook} kind={kind} onChange={onChange} disabled={disabled} />}
       <div className="space-y-1">
         <span className="text-xs text-muted">{t('Caméras (aucune cochée : toutes)', 'Cameras (none ticked: all)')}</span>
@@ -383,6 +403,8 @@ export function WebhooksSettings() {
             // RustNVR's JSON is never changed: no message for it.
             messages: kind === 'json' ? {} : cleanMessages(h),
             cooldown_minutes: h.cooldown_minutes ?? 0,
+            schedule: h.schedule ?? [],
+            clip: kind !== 'json' && (h.clip ?? false),
           }
         }),
       )

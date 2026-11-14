@@ -9,7 +9,7 @@ use rustnvr_core::CameraId;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Suffix of segments being written.
 pub const PART_SUFFIX: &str = ".part";
@@ -23,6 +23,20 @@ pub trait SegmentFile: Write + Send {
     /// Gives up after a write error. Implementations keep whatever complete
     /// fragments were written and return the path of the salvaged file.
     fn abandon(self: Box<Self>) -> Option<PathBuf>;
+    /// Makes what was written durable (`fsync` of the data).
+    fn sync(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+    /// Makes everything durable before [`Self::finish`]: a wrapper may move
+    /// the segment elsewhere when this fails.
+    fn settle(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    /// Start of the segment that is not in this file (the segment moved to
+    /// another file when its destination failed); zero normally.
+    fn skipped(&self) -> Duration {
+        Duration::ZERO
+    }
 }
 
 /// Creates segment files.
@@ -178,6 +192,12 @@ pub(crate) fn sync_dir(path: &Path) {
 impl SegmentFile for FsSegmentFile {
     fn path(&self) -> &Path {
         &self.part_path
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        let writer = self.writer()?;
+        writer.flush()?;
+        writer.get_ref().sync_data()
     }
 
     fn finish(mut self: Box<Self>) -> io::Result<PathBuf> {

@@ -14,6 +14,7 @@ import { CameraPlayer } from './CameraPlayer'
 import { LineEditor } from './LineEditor'
 import { MaskEditor } from './MaskEditor'
 import { ZoneEditor } from './ZoneEditor'
+import { ScheduleEditor } from '../ui/ScheduleEditor'
 import { t } from '../../lib/i18n'
 
 const DEFAULTS: MotionSettings = { enabled: false, sensitivity: 50, zones: [] }
@@ -28,6 +29,7 @@ function sensitivityHelp(s: number): string {
 export function MotionStatus({ camera }: { camera: Camera }) {
   const m = camera.motion
   if (!m.enabled) return <Badge>{t('Détection désactivée', 'Detection off')}</Badge>
+  if (m.off_schedule) return <Badge>{t('Hors programmation', 'Outside its schedule')}</Badge>
   if (m.error) return <Badge tone="err">{t('Détection en erreur', 'Detection error')}</Badge>
   if (!m.running) return <Badge tone="warn">{t('Détection en attente du flux', 'Detection waiting for the stream')}</Badge>
   return m.active ? <Badge tone="warn">{t('Mouvement en cours', 'Motion now')}</Badge> : <Badge tone="ok">{t('Détection active', 'Detection on')}</Badge>
@@ -197,6 +199,17 @@ export function MotionPanel({ camera }: { camera: Camera }) {
             {t("Avec des zones, rien n'est détecté en dehors : ni mouvement, ni objet reconnu (pieds hors des zones). Les lignes de passage restent actives partout.", "With zones, nothing is detected outside them: neither motion nor recognized objects (feet outside the zones). Crossing lines stay active everywhere.")}
           </p>
         )}
+      </div>
+
+      <div>
+        <h3 className="mb-1 text-sm font-medium">{t('Programmation', 'Schedule')}</h3>
+        <p className="mb-2 text-xs text-muted">
+          {t(
+            'Jours et heures où les mouvements et les passages comptent (heure du serveur). En dehors : pas d’événement, pas de notification, et une caméra « sur mouvement » n’enregistre pas. L’enregistrement continu et les événements manuels ne changent pas.',
+            'Days and hours when motion and crossings count (server time). Outside: no event, no notification, and an « on motion » camera does not record. Continuous recording and manual events do not change.',
+          )}
+        </p>
+        <ScheduleEditor value={s.schedule ?? []} onChange={(schedule) => edit({ schedule })} disabled={reason !== null} what={t('la détection compte', 'detection counts')} />
       </div>
 
       <div>

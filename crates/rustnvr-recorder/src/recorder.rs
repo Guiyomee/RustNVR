@@ -511,7 +511,8 @@ impl RecorderCore {
             });
             active.next_decode_time += u64::from(duration);
         }
-        let result = Self::write_fragment(&mut active, &self.metrics);
+        let result =
+            Self::write_fragment(&mut active, &self.metrics).and_then(|()| active.file.settle());
         if let Err(e) = result {
             self.state = State::Recording(active);
             return Err(e);
@@ -526,19 +527,22 @@ impl RecorderCore {
             fragments,
             ..
         } = *active;
+        // Moved to the local disk in the middle: the file starts later.
+        let skipped = file.skipped();
         let path = file.finish()?;
         self.consecutive_errors = 0;
         self.metrics.segments.fetch_add(1, Ordering::Relaxed);
         let info = SegmentInfo {
             camera: self.camera.clone(),
             path,
-            start: start_wall,
+            start: start_wall + skipped,
             duration: Duration::from_nanos(
                 u64::try_from(
                     u128::from(next_decode_time) * 1_000_000_000 / u128::from(params.clock_rate),
                 )
                 .unwrap_or(u64::MAX),
-            ),
+            )
+            .saturating_sub(skipped),
             bytes,
             frames,
             fragments,

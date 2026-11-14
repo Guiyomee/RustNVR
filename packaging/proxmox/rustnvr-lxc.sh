@@ -686,7 +686,7 @@ st_admin_password() {
 st_rustnvr_version() {
     [ -z "$ARCHIVE" ] || { skip; return; }
     local v
-    v=$(wt --title "RUSTNVR" --inputbox "\nVersion à installer (v2026.11.07 ; vide : la dernière) :" 10 72 "$var_rustnvr_version") || return 1
+    v=$(wt --title "RUSTNVR" --inputbox "\nVersion à installer (v2026.11.08 ; vide : la dernière) :" 10 72 "$var_rustnvr_version") || return 1
     var_rustnvr_version=$v
 }
 st_recordings() {

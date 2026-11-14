@@ -103,6 +103,8 @@ impl Destination {
 /// one starts after the retry delay, on the fallback if needed).
 pub struct DestinationStore {
     camera_label: String,
+    /// The destination's name, for the log of a segment moved off it.
+    primary_label: String,
     primary: Destination,
     primary_store: FsStore,
     fallback: Option<FsStore>,
@@ -114,6 +116,7 @@ impl DestinationStore {
     pub fn new(camera: &CameraId, primary: Destination, fallback: Option<PathBuf>) -> Self {
         Self {
             camera_label: camera.to_string(),
+            primary_label: primary.id.clone(),
             primary_store: FsStore::new(&primary.root),
             primary,
             fallback: fallback.map(FsStore::new),
@@ -143,7 +146,27 @@ impl SegmentStore for DestinationStore {
             None => match self.primary_store.create(camera, start) {
                 Ok(f) => {
                     self.switch(false, "");
-                    return Ok(f);
+                    // With a fallback, a failure in the middle of the
+                    // segment moves it there instead of losing its end.
+                    return Ok(match &self.fallback {
+                        Some(fallback) => {
+                            let flag = self.using_fallback.clone();
+                            let (camera_label, destination) =
+                                (self.camera_label.clone(), self.primary_label.clone());
+                            Box::new(crate::rescue::RescuedFile::new(
+                                f,
+                                fallback.clone(),
+                                camera,
+                                start,
+                                Box::new(move |error| {
+                                    if !flag.swap(true, Ordering::Relaxed) {
+                                        tracing::warn!(camera = %camera_label, %destination, %error, "destination unavailable, recording to the local disk meanwhile");
+                                    }
+                                }),
+                            ))
+                        }
+                        None => f,
+                    });
                 }
                 Err(e) => e,
             },

@@ -52,6 +52,7 @@ mod tests {
             labels: vec!["person".into(), "car".into()],
             night: Some(rustnvr_core::config::AiNight {
                 min_score: 0.8,
+                when: rustnvr_core::config::AiNightWhen::NightVision,
                 from: "21:30".into(),
                 to: "06:15".into(),
             }),

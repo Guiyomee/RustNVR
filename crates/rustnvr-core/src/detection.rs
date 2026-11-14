@@ -44,6 +44,10 @@ pub struct MotionSettings {
     /// Lines whose crossings are counted.
     #[serde(default)]
     pub lines: Vec<CrossingLine>,
+    /// When motion and crossings count (and motion-gated recording
+    /// records); empty: all the time.
+    #[serde(default)]
+    pub schedule: Vec<crate::schedule::TimeRange>,
 }
 
 /// Most crossing lines per camera.
@@ -95,6 +99,7 @@ impl Default for MotionSettings {
             objects: Vec::new(),
             masks: Vec::new(),
             lines: Vec::new(),
+            schedule: Vec::new(),
         }
     }
 }
@@ -210,6 +215,7 @@ impl MotionSettings {
                 ));
             }
         }
+        p.extend(crate::schedule::problems(&self.schedule, "programmation"));
         if self.lines.len() > MAX_LINES {
             p.push(format!("{MAX_LINES} lignes de passage au maximum"));
         }
@@ -352,6 +358,7 @@ mod tests {
             objects: Vec::new(),
             masks: Vec::new(),
             lines: Vec::new(),
+            schedule: Vec::new(),
         };
         let object = |label: &str, bbox: [f32; 4]| DetectedObject {
             label: label.into(),
@@ -460,6 +467,7 @@ mod tests {
             objects: Vec::new(),
             masks: Vec::new(),
             lines: Vec::new(),
+            schedule: Vec::new(),
         };
         assert_eq!(bad.problems().len(), 5, "{:?}", bad.problems());
     }

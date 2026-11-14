@@ -46,6 +46,7 @@ Par caméra (appareil nommé comme la caméra) :
 | Prendre une capture | `button` | image de la caméra tout de suite (flux principal, 1920 px de large au plus, masques de confidentialité appliqués), publiée sur l'entité « Capture » |
 | Capture | `camera` | dernière image prise par le bouton « Prendre une capture » |
 | Position PTZ | `select` | caméras motorisées (port ONVIF réglé) : choisir une position enregistrée y envoie la caméra ; les options sont les noms des positions, lus au démarrage et après chaque ajout ou suppression depuis l'interface (une position créée dans l'appli du fabricant apparaît au prochain démarrage) |
+| PTZ gauche, PTZ droite, PTZ haut, PTZ bas, PTZ zoom avant, PTZ zoom arrière | `button` | caméras motorisées (elles ont répondu en ONVIF PTZ) : chaque appui fait bouger la caméra un court instant (0,6 s à mi-vitesse) |
 
 Pour une caméra dont le port ONVIF est réglé, l'appareil Home Assistant
 porte ce que la caméra dit d'elle-même (fabricant, modèle, firmware, numéro
@@ -100,6 +101,7 @@ retenus vides).
 | `<p>/<caméra>/line/<ligne>/present` | qui est à l'intérieur (lignes qui comptent les présences : entrées − sorties depuis minuit ou la remise à zéro) ; entité « Présents · ligne » | oui |
 | `<p>/<caméra>/line/<ligne>/presence/reset` | n'importe quel message (commande) : remet le compte à zéro ; bouton « Remettre à zéro · ligne » | — |
 | `<p>/<caméra>/ptz/preset/set` | nom d'une position enregistrée sur la caméra (commande) : la caméra motorisée y va ; sélecteur « Position PTZ » | — |
+| `<p>/<caméra>/ptz/move` | `left`, `right`, `up`, `down`, `zoom_in` ou `zoom_out` (commande) : un court mouvement de la caméra motorisée ; boutons « PTZ … » | — |
 | `<p>/<caméra>/event` | JSON à chaque début, mise à jour et fin d'événement | non |
 | `<p>/detection` | `ON` / `OFF` (détection en marche / en pause sur toutes les caméras) | oui |
 | `<p>/detection/set` | commande `ON` (reprendre) / `OFF` (mettre en pause) | — |

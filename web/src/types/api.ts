@@ -16,6 +16,8 @@ export interface Capabilities {
   recordings: boolean
   export: boolean
   protect: boolean
+  /** Bookmarks on the timeline (`/bookmarks`). */
+  bookmarks: boolean
   retention: boolean
   settings_write: boolean
   mqtt: boolean
@@ -178,6 +180,8 @@ export interface Camera {
 /** Motion detection state of a camera. */
 export interface MotionState {
   enabled: boolean
+  /** Enabled, but outside the ranges of its schedule now: nothing analysed until the next range. */
+  off_schedule?: boolean
   /** Detection paused on every camera (Home Assistant switch, `PUT /detection/pause`): nothing is analysed, the settings stay. */
   paused: boolean
   /** Pictures are being analysed. */
@@ -210,6 +214,20 @@ export interface MotionSettings {
   masks?: PrivacyMask[]
   /** Lines whose crossings are counted. */
   lines?: CrossingLine[]
+  /** When motion and crossings count (and « on motion » recording records); empty or absent: all the time. */
+  schedule?: TimeRange[]
+}
+
+/**
+ * Some days of the week, from one time to another (local time of the
+ * server, `HH:MM`). `to` earlier than `from`: until `to` the next day;
+ * equal: the whole day.
+ */
+export interface TimeRange {
+  /** Days the range starts on, 1 (Monday) to 7 (Sunday); empty: every day. */
+  days: number[]
+  from: string
+  to: string
 }
 
 /** A line whose crossings are counted; `forward`: from the left of `a → b` to its right (the arrow). */
@@ -264,8 +282,13 @@ export interface AiSettings {
   interval_seconds: number
   /** Keep every analysed picture in the default destination, to replay the AI on them. */
   keep_pictures?: boolean
-  /** A higher confidence at night (local time of the server, `HH:MM`, across midnight when `from` is later). */
-  night?: { min_score: number; from: string; to: string } | null
+  /**
+   * A higher confidence at night: from `from` to `to` (local time of the
+   * server, `HH:MM`, across midnight when `from` is later), or with
+   * `when: 'night_vision'` while the camera films in night vision (the hours
+   * while that is not known yet).
+   */
+  night?: { min_score: number; when?: 'hours' | 'night_vision'; from: string; to: string } | null
 }
 
 /** GET /api/v1/ai. */
@@ -712,6 +735,17 @@ export interface UpdateStatus {
   install: 'docker' | 'systemd' | 'other'
 }
 
+/** A bookmark on the timeline (`GET /api/v1/bookmarks`): a moment of a camera with a note. */
+export interface Bookmark {
+  id: number
+  camera: string
+  at_ms: number
+  note: string
+  /** Account that added it (null without accounts). */
+  author: string | null
+  created_ms: number
+}
+
 /** A protected period (`GET /api/v1/protected`): never deleted by retention. */
 export interface ProtectedRange {
   id: number
@@ -763,6 +797,10 @@ export interface Webhook {
   messages?: Partial<Record<WebhookEvent, WebhookMessage>>
   /** At most one event, and one line crossing, called per camera every this many minutes; 0 or absent: no limit. */
   cooldown_minutes?: number
+  /** When detections are called (motion, objects, crossings); empty or absent: all the time. Failures always go through. */
+  schedule?: TimeRange[]
+  /** Discord, ntfy, Telegram: a short video of each event called, about a minute after it. */
+  clip?: boolean
 }
 
 /** POST /api/v1/webhooks/test */

@@ -78,6 +78,8 @@ pub struct CameraSource {
     pub edit: Option<CameraEditInfo>,
     /// Motion detection enabled for this camera.
     pub motion_enabled: bool,
+    /// Enabled, but outside the ranges of its schedule now (not running).
+    pub motion_off_schedule: bool,
     /// Detection state, while it runs.
     pub motion: Option<watch::Receiver<MotionStatus>>,
     /// The sound is recorded with the video.
@@ -192,6 +194,9 @@ pub struct ApiState {
     pub(crate) logs: OnceLock<Arc<crate::logs::LogBuffer>>,
     /// Events and detection settings, once the database is open.
     pub(crate) database: OnceLock<Database>,
+    /// Order of the cameras chosen in the interface (identifiers); the
+    /// others follow in the order of the configuration.
+    camera_order: RwLock<Vec<String>>,
     /// Whether FFmpeg could be started (snapshots and motion detection need it).
     pub(crate) ffmpeg_available: OnceLock<bool>,
     /// Object recognition provider, when one is configured.
@@ -267,6 +272,7 @@ impl ApiState {
             playback: crate::playback::PlaybackConverter::default(),
             logs: OnceLock::new(),
             database: OnceLock::new(),
+            camera_order: RwLock::new(Vec::new()),
             ffmpeg_available: OnceLock::new(),
             ai_provider: RwLock::new(None),
             updates: RwLock::new(crate::dto::UpdateStatus {
@@ -305,6 +311,19 @@ impl ApiState {
     /// Replaces the camera list (after a camera was added, changed or removed).
     pub fn set_cameras(&self, cameras: Vec<CameraSource>) {
         *self.cameras.write().unwrap_or_else(|e| e.into_inner()) = cameras;
+    }
+
+    /// The order of the cameras chosen in the interface (empty: none).
+    pub(crate) fn camera_order(&self) -> Vec<String> {
+        self.camera_order
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Sets the order of the cameras (read from the database at startup).
+    pub fn set_camera_order(&self, order: Vec<String>) {
+        *self.camera_order.write().unwrap_or_else(|e| e.into_inner()) = order;
     }
 
     /// Enables events and detection settings. Returns false if already set.
@@ -553,7 +572,8 @@ impl ApiState {
     }
 
     /// Snapshot of the destinations.
-    pub(crate) fn destinations(&self) -> Vec<DestinationInfo> {
+    /// The storage destinations (local disk first).
+    pub fn destinations(&self) -> Vec<DestinationInfo> {
         self.destinations
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -589,12 +609,24 @@ impl ApiState {
         }
     }
 
-    /// Snapshot of the camera list.
+    /// Snapshot of the camera list, in the order chosen in the interface.
     pub(crate) fn cameras(&self) -> Vec<CameraSource> {
-        self.cameras
+        let mut cameras = self
+            .cameras
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .clone();
+        let order = self.camera_order.read().unwrap_or_else(|e| e.into_inner());
+        if !order.is_empty() {
+            // Stable: the cameras not placed keep the configuration's order.
+            cameras.sort_by_key(|c| {
+                order
+                    .iter()
+                    .position(|id| id == c.id.as_str())
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        cameras
     }
 
     pub(crate) fn camera(&self, id: &str) -> Option<CameraSource> {
@@ -717,6 +749,7 @@ impl ApiState {
                     .unwrap_or_default();
                 MotionDto {
                     enabled: c.motion_enabled,
+                    off_schedule: c.motion_off_schedule,
                     paused: self.detection_paused.load(Ordering::Relaxed),
                     running: status.running,
                     active: status.active,

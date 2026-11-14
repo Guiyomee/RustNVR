@@ -97,6 +97,7 @@ async fn capabilities(State(state): State<Arc<ApiState>>) -> Json<CapabilitiesDt
         recordings: true,
         export: state.ffmpeg_ok(),
         protect: state.database.get().is_some(),
+        bookmarks: state.database.get().is_some(),
         retention: state.control.get().is_some(),
         settings_write: state.control.get().is_some(),
         mqtt: state.control.get().is_some(),
@@ -611,6 +612,10 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
             axum::routing::put(detection::set_detection_paused),
         )
         .route(
+            "/camera-order",
+            get(detection::camera_order).put(detection::set_camera_order),
+        )
+        .route(
             "/cameras/{id}/presence/reset",
             post(crate::stats::reset_presence),
         )
@@ -664,6 +669,14 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route(
             "/protected/{id}",
             axum::routing::delete(crate::protect::unprotect),
+        )
+        .route(
+            "/bookmarks",
+            get(crate::bookmarks::list).post(crate::bookmarks::add),
+        )
+        .route(
+            "/bookmarks/{id}",
+            axum::routing::delete(crate::bookmarks::remove),
         )
         .route("/logs", get(detection::logs))
         .route(

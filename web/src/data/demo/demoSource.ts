@@ -42,6 +42,7 @@ const DEMO_CAPABILITIES: Capabilities = {
   recordings: true,
   export: false,
   protect: false,
+  bookmarks: false,
   retention: false,
   settings_write: false,
   mqtt: false,
@@ -100,8 +101,10 @@ function demoEvents(q: EventQuery): NvrEvent[] {
       })
     }
   }
-  if (q.kinds) return out.filter((e) => q.kinds?.includes(e.kind)).sort((a, b) => b.start_ms - a.start_ms)
-  return out.sort((a, b) => b.start_ms - a.start_ms)
+  const zones = q.zones
+  const inZone = zones?.length ? out.filter((e) => e.zones.some((z) => zones.includes(z))) : out
+  if (q.kinds) return inZone.filter((e) => q.kinds?.includes(e.kind)).sort((a, b) => b.start_ms - a.start_ms)
+  return inZone.sort((a, b) => b.start_ms - a.start_ms)
 }
 
 function demoStorage(): Storage {

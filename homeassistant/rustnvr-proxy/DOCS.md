@@ -4,7 +4,7 @@ Affiche l'interface de RustNVR dans Home Assistant (panneau « RustNVR » de la
 barre latérale), sans ouvrir de port supplémentaire : Home Assistant authentifie
 l'accès (ingress) et l'app relaie vers votre serveur RustNVR.
 
-Il faut une version de RustNVR **postérieure à 2026.11.07** : les précédentes
+Il faut une version de RustNVR **2026.11.08 ou plus récente** : les précédentes
 ne savent pas s'afficher sous ingress.
 
 ## Réglage
@@ -33,13 +33,18 @@ trusted_proxies = ["192.168.1.5", "172.30.32.0/23"]   # IP de Home Assistant, r�
 
 - **Page blanche ou « 502 »** : RustNVR injoignable depuis Home Assistant ;
   vérifiez `server` (journal de l'app).
+- **« … ne permettra pas d'afficher la page si celle-ci est intégrée par un
+  autre site »** (ou « refused to connect ») : RustNVR sert lui-même le HTTPS
+  et `server` commence par `http://`. Il renvoie alors le navigateur vers
+  son adresse directe, qui refuse d'être affichée dans un cadre. Mettez
+  `server` en `https://…` et redémarrez l'app.
 - **Page de RustNVR mais vidéo absente** : la vue en direct passe par un
   WebSocket ; un reverse proxy placé devant Home Assistant doit les laisser
   passer (c'est déjà nécessaire pour Home Assistant lui-même).
 - **Reste sur la page de connexion, sans message d'erreur** : le navigateur
   refuse le cookie de session. C'était le cas avec un RustNVR en HTTPS
-  (`https://…`) derrière un Home Assistant en `http://` ; corrigé à partir de
-  la version qui suit 2026.11.07. Un cookie `rustnvr_session` laissé par un
+  (`https://…`) derrière un Home Assistant en `http://` ; corrigé dans la
+  2026.11.08. Un cookie `rustnvr_session` laissé par un
   accès direct en HTTPS à la même adresse peut aussi bloquer : effacez les
   cookies du site de Home Assistant.
 - **« cross-origin request refused »** : un reverse proxy devant Home Assistant

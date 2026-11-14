@@ -40,6 +40,8 @@ pub struct CapabilitiesDto {
     pub export: bool,
     /// Protecting recordings from deletion (needs the database).
     pub protect: bool,
+    /// Bookmarks on the timeline (`/bookmarks`): needs the database.
+    pub bookmarks: bool,
     /// Retention / quotas.
     pub retention: bool,
     /// Changing settings through the API.
@@ -348,6 +350,9 @@ pub struct CameraDto {
 pub struct MotionDto {
     /// Detection is enabled for this camera.
     pub enabled: bool,
+    /// Enabled, but outside the ranges of its schedule now: nothing is
+    /// analysed until the next range.
+    pub off_schedule: bool,
     /// Detection is paused on every camera (Home Assistant « Détection »
     /// switch, or the interface): nothing is analysed, the settings stay.
     pub paused: bool,

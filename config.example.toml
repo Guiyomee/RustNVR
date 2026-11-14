@@ -169,8 +169,11 @@ discovery_prefix = "homeassistant"
 # e.g. yolox_nano.onnx (Apache-2.0) from the YOLOX releases on GitHub.
 # provider = { type = "onnx", model = "/var/lib/rustnvr/yolox_nano.onnx" }
 min_score = 0.5               # objects below this confidence are ignored
-# A higher one at night (local time; across midnight when from is later):
+# A higher one at night (local time; across midnight when from is later).
+# when = "night_vision": the night of each camera is the one it films (night
+# vision measured on its picture); the hours apply while not measured yet.
 # night = { min_score = 0.75, from = "20:00", to = "07:00" }
+# night = { min_score = 0.75, when = "night_vision" }
 labels = []                   # keep only these labels, e.g. ["person", "car"]; empty: all
 timeout_seconds = 10
 # Pictures analysed per event: the first 1 s after the start, then one every

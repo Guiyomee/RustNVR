@@ -1,7 +1,7 @@
 {
   "name": "rustnvr-web",
   "private": true,
-  "version": "2026.11.7",
+  "version": "2026.11.8",
   "type": "module",
   "description": "RustNVR web interface (static files served by the Rust/Axum server)",
   "scripts": {

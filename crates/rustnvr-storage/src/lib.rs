@@ -52,6 +52,11 @@ pub struct EventFilter {
     pub to_ms: i64,
     /// Most events returned (newest first), capped at [`MAX_EVENTS_PER_QUERY`].
     pub limit: u32,
+    /// Only events where one of these objects was recognized (labels).
+    pub objects: Option<Vec<String>>,
+    /// Only events in one of these zones (motion zones, or the zone of a
+    /// recognized object).
+    pub zones: Option<Vec<String>>,
 }
 
 /// A finished recording segment in the index.
@@ -84,6 +89,36 @@ fn segment_from_row(r: &SqliteRow) -> Result<SegmentRecord, DbError> {
         end_ms: r.try_get("end_ms")?,
         bytes: u64::try_from(bytes).unwrap_or(0),
     })
+}
+
+/// A bookmark on the timeline: a moment of a camera with a note.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bookmark {
+    /// Identifier.
+    pub id: i64,
+    /// Camera identifier.
+    pub camera: String,
+    /// The moment (ms since the Unix epoch).
+    pub at_ms: i64,
+    /// The note typed by the user.
+    pub note: String,
+    /// Account that added it, if any.
+    pub author: Option<String>,
+    /// When it was added.
+    pub created_ms: i64,
+}
+
+impl Bookmark {
+    fn from_row(r: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: r.try_get("id")?,
+            camera: r.try_get("camera")?,
+            at_ms: r.try_get("at_ms")?,
+            note: r.try_get("note")?,
+            author: r.try_get("author")?,
+            created_ms: r.try_get("created_ms")?,
+        })
+    }
 }
 
 /// A period of recordings kept whatever the retention.
@@ -180,8 +215,15 @@ fn event_from_row(row: &SqliteRow) -> Result<DetectionEvent, DbError> {
 
 impl Database {
     /// Opens (creating it if needed) the database in `dir`, applies pending
-    /// migrations and closes events left open by a crash.
+    /// migrations and closes events left open by a crash at their start.
     pub async fn open(dir: &Path) -> Result<Self, DbError> {
+        Self::open_after(dir, None).await
+    }
+
+    /// [`Self::open`], closing the events left open by a crash at
+    /// `last_alive_ms`, the last moment RustNVR was known to run (instead of
+    /// their start), when it is after their start.
+    pub async fn open_after(dir: &Path, last_alive_ms: Option<i64>) -> Result<Self, DbError> {
         std::fs::create_dir_all(dir)?;
         let options = SqliteConnectOptions::new()
             .filename(dir.join("rustnvr.db"))
@@ -200,10 +242,15 @@ impl Database {
             pool,
             thumbnails: dir.join("thumbnails"),
         };
-        let closed = sqlx::query("UPDATE events SET end_ms = start_ms WHERE end_ms IS NULL")
-            .execute(&db.pool)
-            .await?
-            .rows_affected();
+        let closed = sqlx::query(
+            "UPDATE events SET end_ms = \
+             CASE WHEN ?1 IS NULL OR ?1 < start_ms THEN start_ms ELSE ?1 END \
+             WHERE end_ms IS NULL",
+        )
+        .bind(last_alive_ms)
+        .execute(&db.pool)
+        .await?
+        .rows_affected();
         if closed > 0 {
             tracing::info!(
                 events = closed,
@@ -312,11 +359,19 @@ impl Database {
     pub async fn events(&self, f: &EventFilter) -> Result<Vec<DetectionEvent>, DbError> {
         let limit = f.limit.clamp(1, MAX_EVENTS_PER_QUERY);
         let cameras = f.cameras.as_ref().map(serde_json::to_string).transpose()?;
+        let objects = f.objects.as_ref().map(serde_json::to_string).transpose()?;
+        let zones = f.zones.as_ref().map(serde_json::to_string).transpose()?;
         // An ongoing event (end_ms NULL) overlaps any period after its start.
         let rows = sqlx::query(
             "SELECT * FROM events \
              WHERE (?1 IS NULL OR camera = ?1) AND start_ms < ?3 AND COALESCE(end_ms, ?3) >= ?2 \
              AND (?5 IS NULL OR camera IN (SELECT value FROM json_each(?5))) \
+             AND (?6 IS NULL OR EXISTS (SELECT 1 FROM json_each(events.objects) o \
+                  WHERE json_extract(o.value, '$.label') IN (SELECT value FROM json_each(?6)))) \
+             AND (?7 IS NULL OR EXISTS (SELECT 1 FROM json_each(events.zones) z \
+                  WHERE z.value IN (SELECT value FROM json_each(?7))) \
+                  OR EXISTS (SELECT 1 FROM json_each(events.objects) o \
+                  WHERE json_extract(o.value, '$.zone') IN (SELECT value FROM json_each(?7)))) \
              ORDER BY start_ms DESC LIMIT ?4",
         )
         .bind(f.camera.as_ref().map(CameraId::as_str))
@@ -324,6 +379,8 @@ impl Database {
         .bind(f.to_ms)
         .bind(i64::from(limit))
         .bind(cameras)
+        .bind(objects)
+        .bind(zones)
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(event_from_row).collect()
@@ -755,6 +812,112 @@ impl Database {
         Ok(())
     }
 
+    /// Adds a bookmark.
+    pub async fn add_bookmark(
+        &self,
+        camera: &str,
+        at_ms: i64,
+        note: &str,
+        author: Option<&str>,
+        now_ms: i64,
+    ) -> Result<Bookmark, DbError> {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO bookmarks (camera, at_ms, note, author, created_ms) \
+             VALUES (?, ?, ?, ?, ?) RETURNING id",
+        )
+        .bind(camera)
+        .bind(at_ms)
+        .bind(note)
+        .bind(author)
+        .bind(now_ms)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Bookmark {
+            id,
+            camera: camera.to_owned(),
+            at_ms,
+            note: note.to_owned(),
+            author: author.map(str::to_owned),
+            created_ms: now_ms,
+        })
+    }
+
+    /// Bookmarks from `from_ms` (included) to `to_ms` (excluded), of one
+    /// camera or all, oldest first, `limit` at most.
+    pub async fn bookmarks(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        camera: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<Bookmark>, DbError> {
+        let rows = sqlx::query(
+            "SELECT id, camera, at_ms, note, author, created_ms FROM bookmarks \
+             WHERE at_ms >= ? AND at_ms < ? AND (? IS NULL OR camera = ?) \
+             ORDER BY at_ms LIMIT ?",
+        )
+        .bind(from_ms)
+        .bind(to_ms)
+        .bind(camera)
+        .bind(camera)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| Bookmark::from_row(r).map_err(DbError::from))
+            .collect()
+    }
+
+    /// One bookmark.
+    pub async fn bookmark(&self, id: i64) -> Result<Option<Bookmark>, DbError> {
+        sqlx::query(
+            "SELECT id, camera, at_ms, note, author, created_ms FROM bookmarks WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|r| Bookmark::from_row(&r).map_err(DbError::from))
+        .transpose()
+    }
+
+    /// Removes a bookmark; `false` if there was none with this identifier.
+    pub async fn delete_bookmark(&self, id: i64) -> Result<bool, DbError> {
+        Ok(sqlx::query("DELETE FROM bookmarks WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            > 0)
+    }
+
+    /// Order of the cameras chosen in the interface (identifiers, first
+    /// first); empty: the order of the configuration.
+    pub async fn camera_order(&self) -> Result<Vec<String>, DbError> {
+        sqlx::query("SELECT camera FROM camera_order ORDER BY position")
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| r.try_get("camera").map_err(DbError::from))
+            .collect()
+    }
+
+    /// Replaces the order of the cameras (empty: back to the configuration).
+    pub async fn set_camera_order(&self, cameras: &[String]) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM camera_order")
+            .execute(&mut *tx)
+            .await?;
+        for (position, camera) in cameras.iter().enumerate() {
+            sqlx::query("INSERT INTO camera_order (camera, position) VALUES (?, ?)")
+                .bind(camera)
+                .bind(i64::try_from(position).unwrap_or(i64::MAX))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Removes crossings older than `before_ms` (with the events retention).
     pub async fn delete_crossings_before(&self, before_ms: i64) -> Result<u64, DbError> {
         Ok(sqlx::query("DELETE FROM crossings WHERE at_ms < ?")
@@ -956,6 +1119,8 @@ mod tests {
                 from_ms: 0,
                 to_ms: 20_000,
                 limit: 10,
+                objects: None,
+                zones: None,
             })
             .await
             .expect("list");
@@ -967,6 +1132,37 @@ mod tests {
         assert_eq!(all[1].objects, vec![person]);
         assert!(all[0].objects.is_empty());
         assert!(all[1].has_thumbnail && (all[1].score - 0.4).abs() < 1e-6);
+        // Searched by object and by zone, on the server.
+        let search = |objects: Option<&[&str]>, zones: Option<&[&str]>| EventFilter {
+            cameras: None,
+            camera: None,
+            from_ms: 0,
+            to_ms: 20_000,
+            limit: 10,
+            objects: objects.map(|o| o.iter().map(|s| (*s).to_owned()).collect()),
+            zones: zones.map(|z| z.iter().map(|s| (*s).to_owned()).collect()),
+        };
+        let ids = |list: Vec<DetectionEvent>| list.iter().map(|e| e.id).collect::<Vec<_>>();
+        let found = db
+            .events(&search(Some(&["person", "dog"]), None))
+            .await
+            .expect("objects");
+        assert_eq!(ids(found), vec![e1.id]);
+        let found = db
+            .events(&search(Some(&["car"]), None))
+            .await
+            .expect("objects");
+        assert!(found.is_empty());
+        let found = db
+            .events(&search(None, Some(&["Allée"])))
+            .await
+            .expect("zones");
+        assert_eq!(ids(found), vec![e1.id]);
+        let found = db
+            .events(&search(None, Some(&["Garage"])))
+            .await
+            .expect("zones");
+        assert!(found.is_empty());
         // Ongoing events overlap any later period.
         let later = db
             .events(&EventFilter {
@@ -975,6 +1171,8 @@ mod tests {
                 from_ms: 50_000,
                 to_ms: 60_000,
                 limit: 10,
+                objects: None,
+                zones: None,
             })
             .await
             .expect("list");
@@ -987,6 +1185,8 @@ mod tests {
                 from_ms: 4_000,
                 to_ms: 4_500,
                 limit: 10,
+                objects: None,
+                zones: None,
             })
             .await
             .expect("list");
@@ -1150,6 +1350,8 @@ mod tests {
                     from_ms: 0,
                     to_ms: 10_000,
                     limit,
+                    objects: None,
+                    zones: None,
                 })
                 .await
                 .expect("events")
@@ -1267,6 +1469,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn events_left_open_end_when_rustnvr_was_last_seen() {
+        let dir = tempfile::tempdir().expect("tmp");
+        {
+            let db = Database::open(dir.path()).await.expect("open");
+            db.start_event(&cam("a"), EventKind::Motion, 10_000, 0.1, &[])
+                .await
+                .expect("start");
+            db.start_event(&cam("b"), EventKind::Motion, 50_000, 0.1, &[])
+                .await
+                .expect("start");
+        }
+        // Stopped abruptly; last seen running at 30 s.
+        let db = Database::open_after(dir.path(), Some(30_000))
+            .await
+            .expect("reopen");
+        let all = db
+            .events(&EventFilter {
+                camera: None,
+                cameras: None,
+                from_ms: 0,
+                to_ms: 100_000,
+                limit: 10,
+                objects: None,
+                zones: None,
+            })
+            .await
+            .expect("list");
+        let end = |camera: &str| {
+            all.iter()
+                .find(|e| e.camera.as_str() == camera)
+                .and_then(|e| e.end_ms)
+        };
+        assert_eq!(end("a"), Some(30_000));
+        // Started after the last sign of life: ends at its start.
+        assert_eq!(end("b"), Some(50_000));
+    }
+
+    #[tokio::test]
+    async fn bookmarks_round_trip() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        let a = db
+            .add_bookmark("jardin", 2_000, "Livraison colis", Some("alice"), 9)
+            .await
+            .expect("add");
+        db.add_bookmark("portail", 1_000, "Facteur", None, 9)
+            .await
+            .expect("add");
+        db.add_bookmark("jardin", 5_000, "Plus tard", None, 9)
+            .await
+            .expect("add");
+        let day = db.bookmarks(0, 5_000, None, 100).await.expect("list");
+        assert_eq!(
+            day.iter().map(|b| b.note.as_str()).collect::<Vec<_>>(),
+            ["Facteur", "Livraison colis"]
+        );
+        let garden = db
+            .bookmarks(0, 10_000, Some("jardin"), 100)
+            .await
+            .expect("list");
+        assert_eq!(garden.len(), 2);
+        assert_eq!(db.bookmark(a.id).await.expect("get"), Some(a.clone()));
+        assert_eq!(a.author.as_deref(), Some("alice"));
+        assert!(db.delete_bookmark(a.id).await.expect("delete"));
+        assert!(!db.delete_bookmark(a.id).await.expect("again"));
+        assert_eq!(db.bookmark(a.id).await.expect("get"), None);
+    }
+
+    #[tokio::test]
+    async fn camera_order_round_trip() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        assert!(db.camera_order().await.expect("empty").is_empty());
+        let order = vec![
+            "portail".to_owned(),
+            "jardin".to_owned(),
+            "garage".to_owned(),
+        ];
+        db.set_camera_order(&order).await.expect("set");
+        assert_eq!(db.camera_order().await.expect("get"), order);
+        db.set_camera_order(&order[1..]).await.expect("replace");
+        assert_eq!(db.camera_order().await.expect("get"), &order[1..]);
+        db.set_camera_order(&[]).await.expect("clear");
+        assert!(db.camera_order().await.expect("get").is_empty());
+    }
+
+    #[tokio::test]
     async fn motion_settings_round_trip() {
         let dir = tempfile::tempdir().expect("tmp");
         let db = Database::open(dir.path()).await.expect("open");
@@ -1282,6 +1571,7 @@ mod tests {
             objects: vec!["person".into()],
             masks: Vec::new(),
             lines: Vec::new(),
+            schedule: Vec::new(),
         };
         db.set_motion_settings(&cam("a"), &s).await.expect("set");
         db.set_motion_settings(&cam("a"), &s).await.expect("upsert");

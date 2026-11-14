@@ -1,4 +1,5 @@
 import { memo, useMemo, useState, type MouseEvent } from 'react'
+import { withBase } from '../../lib/build'
 import { formatTime } from '../../lib/format'
 import type { Period } from './periods'
 import { t } from '../../lib/i18n'
@@ -12,6 +13,10 @@ export interface TimelineMarker {
   id: string
   at: number
   label: string
+  /** Objects were recognized (the label names them): marked apart. */
+  objects?: boolean
+  /** Picture shown when the pointer is over the marker. */
+  thumbnail?: string | null
 }
 
 export interface TimelineProps {
@@ -23,6 +28,8 @@ export interface TimelineProps {
   motion: Record<string, Period[]> | null
   /** `null`: the backend has no events. */
   events: Record<string, TimelineMarker[]> | null
+  /** Bookmarks by row (playback); not given: none shown. */
+  bookmarks?: Record<string, TimelineMarker[]>
   now: number
   /** Playback position. */
   cursor?: number | null
@@ -48,10 +55,11 @@ function covers(periods: Period[] | undefined, t: number): boolean {
  * Horizontal timeline, one row per camera. Pure presentation: data and
  * navigation state come from the parent (TimelineCard, Playback page).
  */
-export const Timeline = memo(function Timeline({ rows, start, end, recordings, motion, events, now, cursor, onSelect, activeRow }: TimelineProps) {
+export const Timeline = memo(function Timeline({ rows, start, end, recordings, motion, events, bookmarks, now, cursor, onSelect, activeRow }: TimelineProps) {
   const span = end - start
   const pct = (t: number) => ((t - start) / span) * 100
   const [hover, setHover] = useState<{ row: string; t: number; x: number } | null>(null)
+  const [peek, setPeek] = useState<{ marker: TimelineMarker; x: number; y: number } | null>(null)
 
   const ticks = useMemo(() => {
     const step = tickStep(span)
@@ -122,10 +130,29 @@ export const Timeline = memo(function Timeline({ rows, start, end, recordings, m
                     m.at <= end && (
                       <div
                         key={m.id}
-                        title={`${m.label} — ${formatTime(m.at, true)}`}
-                        className="absolute top-0.5 size-2 -translate-x-1/2 rotate-45 bg-fg ring-2 ring-bg-2"
+                        title={m.thumbnail ? undefined : `${m.label} — ${formatTime(m.at, true)}`}
+                        className={`absolute top-0.5 -translate-x-1/2 rotate-45 ring-2 ring-bg-2 ${m.objects ? 'size-2.5 bg-ok' : 'size-2 bg-fg'}`}
                         style={{ left: `${pct(m.at)}%` }}
+                        onMouseEnter={(e) => {
+                          const r = e.currentTarget.getBoundingClientRect()
+                          setPeek({ marker: m, x: r.left + r.width / 2, y: r.top })
+                        }}
+                        onMouseLeave={() => setPeek(null)}
                       />
+                    ),
+                )}
+                {bookmarks?.[row.id]?.map(
+                  (m) =>
+                    m.at >= start &&
+                    m.at <= end && (
+                      <div
+                        key={`b${m.id}`}
+                        title={`${m.label} — ${formatTime(m.at, true)}`}
+                        className="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-warn"
+                        style={{ left: `${pct(m.at)}%` }}
+                      >
+                        <span className="absolute -top-px left-1/2 size-2.5 -translate-x-1/2 rounded-b-sm bg-warn" aria-hidden />
+                      </div>
                     ),
                 )}
                 {now >= start && now <= end && (
@@ -158,12 +185,23 @@ export const Timeline = memo(function Timeline({ rows, start, end, recordings, m
         })}
       </div>
 
-      <TimelineLegend motionAvailable={motion !== null} eventsAvailable={events !== null} showCursor={cursor != null} />
+      {peek?.marker.thumbnail && (
+        <div
+          className="pointer-events-none fixed z-50 w-40 -translate-x-1/2 -translate-y-full overflow-hidden rounded-md border border-line bg-bg shadow-lg"
+          style={{ left: Math.min(Math.max(peek.x, 84), window.innerWidth - 84), top: peek.y - 6 }}
+        >
+          <img src={withBase(peek.marker.thumbnail)} alt="" className="aspect-video w-full object-cover" />
+          <p className="truncate px-1.5 py-0.5 text-[11px]">
+            <span className="tabular">{formatTime(peek.marker.at, true)}</span> · {peek.marker.label}
+          </p>
+        </div>
+      )}
+      <TimelineLegend motionAvailable={motion !== null} eventsAvailable={events !== null} showCursor={cursor != null} showBookmarks={bookmarks !== undefined} />
     </div>
   )
 })
 
-function TimelineLegend({ motionAvailable, eventsAvailable, showCursor }: { motionAvailable: boolean; eventsAvailable: boolean; showCursor: boolean }) {
+function TimelineLegend({ motionAvailable, eventsAvailable, showCursor, showBookmarks }: { motionAvailable: boolean; eventsAvailable: boolean; showCursor: boolean; showBookmarks: boolean }) {
   return (
     <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-1 pl-24 text-xs text-muted sm:pl-32">
       <li className="flex items-center gap-1.5">
@@ -175,9 +213,19 @@ function TimelineLegend({ motionAvailable, eventsAvailable, showCursor }: { moti
       <li className={`flex items-center gap-1.5 ${eventsAvailable ? '' : 'opacity-60'}`}>
         <span className="size-2 rotate-45 bg-fg" aria-hidden />{t(' Événement', ' Event')}{!eventsAvailable && t(' (non disponible)', ' (not available)')}
       </li>
+      {eventsAvailable && (
+        <li className="flex items-center gap-1.5">
+          <span className="size-2 rotate-45 bg-ok" aria-hidden />{t(' Objet reconnu', ' Recognized object')}
+        </li>
+      )}
       <li className="flex items-center gap-1.5">
         <span className="h-3 border-l-2 border-dashed border-muted" aria-hidden />{t(' Maintenant', ' Now')}
       </li>
+      {showBookmarks && (
+        <li className="flex items-center gap-1.5">
+          <span className="h-3 w-0.5 bg-warn" aria-hidden />{t(' Signet', ' Bookmark')}
+        </li>
+      )}
       {showCursor && (
         <li className="flex items-center gap-1.5">
           <span className="h-3 w-0.5 bg-fg" aria-hidden />{t(' Position de lecture', ' Playback position')}

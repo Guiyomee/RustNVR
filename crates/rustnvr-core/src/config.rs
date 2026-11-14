@@ -1137,6 +1137,14 @@ pub struct WebhookConfig {
     /// recording) always go through.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cooldown_minutes: u32,
+    /// When detections are called (motion, objects, crossings); empty: all
+    /// the time. Failures (storage, camera, recording) always go through.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedule: Vec<crate::schedule::TimeRange>,
+    /// Discord, ntfy, Telegram: a short video of each event called is sent
+    /// too, once its recording is finished (about a minute later).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clip: bool,
 }
 
 impl WebhookConfig {
@@ -1159,6 +1167,7 @@ impl WebhookConfig {
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         let what = format!("webhook {:?}", self.name);
+        out.extend(crate::schedule::problems(&self.schedule, &what));
         if self.name.trim().is_empty() {
             out.push("webhook : nom manquant".to_owned());
         }
@@ -1529,20 +1538,36 @@ pub struct AiConfig {
     pub night: Option<AiNight>,
 }
 
-/// The night of the recognition: from `from` to `to` (local time of the
-/// server, `HH:MM`, across midnight when `from` is later), objects need
-/// `min_score`.
+/// The night of the recognition: objects need `min_score`. The night is
+/// from `from` to `to` (local time of the server, `HH:MM`, across midnight
+/// when `from` is later), or, with `when = "night_vision"`, while the camera
+/// films in night vision (measured on its picture; the hours still apply
+/// while that is not known yet).
 #[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AiNight {
     /// Confidence needed at night (0..1).
     pub min_score: f32,
+    /// What makes the night: the hours, or the camera's night vision.
+    #[serde(default)]
+    pub when: AiNightWhen,
     /// Start of the night.
     #[serde(default = "default_night_from")]
     pub from: String,
     /// End of the night.
     #[serde(default = "default_night_to")]
     pub to: String,
+}
+
+/// What makes the night of the recognition.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiNightWhen {
+    /// From `from` to `to`, the same for every camera.
+    #[default]
+    Hours,
+    /// While the camera films in night vision (black and white picture).
+    NightVision,
 }
 
 fn default_night_from() -> String {
@@ -1561,7 +1586,16 @@ pub fn minute_of_day(hhmm: &str) -> Option<u16> {
 }
 
 impl AiNight {
-    /// Whether minute `now` of the day (0..1440) is in the night.
+    /// Whether it is night for a camera at minute `now` of the day
+    /// (0..1440), given its night vision when known.
+    pub fn is_night(&self, now: u16, night_vision: Option<bool>) -> bool {
+        match (self.when, night_vision) {
+            (AiNightWhen::NightVision, Some(night)) => night,
+            _ => self.contains(now),
+        }
+    }
+
+    /// Whether minute `now` of the day (0..1440) is in the night hours.
     pub fn contains(&self, now: u16) -> bool {
         match (minute_of_day(&self.from), minute_of_day(&self.to)) {
             (Some(from), Some(to)) if from <= to => (from..to).contains(&now),
@@ -2811,8 +2845,22 @@ main = { url = \"rtsp://x/b\" }
         .expect("valid");
         let night = ok.ai.night.expect("night");
         assert_eq!((night.from.as_str(), night.to.as_str()), ("20:00", "07:00"));
+        assert_eq!(night.when, AiNightWhen::Hours);
         assert!(night.contains(23 * 60) && night.contains(6 * 60 + 59));
         assert!(!night.contains(7 * 60) && !night.contains(12 * 60));
+        // The hours whatever the camera films.
+        assert!(!night.is_night(12 * 60, Some(true)));
+        // Following the night vision; the hours while it is not known.
+        let ok = Config::from_toml_with_env(
+            "[ai]\nnight = { min_score = 0.8, when = \"night_vision\" }\n",
+            |_| None,
+        )
+        .expect("valid");
+        let night = ok.ai.night.expect("night");
+        assert_eq!(night.when, AiNightWhen::NightVision);
+        assert!(night.is_night(12 * 60, Some(true)));
+        assert!(!night.is_night(23 * 60, Some(false)));
+        assert!(night.is_night(23 * 60, None) && !night.is_night(12 * 60, None));
         assert_eq!(minute_of_day("06:05"), Some(365));
         assert_eq!(minute_of_day("6:05"), None);
         assert_eq!(minute_of_day("24:00"), None);
@@ -3083,6 +3131,8 @@ mod webhook_tests {
             image: true,
             messages: BTreeMap::new(),
             cooldown_minutes: 0,
+            schedule: Vec::new(),
+            clip: false,
         }
     }
 

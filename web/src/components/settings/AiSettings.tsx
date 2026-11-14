@@ -33,6 +33,8 @@ interface Form {
   /** A higher confidence at night. */
   night: boolean
   nightScore: number
+  /** The night follows the camera's measured night vision (else the hours). */
+  nightVision: boolean
   nightFrom: string
   nightTo: string
 }
@@ -52,6 +54,7 @@ function toForm(s: Settings): Form {
     keepPictures: s.keep_pictures ?? false,
     night: Boolean(s.night),
     nightScore: s.night?.min_score ?? Math.min(0.95, s.min_score + 0.2),
+    nightVision: s.night?.when === 'night_vision',
     nightFrom: s.night?.from ?? '20:00',
     nightTo: s.night?.to ?? '07:00',
   }
@@ -65,7 +68,7 @@ function toSettings(f: Form): Settings {
     interval_seconds: Number(f.interval),
     timeout_seconds: Number(f.timeout),
     keep_pictures: f.keepPictures,
-    night: f.night ? { min_score: f.nightScore, from: f.nightFrom, to: f.nightTo } : null,
+    night: f.night ? { min_score: f.nightScore, when: f.nightVision ? ('night_vision' as const) : ('hours' as const), from: f.nightFrom, to: f.nightTo } : null,
   }
   if (f.kind === 'onnx') return { ...base, provider: { type: 'onnx', model: f.model.trim() } }
   if (f.kind === 'http') return { ...base, provider: { type: 'deepstack_http', url: f.url.trim(), ...(f.apiKeyEnv.trim() ? { api_key_env: f.apiKeyEnv.trim() } : {}) } }
@@ -489,7 +492,7 @@ export function AiSettings() {
               <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={form.night} disabled={disabled} onChange={(e) => set('night', e.target.checked)} />
               <span>
                 {t('Plus exigeante la nuit', 'Stricter at night')}
-                <span className="block text-xs text-muted">{t('En infrarouge, insectes, pluie et phares trompent plus souvent l’IA : une confiance plus haute pendant ces heures (heure du serveur).', 'In infrared light, insects, rain and headlights fool the AI more often: a higher confidence during these hours (server time).')}</span>
+                <span className="block text-xs text-muted">{t('En infrarouge, insectes, pluie et phares trompent plus souvent l’IA : une confiance plus haute la nuit.', 'In infrared light, insects, rain and headlights fool the AI more often: a higher confidence at night.')}</span>
               </span>
             </label>
             {form.night && (
@@ -498,6 +501,23 @@ export function AiSettings() {
                   {t('Confiance minimale la nuit : ', 'Minimum confidence at night: ')}<span className="tabular text-fg">{Math.round(form.nightScore * 100)} %</span>
                   <input type="range" min={0.2} max={0.95} step={0.05} className="mt-1 w-full accent-accent" value={form.nightScore} disabled={disabled} onChange={(e) => set('nightScore', Number(e.target.value))} />
                 </label>
+                <fieldset className="space-y-1">
+                  <legend className="sr-only">{t('Quand est-ce la nuit ?', 'When is it night?')}</legend>
+                  <label className="flex items-start gap-2">
+                    <input type="radio" name="ai-night-when" className="mt-0.5 accent-accent" checked={form.nightVision} disabled={disabled} onChange={() => set('nightVision', true)} />
+                    <span>
+                      {t('Quand la caméra passe en vision nocturne', 'When the camera switches to night vision')}
+                      <span className="block text-xs text-muted">{t('Mesuré sur l’image de chaque caméra (noir et blanc). Les heures ci-dessous servent tant que ce n’est pas encore mesuré.', 'Measured on each camera’s picture (black and white). The hours below apply while it is not measured yet.')}</span>
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-2">
+                    <input type="radio" name="ai-night-when" className="mt-0.5 accent-accent" checked={!form.nightVision} disabled={disabled} onChange={() => set('nightVision', false)} />
+                    <span>
+                      {t('Aux heures ci-dessous', 'During the hours below')}
+                      <span className="block text-xs text-muted">{t('Les mêmes pour toutes les caméras (heure du serveur).', 'The same for every camera (server time).')}</span>
+                    </span>
+                  </label>
+                </fieldset>
                 <div className="flex flex-wrap items-center gap-2">
                   {t('De', 'From')}
                   <input type="time" aria-label={t('Début de la nuit', 'Start of the night')} className="h-8 rounded-md border border-line bg-bg-2 px-2" value={form.nightFrom} disabled={disabled} onChange={(e) => set('nightFrom', e.target.value)} />

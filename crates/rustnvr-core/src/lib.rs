@@ -11,6 +11,7 @@ pub mod detection;
 pub mod events;
 pub mod media;
 pub mod rtsp;
+pub mod schedule;
 pub mod secret;
 
 pub use camera::{CameraId, InvalidCameraId, StreamRole};

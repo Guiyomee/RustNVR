@@ -9,7 +9,7 @@ export function useEvents(query: EventQuery): AsyncState<NvrEvent[]> {
   const { source } = useData()
   // Refetch when the server announces an event change.
   const version = useLiveState(source.store, (s) => s.eventsVersion)
-  return useAsync(() => source.events(query), [source, query.camera, query.fromMs, query.toMs, query.kinds?.join(','), version])
+  return useAsync(() => source.events(query), [source, query.camera, query.fromMs, query.toMs, query.kinds?.join(','), query.zones?.join(','), version])
 }
 
 /** Event counts per hour over the last `hours` hours, oldest first. */

@@ -168,8 +168,9 @@ pub(super) async fn replay(
         let (r, c, d, f) = (root.clone(), camera.clone(), day.clone(), file.clone());
         let jpeg = blocking(move || captures::read(&r, &c, &d, &f)).await?;
         let started = std::time::Instant::now();
+        // A kept picture is from the past: the night follows the hours.
         let found = ai
-            .analyze(&jpeg)
+            .analyze(&jpeg, None)
             .await
             .map_err(|e| ControlError::Internal(format!("reconnaissance : {e}")))?;
         let ms = started.elapsed().as_millis() as u64;

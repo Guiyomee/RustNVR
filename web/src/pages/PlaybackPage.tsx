@@ -1,5 +1,6 @@
-import { Download, FastForward, Pause, Play, Rewind, Shield, SkipBack, SkipForward } from 'lucide-react'
+import { Bookmark as BookmarkIcon, Download, FastForward, Pause, Play, Rewind, Shield, SkipBack, SkipForward } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { BookmarkDialog, BookmarkList } from '../components/playback/Bookmarks'
 import { ExportDialog } from '../components/playback/ExportDialog'
 import { ProtectDialog, ProtectedList } from '../components/playback/ProtectDialog'
 import { RecordingPlayer } from '../components/playback/RecordingPlayer'
@@ -11,13 +12,13 @@ import { Badge, Card, CardHeader, PageHeader } from '../components/ui/Card'
 import { EmptyState, ErrorState, LoadingState } from '../components/ui/States'
 import { Segmented } from '../components/ui/Tabs'
 import { useCapability, useIsDemo, useLive } from '../data/DataContext'
-import { getProtected } from '../api/endpoints'
+import { getBookmarks, getProtected } from '../api/endpoints'
 import { useReadOnly } from '../auth/AuthGate'
 import { useAsync, useInterval } from '../hooks/useAsync'
 import { useNow } from '../hooks/useUi'
 import { formatDateTime, fromDateInput, startOfDay, toDateInput } from '../lib/format'
 import { navigate, useLocation } from '../lib/router'
-import type { Recording } from '../types/api'
+import type { Bookmark, Recording } from '../types/api'
 import { t } from '../lib/i18n'
 
 const DAY = 86_400_000
@@ -53,6 +54,8 @@ export function PlaybackPage() {
   const readOnly = useReadOnly()
   const [protecting, setProtecting] = useState(false)
   const protectedList = useAsync(() => (canProtect ? getProtected() : Promise.resolve([])), [canProtect])
+  const canBookmark = useCapability('bookmarks') === true && !demo
+  const [bookmarking, setBookmarking] = useState(false)
 
   // Default selection once cameras are known.
   useEffect(() => {
@@ -66,6 +69,13 @@ export function PlaybackPage() {
   const data = useTimelineData(selected, day, Math.min(dayEnd, Math.max(now, day + 1)))
   const isToday = day === startOfDay(now)
   useInterval(() => isToday && data.reload(), 60_000)
+  const bookmarkList = useAsync((signal) => (canBookmark ? getBookmarks(day, dayEnd, signal) : Promise.resolve([] as Bookmark[])), [canBookmark, day, dayEnd])
+  const shownBookmarks = useMemo(() => (bookmarkList.data ?? []).filter((b) => selected.includes(b.camera)), [bookmarkList.data, selected])
+  const bookmarkMarkers = useMemo(() => {
+    const out: Record<string, { id: string; at: number; label: string }[]> = {}
+    for (const b of shownBookmarks) (out[b.camera] ??= []).push({ id: String(b.id), at: b.at_ms, label: b.note })
+    return out
+  }, [shownBookmarks])
 
   const recordings = data.data?.recordings ?? {}
   const all = useMemo(() => sortedAll(data.data?.recordings ?? {}, selected), [data.data, selected])
@@ -223,6 +233,11 @@ export function PlaybackPage() {
                   {t('Protéger', 'Protect')}
                 </Button>
               )}
+              {canBookmark && (
+                <Button icon={<BookmarkIcon className="size-4" />} disabledReason={readOnly ?? (position === null ? t('Aucune position de lecture', 'No playback position') : null)} onClick={() => setBookmarking(true)}>
+                  {t('Signet', 'Bookmark')}
+                </Button>
+              )}
               <span className="tabular ml-auto text-sm">{position !== null ? formatDateTime(position) : '—'}</span>
             </div>
             <CardHeader
@@ -240,6 +255,7 @@ export function PlaybackPage() {
                   recordings={data.data.periods}
                   motion={data.data.motion}
                   events={data.data.markers}
+                  bookmarks={canBookmark ? bookmarkMarkers : undefined}
                   cursor={position}
                   activeRow={master}
                   onSelect={(_, t) => seek(t)}
@@ -255,6 +271,30 @@ export function PlaybackPage() {
             day={day}
             position={position}
           />
+          {canBookmark && (
+            <>
+              <BookmarkDialog
+                open={bookmarking}
+                onClose={() => setBookmarking(false)}
+                onAdded={bookmarkList.reload}
+                cameras={selected.map((id) => ({ id, name: nameOf(id) }))}
+                initialCamera={master}
+                position={position}
+              />
+              <BookmarkList
+                list={bookmarkList.data ? shownBookmarks : null}
+                error={bookmarkList.error}
+                onReload={bookmarkList.reload}
+                names={nameOf}
+                readOnly={readOnly}
+                onPlay={(b) => {
+                  seek(b.at_ms - 5_000)
+                  setPlaying(true)
+                  window.scrollTo({ top: 0, behavior: 'smooth' })
+                }}
+              />
+            </>
+          )}
           {canProtect && (
             <>
               <ProtectDialog

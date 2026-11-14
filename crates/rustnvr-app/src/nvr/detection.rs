@@ -98,6 +98,8 @@ pub(super) async fn run_events(
 ) {
     let (thumb_tx, mut thumbs) = mpsc::channel::<EventUpdate>(16);
     let mut ongoing: HashMap<CameraId, DetectionEvent> = HashMap::new();
+    // Motion started outside the schedule of its camera: ignored to its end.
+    let mut off_schedule: std::collections::HashSet<CameraId> = Default::default();
     // Manual events: their timers end them here.
     let (end_tx, mut ends) = mpsc::channel::<(CameraId, i64)>(16);
     let mut open_manual: HashMap<i64, CameraId> = HashMap::new();
@@ -114,6 +116,18 @@ pub(super) async fn run_events(
             update = updates.recv() => {
                 let Some(update) = update else { break };
                 match update {
+                    MotionUpdate::Started { camera, .. }
+                        if !scheduled(&camera_settings(&shared, &camera).await.schedule) =>
+                    {
+                        debug!(%camera, "motion outside the schedule: ignored");
+                        off_schedule.insert(camera);
+                    }
+                    MotionUpdate::Ended { camera, .. } if off_schedule.remove(&camera) => {}
+                    MotionUpdate::Crossing { camera, line, .. }
+                        if !scheduled(&camera_settings(&shared, &camera).await.schedule) =>
+                    {
+                        debug!(%camera, line, "crossing outside the schedule: ignored");
+                    }
                     MotionUpdate::Started { camera, start_ms, score, zones } => {
                         // Recording first: the database must not delay it.
                         if let Some(t) = shared.engine.trigger(&camera) {
@@ -294,6 +308,66 @@ pub(super) async fn set_detection_paused(
     Ok(())
 }
 
+/// How often the schedules of the cameras are applied.
+const SCHEDULE_CHECK: Duration = Duration::from_secs(30);
+
+/// Starts the detection of the cameras entering a range of their schedule
+/// and stops it for those leaving it, so that it decodes nothing outside
+/// (motion found there would be ignored anyway).
+pub(super) async fn run_schedules(shared: Arc<Shared>, cancel: CancellationToken) {
+    let mut ticker = tokio::time::interval(SCHEDULE_CHECK);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = ticker.tick() => {}
+        }
+        if shared
+            .engine
+            .detection_paused
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        let mut guard = shared.state.lock().await;
+        let state: &mut State = &mut guard;
+        let mut changed = false;
+        let ids: Vec<CameraId> = state.running.keys().cloned().collect();
+        for id in ids {
+            let Some(settings) = state
+                .motion
+                .get(&id)
+                .filter(|s| s.enabled && !s.schedule.is_empty())
+                .cloned()
+            else {
+                continue;
+            };
+            let Some(rt) = state.running.get_mut(&id) else {
+                continue;
+            };
+            match (scheduled(&settings.schedule), rt.motion.is_some()) {
+                (true, false) => {
+                    shared.engine.start_motion(rt, Some(&settings));
+                    if rt.motion.is_some() {
+                        info!(camera = %id, "motion detection: its schedule starts");
+                        changed = true;
+                    }
+                }
+                (false, true) => {
+                    info!(camera = %id, "motion detection: its schedule ends");
+                    if let Some(old) = rt.motion.take() {
+                        old.stop().await;
+                    }
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        if changed {
+            shared.publish(state);
+        }
+    }
+}
+
 /// Distance (fraction of the picture) from a line within which a recognized
 /// object is taken as the one crossing it.
 const AT_LINE: f32 = 0.25;
@@ -379,7 +453,10 @@ async fn crossing(
             return;
         };
         let started = std::time::Instant::now();
-        match ai.analyze(&jpeg).await {
+        match ai
+            .analyze(&jpeg, night_vision(&shared, &camera).await)
+            .await
+        {
             Ok(objects) => {
                 let seen: Vec<DetectedObject> = objects
                     .iter()
@@ -486,6 +563,37 @@ fn keep_picture(shared: &Shared, camera: &CameraId, jpeg: &Bytes, capture: Captu
             warn!(%camera, error = %e, "cannot keep the analysed picture");
         }
     });
+}
+
+/// Weekday (1 = Monday) and minute of the day now, in the local time of the
+/// server.
+pub(super) fn local_week_minute() -> (u8, u16) {
+    week_minute(&jiff::Zoned::now())
+}
+
+/// Weekday (1 = Monday) and minute of the day of `at_ms` (milliseconds
+/// since the Unix epoch), in the local time of the server.
+pub(super) fn week_minute_at(at_ms: i64) -> (u8, u16) {
+    jiff::Timestamp::from_millisecond(at_ms)
+        .map(|t| week_minute(&t.to_zoned(jiff::tz::TimeZone::system())))
+        .unwrap_or_else(|_| local_week_minute())
+}
+
+fn week_minute(at: &jiff::Zoned) -> (u8, u16) {
+    let day = u8::try_from(at.weekday().to_monday_one_offset()).unwrap_or(1);
+    let minute = u16::try_from(i32::from(at.hour()) * 60 + i32::from(at.minute())).unwrap_or(0);
+    (day, minute)
+}
+
+/// Whether `schedule` is active now (always without ranges).
+pub(super) fn scheduled(schedule: &[rustnvr_core::schedule::TimeRange]) -> bool {
+    let (day, minute) = local_week_minute();
+    rustnvr_core::schedule::active(schedule, day, minute)
+}
+
+/// Whether `camera` films in night vision, when known (see `night`).
+pub(super) async fn night_vision(shared: &Shared, camera: &CameraId) -> Option<bool> {
+    shared.state.lock().await.night.get(camera).copied()
 }
 
 /// Local midnight of today, in milliseconds since the Unix epoch.
@@ -667,8 +775,9 @@ async fn recognize(
     let wanted = camera_settings(shared, &event.camera).await;
     let mut jpeg = thumbnail;
     for picture in 1..=max_pictures {
+        let night = night_vision(shared, &event.camera).await;
         let started = std::time::Instant::now();
-        let found = match ai.analyze(&jpeg).await {
+        let found = match ai.analyze(&jpeg, night).await {
             Ok(found) => found,
             Err(e) => {
                 // Do not insist with a provider that does not answer.
@@ -990,6 +1099,7 @@ impl NvrView for MqttBridge {
                         } else {
                             Vec::new()
                         },
+                        ptz: c.onvif.is_some() && shared.ptz.is_motorised(c.id.as_str()),
                     }
                 })
                 .collect()
@@ -1110,6 +1220,20 @@ impl NvrView for MqttBridge {
         Box::pin(async move {
             let shared = self.0.upgrade().ok_or("NVR arrêté")?;
             super::ptz::goto_name(&shared, camera.as_str(), &name)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn ptz_step(
+        &self,
+        camera: CameraId,
+        step: rustnvr_mqtt::PtzStep,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let shared = self.0.upgrade().ok_or("NVR arrêté")?;
+            let (pan, tilt, zoom) = step.velocity();
+            super::ptz::step(&shared, camera.as_str(), pan, tilt, zoom)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -1748,6 +1872,7 @@ pub(super) async fn ai_test(
     let jpeg = snapshot_jpeg(&shared.ffmpeg, &tap, THUMBNAIL_WIDTH, &wanted.mask_rects())
         .await
         .map_err(|e| ControlError::Invalid(format!("pas d'image de la caméra : {e}")))?;
+    let night = night_vision(shared, &camera).await;
     let started = std::time::Instant::now();
     let found = ai
         .detect_all(&jpeg)
@@ -1763,7 +1888,7 @@ pub(super) async fn ai_test(
             .filter(|o| o.score >= 0.2)
             .map(|mut o| {
                 let located = wanted.locate(&o);
-                let kept = ai.keeps(&o) && located.is_some();
+                let kept = ai.keeps(&o, night) && located.is_some();
                 o.zone = located.flatten();
                 AiTestObject { kept, object: o }
             })

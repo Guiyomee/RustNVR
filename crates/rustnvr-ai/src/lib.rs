@@ -162,8 +162,14 @@ impl Analyzer {
     }
 
     /// Objects in `jpeg` that pass the filters, most confident first.
-    pub async fn analyze(&self, jpeg: &[u8]) -> Result<Vec<DetectedObject>, AiError> {
-        Ok(self.filter(self.detect_all(jpeg).await?))
+    /// `night_vision`: whether the camera films in night vision, when known
+    /// (the night threshold may follow it).
+    pub async fn analyze(
+        &self,
+        jpeg: &[u8],
+        night_vision: Option<bool>,
+    ) -> Result<Vec<DetectedObject>, AiError> {
+        Ok(self.filter(self.detect_all(jpeg).await?, night_vision))
     }
 
     /// Everything the provider finds in `jpeg`, before the filters (to try
@@ -176,26 +182,33 @@ impl Analyzer {
         Ok(found)
     }
 
-    fn min_score_at(&self, minute: u16) -> f32 {
+    fn min_score_at(&self, minute: u16, night_vision: Option<bool>) -> f32 {
         match &self.night {
-            Some(n) if n.contains(minute) => n.min_score,
+            Some(n) if n.is_night(minute, night_vision) => n.min_score,
             _ => self.min_score,
         }
     }
 
-    /// Whether `o` passes the confidence (of this time of day) and label
-    /// filters.
-    pub fn keeps(&self, o: &DetectedObject) -> bool {
-        self.keeps_at(o, local_minute())
+    /// Whether `o` passes the confidence (of this time of day, or of the
+    /// camera's night vision) and label filters.
+    pub fn keeps(&self, o: &DetectedObject, night_vision: Option<bool>) -> bool {
+        self.keeps_at(o, local_minute(), night_vision)
     }
 
-    fn keeps_at(&self, o: &DetectedObject, minute: u16) -> bool {
-        o.score >= self.min_score_at(minute)
+    fn keeps_at(&self, o: &DetectedObject, minute: u16, night_vision: Option<bool>) -> bool {
+        o.score >= self.min_score_at(minute, night_vision)
             && (self.labels.is_empty() || self.labels.iter().any(|l| l == &o.label))
     }
 
-    fn filter(&self, objects: Vec<DetectedObject>) -> Vec<DetectedObject> {
-        let mut kept: Vec<DetectedObject> = objects.into_iter().filter(|o| self.keeps(o)).collect();
+    fn filter(
+        &self,
+        objects: Vec<DetectedObject>,
+        night_vision: Option<bool>,
+    ) -> Vec<DetectedObject> {
+        let mut kept: Vec<DetectedObject> = objects
+            .into_iter()
+            .filter(|o| self.keeps(o, night_vision))
+            .collect();
         kept.sort_by(|a, b| b.score.total_cmp(&a.score));
         kept
     }
@@ -423,6 +436,7 @@ pub fn jpeg_size(jpeg: &[u8]) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustnvr_core::config::AiNightWhen;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// A minimal JPEG header: SOI, an APP0 segment, SOF0 for 320×240.
@@ -457,6 +471,7 @@ mod tests {
         );
         analyzer.night = Some(AiNight {
             min_score: 0.8,
+            when: AiNightWhen::Hours,
             from: "20:00".into(),
             to: "07:00".into(),
         });
@@ -468,24 +483,36 @@ mod tests {
         };
         let at = |h: u16, m: u16| h * 60 + m;
         // Day: 0.6 is enough; night (across midnight): it is not.
-        assert!(analyzer.keeps_at(&person(0.6), at(12, 0)));
-        assert!(analyzer.keeps_at(&person(0.6), at(19, 59)));
-        assert!(!analyzer.keeps_at(&person(0.6), at(20, 0)));
-        assert!(!analyzer.keeps_at(&person(0.6), at(3, 0)));
-        assert!(analyzer.keeps_at(&person(0.85), at(3, 0)));
-        assert!(analyzer.keeps_at(&person(0.6), at(7, 0)));
-        assert_eq!(analyzer.min_score_at(at(23, 30)), 0.8);
+        assert!(analyzer.keeps_at(&person(0.6), at(12, 0), None));
+        assert!(analyzer.keeps_at(&person(0.6), at(19, 59), None));
+        assert!(!analyzer.keeps_at(&person(0.6), at(20, 0), None));
+        assert!(!analyzer.keeps_at(&person(0.6), at(3, 0), None));
+        assert!(analyzer.keeps_at(&person(0.85), at(3, 0), None));
+        assert!(analyzer.keeps_at(&person(0.6), at(7, 0), None));
+        assert_eq!(analyzer.min_score_at(at(23, 30), None), 0.8);
         // A night within the day (a dark garage, 13:00-15:00).
         analyzer.night = Some(AiNight {
             min_score: 0.9,
+            when: AiNightWhen::Hours,
             from: "13:00".into(),
             to: "15:00".into(),
         });
-        assert_eq!(analyzer.min_score_at(at(14, 0)), 0.9);
-        assert_eq!(analyzer.min_score_at(at(15, 0)), 0.5);
+        assert_eq!(analyzer.min_score_at(at(14, 0), None), 0.9);
+        assert_eq!(analyzer.min_score_at(at(15, 0), None), 0.5);
+        // Following the camera's night vision; the hours while not known.
+        analyzer.night = Some(AiNight {
+            min_score: 0.8,
+            when: AiNightWhen::NightVision,
+            from: "20:00".into(),
+            to: "07:00".into(),
+        });
+        assert_eq!(analyzer.min_score_at(at(12, 0), Some(true)), 0.8);
+        assert_eq!(analyzer.min_score_at(at(23, 0), Some(false)), 0.5);
+        assert_eq!(analyzer.min_score_at(at(23, 0), None), 0.8);
+        assert!(!analyzer.keeps_at(&person(0.6), at(12, 0), Some(true)));
         // Without a night: the day threshold all the time.
         analyzer.night = None;
-        assert_eq!(analyzer.min_score_at(at(2, 0)), 0.5);
+        assert_eq!(analyzer.min_score_at(at(2, 0), None), 0.5);
         assert!(local_minute() < 1440);
     }
 
@@ -571,7 +598,7 @@ mod tests {
         assert_eq!(analyzer.provider(), "deepstack_http");
         assert_eq!(analyzer.device(), None, "unknown before the first answer");
         assert_eq!(analyzer.schedule(), (4, Duration::from_secs(2)));
-        let found = analyzer.analyze(&jpeg()).await.expect("analyze");
+        let found = analyzer.analyze(&jpeg(), None).await.expect("analyze");
         assert_eq!(
             found.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(),
             ["person", "car"]

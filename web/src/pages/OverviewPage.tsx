@@ -1,6 +1,7 @@
 import { Activity, ArrowRight, Cpu, HardDrive, Video } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { UnavailableError } from '../api/client'
+import { describeError, UnavailableError } from '../api/client'
+import { getCameraOrder, setCameraOrder } from '../api/endpoints'
 import { CameraGrid, type GridColumns } from '../components/cameras/CameraCard'
 import { EventRow } from '../components/events/EventCard'
 import { StorageCard } from '../components/storage/StorageCard'
@@ -13,7 +14,8 @@ import { useIsViewer } from '../auth/AuthGate'
 import { StatCard } from '../components/ui/StatCard'
 import { Segmented } from '../components/ui/Tabs'
 import { EmptyState, ErrorState, LoadingState, Unavailable } from '../components/ui/States'
-import { useLive } from '../data/DataContext'
+import { useIsDemo, useLive } from '../data/DataContext'
+import { useAsync } from '../hooks/useAsync'
 import { bucketByHour, useEvents } from '../hooks/useEvents'
 import { diskPercent, isRemote, useStorage } from '../hooks/useStorage'
 import { useNow } from '../hooks/useUi'
@@ -48,26 +50,56 @@ function useColumns(): [GridColumns, (c: GridColumns) => void] {
   ]
 }
 
-const ORDER_KEY = 'rustnvr.overview.order'
+/** Where versions before 2026.11.08 kept the order, in each browser. */
+const OLD_ORDER_KEY = 'rustnvr.overview.order'
 
-/** Order of the cameras on the overview (identifiers), remembered by the browser; empty: default order. */
-function useCameraOrder(): [string[], (ids: string[]) => void] {
-  const [order, setOrder] = useState<string[]>(() => {
+function oldOrder(): string[] {
+  try {
+    const stored: unknown = JSON.parse(window.localStorage.getItem(OLD_ORDER_KEY) ?? '[]')
+    return Array.isArray(stored) ? stored.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Order of the cameras, kept on the server: the same on every device and
+ * for every account (the camera list already comes in that order). A drag
+ * shows the new order at once, until the server's list follows. Only
+ * administrators change it; the demo keeps it on the page.
+ */
+function useCameraOrder(cameras: Camera[], canChange: boolean) {
+  const demo = useIsDemo()
+  const saved = useAsync((signal) => (demo ? Promise.resolve({ cameras: [] as string[] }) : getCameraOrder(signal)), [demo])
+  const [pending, setPending] = useState<string[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const serverKey = cameras.map((c) => c.id).join('/')
+  // The server's list changed (saved order, camera added): it is the truth again.
+  useEffect(() => {
+    if (!demo) setPending(null)
+  }, [serverKey, demo])
+  const save = (ids: string[]) => {
+    setPending(ids)
+    setError(null)
+    if (demo) return
+    setCameraOrder(ids).then(saved.reload, (e: unknown) => {
+      setPending(null)
+      setError(describeError(e))
+    })
+  }
+  // The order a browser kept before, sent once to the server if none is set.
+  useEffect(() => {
+    const old = oldOrder()
+    if (old.length === 0 || demo || !canChange || !saved.data) return
     try {
-      const stored: unknown = JSON.parse(window.localStorage.getItem(ORDER_KEY) ?? '[]')
-      return Array.isArray(stored) ? stored.filter((x): x is string => typeof x === 'string') : []
+      window.localStorage.removeItem(OLD_ORDER_KEY)
     } catch {
-      return []
+      // Storage blocked: nothing to clean.
     }
-  })
-  return [
-    order,
-    (ids) => {
-      if (ids.length === 0) window.localStorage.removeItem(ORDER_KEY)
-      else window.localStorage.setItem(ORDER_KEY, JSON.stringify(ids))
-      setOrder(ids)
-    },
-  ]
+    if (saved.data.cameras.length === 0) save(old)
+  }, [saved.data, canChange, demo])
+  const custom = pending ? pending.length > 0 : (saved.data?.cameras.length ?? 0) > 0
+  return { shown: pending ? ordered(cameras, pending) : cameras, custom, save, error }
 }
 
 /** `cameras` in the chosen order; cameras not placed yet keep their default order, at the end. */
@@ -154,11 +186,8 @@ export function OverviewPage() {
   const error = useLive((s) => s.error)
   const system = useLive((s) => s.system)
   const storage = useStorage()
-  const [order, setOrder] = useCameraOrder()
-  const enabled = ordered(
-    cameras.filter((c) => c.enabled),
-    order,
-  )
+  const order = useCameraOrder(cameras, !viewer)
+  const enabled = order.shown.filter((c) => c.enabled)
   const online = enabled.filter((c) => c.status === 'online').length
   const onlineHistory = useOnlineHistory(online)
   // Disk of the default destination (where cameras record unless told
@@ -220,8 +249,8 @@ export function OverviewPage() {
               {t('Caméras', 'Cameras')}
             </h2>
             <div className="flex items-center gap-3">
-              {order.length > 0 && (
-                <Button size="sm" variant="ghost" title={t("Revenir à l'ordre des caméras de la configuration", "Back to the camera order of the configuration")} onClick={() => setOrder([])}>
+              {order.custom && !viewer && (
+                <Button size="sm" variant="ghost" title={t("Revenir à l'ordre des caméras de la configuration, pour tous les appareils", "Back to the camera order of the configuration, on every device")} onClick={() => order.save([])}>
                   {t('Ordre par défaut', 'Default order')}
                 </Button>
               )}
@@ -245,7 +274,10 @@ export function OverviewPage() {
               </EmptyState>
             </Card>
           ) : (
-            <CameraGrid cameras={enabled} columns={columns} onReorder={setOrder} />
+            <>
+              {order.error && <p className="mb-2 rounded-md border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{t("L'ordre n'a pas été enregistré : ", 'The order was not saved: ')}{order.error}</p>}
+              <CameraGrid cameras={enabled} columns={columns} onReorder={viewer ? undefined : (ids) => order.save([...ids, ...order.shown.filter((c) => !c.enabled).map((c) => c.id)])} />
+            </>
           )}
         </section>
         <aside className={`grid min-w-0 gap-4 lg:gap-5 ${wide ? 'lg:grid-cols-2' : 'grid-cols-1 content-start'}`}>

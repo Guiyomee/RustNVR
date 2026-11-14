@@ -30,6 +30,7 @@
 //! | `<p>/<camera>/line/<line>/present` | who is inside (lines counting the presence) | yes |
 //! | `<p>/<camera>/line/<line>/presence/reset` | any payload (command): count from zero again | — |
 //! | `<p>/<camera>/ptz/preset/set` | name of a PTZ preset (command): the motorised camera goes there | — |
+//! | `<p>/<camera>/ptz/move` | `left`, `right`, `up`, `down`, `zoom_in` or `zoom_out` (command): a short move of the motorised camera | — |
 //! | `<p>/detection` | `ON` / `OFF` (motion detection running, not paused) | yes |
 //! | `<p>/detection/set` | `ON` / `OFF` (command): resumes or pauses detection on every camera | — |
 //! | `<p>/cameras_online` | number | yes |
@@ -121,6 +122,73 @@ pub struct CameraView {
     pub presence: Vec<(String, u64)>,
     /// Names of the PTZ presets of a motorised camera (empty: no selector).
     pub ptz_presets: Vec<String>,
+    /// A motorised camera (it answered in ONVIF PTZ): move buttons.
+    pub ptz: bool,
+}
+
+/// A short move of a motorised camera (Home Assistant buttons).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PtzStep {
+    /// Turns left.
+    Left,
+    /// Turns right.
+    Right,
+    /// Tilts up.
+    Up,
+    /// Tilts down.
+    Down,
+    /// Zooms in.
+    ZoomIn,
+    /// Zooms out.
+    ZoomOut,
+}
+
+impl PtzStep {
+    /// Every step: payload, entity key, name and icon of its button.
+    pub(crate) const ALL: [(PtzStep, &'static str, &'static str, &'static str); 6] = [
+        (PtzStep::Left, "left", "PTZ gauche", "mdi:arrow-left-bold"),
+        (
+            PtzStep::Right,
+            "right",
+            "PTZ droite",
+            "mdi:arrow-right-bold",
+        ),
+        (PtzStep::Up, "up", "PTZ haut", "mdi:arrow-up-bold"),
+        (PtzStep::Down, "down", "PTZ bas", "mdi:arrow-down-bold"),
+        (
+            PtzStep::ZoomIn,
+            "zoom_in",
+            "PTZ zoom avant",
+            "mdi:magnify-plus",
+        ),
+        (
+            PtzStep::ZoomOut,
+            "zoom_out",
+            "PTZ zoom arrière",
+            "mdi:magnify-minus",
+        ),
+    ];
+
+    /// The step named by a `<p>/<camera>/ptz/move` payload.
+    pub fn parse(payload: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(payload).ok()?.trim();
+        Self::ALL
+            .iter()
+            .find(|(_, key, _, _)| key.eq_ignore_ascii_case(text))
+            .map(|(step, _, _, _)| *step)
+    }
+
+    /// Pan, tilt and zoom speeds of the step (-1..1).
+    pub fn velocity(self) -> (f32, f32, f32) {
+        match self {
+            PtzStep::Left => (-0.5, 0.0, 0.0),
+            PtzStep::Right => (0.5, 0.0, 0.0),
+            PtzStep::Up => (0.0, 0.5, 0.0),
+            PtzStep::Down => (0.0, -0.5, 0.0),
+            PtzStep::ZoomIn => (0.0, 0.0, 0.5),
+            PtzStep::ZoomOut => (0.0, 0.0, -0.5),
+        }
+    }
 }
 
 /// The record of a camera, for the Home Assistant device.
@@ -182,6 +250,8 @@ pub trait NvrView: Send + Sync + 'static {
     fn reset_presence(&self, camera: CameraId, label: String) -> BoxFuture<'_, Result<(), String>>;
     /// Sends a motorised camera to its preset named `name` (command from MQTT).
     fn ptz_goto(&self, camera: CameraId, name: String) -> BoxFuture<'_, Result<(), String>>;
+    /// Moves a motorised camera a little (command from MQTT).
+    fn ptz_step(&self, camera: CameraId, step: PtzStep) -> BoxFuture<'_, Result<(), String>>;
     /// Records `camera` all the time, on motion, or not at all (`None`)
     /// (command from MQTT).
     fn set_record_mode(
@@ -340,6 +410,7 @@ pub fn spawn_mqtt(
         announced: HashSet::new(),
         presence_labels: HashMap::new(),
         ptz_announced: HashSet::new(),
+        ptz_moves_announced: HashSet::new(),
         persons: HashSet::new(),
         dropped: 0,
     };
@@ -565,6 +636,8 @@ struct Client {
     presence_labels: HashMap<CameraId, Vec<String>>,
     /// Cameras whose PTZ preset selector is announced.
     ptz_announced: HashSet<CameraId>,
+    /// Cameras whose PTZ move buttons are announced.
+    ptz_moves_announced: HashSet<CameraId>,
     /// Messages dropped because the queue was full (logged once per burst).
     dropped: u64,
 }
@@ -626,12 +699,25 @@ impl Client {
         self.publish_ptz(c);
     }
 
-    /// Announces the PTZ preset selector of `c` (its presets as options), or
-    /// removes it when the camera has none.
+    /// Announces the PTZ preset selector of `c` (its presets as options) and
+    /// its move buttons, or removes them when the camera has none.
     fn publish_ptz(&mut self, c: &CameraView) {
         let Some(prefix) = self.settings.discovery_prefix.clone() else {
             return;
         };
+        if c.ptz {
+            for (topic, payload) in
+                discovery::ptz_move_configs(&prefix, &self.settings.client_id, &self.topics, c)
+            {
+                self.publish(topic, true, payload);
+            }
+            self.ptz_moves_announced.insert(c.id.clone());
+        } else if self.ptz_moves_announced.remove(&c.id) {
+            for topic in discovery::ptz_move_config_topics(&prefix, &self.settings.client_id, &c.id)
+            {
+                self.publish(topic, true, Vec::new());
+            }
+        }
         if c.ptz_presets.is_empty() {
             if self.ptz_announced.remove(&c.id) {
                 let topic = discovery::ptz_config_topic(&prefix, &self.settings.client_id, &c.id);
@@ -694,6 +780,13 @@ impl Client {
         {
             let topic = discovery::ptz_config_topic(&prefix, &self.settings.client_id, id);
             self.publish(topic, true, Vec::new());
+        }
+        if self.ptz_moves_announced.remove(id)
+            && let Some(prefix) = self.settings.discovery_prefix.clone()
+        {
+            for topic in discovery::ptz_move_config_topics(&prefix, &self.settings.client_id, id) {
+                self.publish(topic, true, Vec::new());
+            }
         }
         for label in self.presence_labels.remove(id).unwrap_or_default() {
             if let Some(prefix) = self.settings.discovery_prefix.clone() {
@@ -834,6 +927,7 @@ impl Client {
             "active/set",
             "line/+/presence/reset",
             "ptz/preset/set",
+            "ptz/move",
             "record_mode/set",
             "event/create",
             "capture/take",
@@ -912,6 +1006,19 @@ impl Client {
                         }
                     }
                     Err(e) => tracing::warn!(%camera, error = %e, "MQTT: capture failed"),
+                }
+            });
+            return;
+        }
+        if let Some(camera) = self.topics.camera_command(topic, "ptz/move") {
+            let Some(step) = PtzStep::parse(payload) else {
+                tracing::warn!(%camera, "MQTT: ignored PTZ move (expected left, right, up, down, zoom_in or zoom_out)");
+                return;
+            };
+            let view = self.view.clone();
+            tokio::spawn(async move {
+                if let Err(e) = view.ptz_step(camera.clone(), step).await {
+                    tracing::warn!(%camera, ?step, error = %e, "MQTT: PTZ move failed");
                 }
             });
             return;
@@ -1173,6 +1280,15 @@ mod tests {
         assert!(t.ptz_preset("home/nvr/garage/audio/set").is_none());
         assert!(t.ptz_preset("home/nvr/ptz/preset/set").is_none());
         assert_eq!(
+            t.camera_command("home/nvr/garage/ptz/move", "ptz/move")
+                .map(|c| c.to_string()),
+            Some("garage".to_owned())
+        );
+        assert_eq!(PtzStep::parse(b"left"), Some(PtzStep::Left));
+        assert_eq!(PtzStep::parse(b" ZOOM_IN\n"), Some(PtzStep::ZoomIn));
+        assert_eq!(PtzStep::parse(b"sideways"), None);
+        assert_eq!(PtzStep::Down.velocity(), (0.0, -0.5, 0.0));
+        assert_eq!(
             t.camera_command("home/nvr/garage/event/create", "event/create")
                 .map(|c| c.to_string()),
             Some("garage".to_owned())
@@ -1241,6 +1357,7 @@ mod tests {
             person_detection: false,
             presence: Vec::new(),
             ptz_presets: Vec::new(),
+            ptz: false,
         };
         assert_eq!(record_mode_name(&cam), "Sur mouvement");
         cam.recording = false;

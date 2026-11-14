@@ -5,7 +5,7 @@ précautions) sont sur la page de chaque
 [release](https://github.com/Guiyomee/RustNVR/releases). Versions
 « calendrier » : année.mois.numéro dans le mois.
 
-## Non publiée
+## 2026.11.08 (2026-11-13)
 
 ### Nouveautés
 - **Interface dans Home Assistant** (ingress) : RustNVR s'affiche dans la
@@ -14,9 +14,50 @@ précautions) sont sur la page de chaque
   RustNVR lit le préfixe `X-Ingress-Path` et l'applique à ses fichiers, à
   son API et à ses liens, et accepte d'être affiché dans une page de Home
   Assistant (même origine seulement). Voir
-  [Home Assistant](docs/HOME_ASSISTANT.md#interface-dans-home-assistant).
+  [le wiki](https://github.com/Guiyomee/RustNVR/wiki/FR-Home-Assistant).
+  Merci cddu33 (#11) !
+- **IA plus exigeante quand la caméra est en vision nocturne** (Paramètres →
+  IA → « Plus exigeante la nuit ») : au lieu d'heures fixes, le seuil de nuit
+  suit chaque caméra dès qu'elle passe en noir et blanc, y compris un jour
+  sombre ou dans un garage.
+- **Flèches PTZ dans Home Assistant** : boutons « PTZ gauche / droite / haut
+  / bas / zoom avant / zoom arrière » pour chaque caméra motorisée, à mettre
+  sur un tableau de bord ou dans une automatisation (« tourne vers le portail
+  quand on sonne »), en plus du choix des positions enregistrées.
+- **Ordre des caméras commun à tous les appareils** : l'ordre choisi en
+  glissant les vignettes de la vue d'ensemble est gardé par RustNVR, et non
+  plus par chaque navigateur ; ordinateur, téléphone et tous les comptes le
+  retrouvent, sur toutes les pages. Seuls les administrateurs le changent ;
+  l'ordre déjà choisi dans votre navigateur est repris. Le nombre de
+  caméras par ligne reste propre à chaque appareil.
+- **Vidéo dans les notifications** (Paramètres → Webhooks, Discord, ntfy et
+  Telegram : « Envoyer aussi une courte vidéo ») : quelques secondes de
+  l'événement (de 2 s avant à 15 s au plus), en second message environ une
+  minute après, le temps que l'enregistrement soit fini ; légère (H.264,
+  480 lignes) et masques de confidentialité compris.
+- **Recherche dans les événements** : jusqu'à 30 jours d'un coup, par
+  objet reconnu et par zone (choisissez une caméra pour filtrer ses zones),
+  la recherche étant faite par RustNVR. Sur la timeline, les événements avec
+  un objet reconnu sont marqués en vert et nommés (« Personne »), et leur
+  vignette s'affiche au survol.
+- **Programmation horaire** : la détection d'une caméra (onglet Détection →
+  « Programmation ») et les notifications d'un webhook ne fonctionnent que
+  les jours et aux heures choisis (par exemple la nuit, ou le week-end). En
+  dehors, pas d'événement ni de notification, et une caméra « sur
+  mouvement » n'enregistre pas, et la détection s'arrête (aucun calcul) ;
+  l'enregistrement continu et les pannes ne changent pas.
+- **Signets sur la timeline** (Lecture → « Signet ») : notez un moment
+  (« livraison colis ») ; il apparaît sur la timeline et dans la liste
+  « Signets du jour », d'où « Lire » y revient, sur tous les appareils.
 
 ### Corrections
+- **Coupure du NAS** : le segment en cours quand le NAS tombe n'est plus
+  perdu. Ses dernières secondes continuent sur le disque local, et ce qui
+  était déjà sur le NAS est récupéré quelques minutes après son retour, sans
+  attendre le prochain redémarrage de RustNVR.
+- **Arrêt brutal** (coupure de courant, plantage) : un événement en cours se
+  termine au dernier moment où RustNVR tournait (à 15 s près), et non plus à
+  son début (durée nulle).
 - La lecture d'une période (playlist HLS) désigne ses fichiers par des
   adresses relatives : elle fonctionne aussi derrière un préfixe.
 - Derrière un proxy en HTTP (Home Assistant sur `http://…:8123` avec

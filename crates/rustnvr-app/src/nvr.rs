@@ -3,6 +3,7 @@
 //! can be changed at run time through the API.
 
 mod backups;
+mod clips;
 mod detection;
 mod index;
 mod night;
@@ -34,7 +35,7 @@ use rustnvr_recorder::retention::{
 };
 use rustnvr_recorder::{
     Destination, DestinationStore, MotionGate, RecordTrigger, RecorderCore, RecorderHandle,
-    RecorderSettings, recover_tree, spawn_recorder,
+    RecorderSettings, recover_stale_tree, recover_tree, spawn_recorder,
 };
 use rustnvr_remote::{UploadStatus, UploaderHandle};
 use rustnvr_storage::Database;
@@ -273,6 +274,12 @@ impl Engine {
             debug!(camera = %rt.id, "motion detection paused");
             return;
         }
+        // Outside its schedule nothing would count: no decoding at all
+        // (`detection::run_schedules` starts it at the next range).
+        if !detection::scheduled(&settings.schedule) {
+            debug!(camera = %rt.id, "motion detection outside its schedule");
+            return;
+        }
         let Some(sink) = self.motion_sender() else {
             warn!(camera = %rt.id, "motion detection unavailable (database or FFmpeg missing)");
             return;
@@ -496,6 +503,10 @@ impl State {
                         Vec::new()
                     },
                     motion_enabled: self.motion.get(&cam.id).is_some_and(|m| m.enabled),
+                    motion_off_schedule: self
+                        .motion
+                        .get(&cam.id)
+                        .is_some_and(|m| m.enabled && !detection::scheduled(&m.schedule)),
                     record_audio: cam.record.audio,
                     privacy_masks: self
                         .motion
@@ -711,6 +722,35 @@ async fn set_record_mode(
     Ok(())
 }
 
+/// File in the data directory holding the last moment RustNVR was running
+/// (milliseconds), written every [`ALIVE_EVERY`]: after an abrupt stop, the
+/// events left open end there rather than at their start.
+const ALIVE_FILE: &str = "alive";
+const ALIVE_EVERY: Duration = Duration::from_secs(15);
+
+/// The last moment RustNVR was known to run, from [`ALIVE_FILE`].
+fn last_alive(data_dir: &Path) -> Option<i64> {
+    std::fs::read_to_string(data_dir.join(ALIVE_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Writes the time to [`ALIVE_FILE`] every [`ALIVE_EVERY`].
+async fn run_alive(data_dir: PathBuf, cancel: CancellationToken) {
+    let path = data_dir.join(ALIVE_FILE);
+    let mut ticker = tokio::time::interval(ALIVE_EVERY);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = ticker.tick() => {
+                let _ = tokio::fs::write(&path, unix_now_ms().to_string()).await;
+            }
+        }
+    }
+}
+
 /// Repairs interrupted segments on every available destination.
 async fn recover_all(storage: &Storage) {
     for (dest, _) in storage.all() {
@@ -757,7 +797,7 @@ impl Nvr {
         // Recording does not depend on the database: without it, only
         // events and motion detection are unavailable.
         let data_dir = config.storage.data_dir();
-        let database = match Database::open(&data_dir).await {
+        let database = match Database::open_after(&data_dir, last_alive(&data_dir)).await {
             Ok(db) => Some(db),
             Err(e) => {
                 warn!(dir = %data_dir.display(), error = %e, "cannot open the database: events and motion detection unavailable");
@@ -876,6 +916,11 @@ impl Nvr {
             )),
             tokio::spawn(ptz::read_all(shared.clone())),
             tokio::spawn(night::run(shared.clone(), cancel.child_token())),
+            tokio::spawn(detection::run_schedules(
+                shared.clone(),
+                cancel.child_token(),
+            )),
+            tokio::spawn(run_alive(shared.data_dir.clone(), cancel.child_token())),
         ];
         if let Some(db) = &database {
             background.push(tokio::spawn(index::run_indexer(
@@ -2037,6 +2082,10 @@ async fn start_web(
     if let Some(db) = &shared.database {
         state.set_database(db.clone());
         bootstrap_accounts(db, config_auth.as_ref(), &state).await;
+        match db.camera_order().await {
+            Ok(order) => state.set_camera_order(order),
+            Err(e) => warn!(error = %e, "camera order not read"),
+        }
     }
     state.set_ffmpeg_available(shared.ffmpeg_ok);
     state.set_trusted_proxies(web.proxies().map_err(anyhow::Error::msg)?);
@@ -2255,6 +2304,32 @@ async fn log_metrics(shared: Arc<Shared>, interval: Duration, cancel: Cancellati
     }
 }
 
+/// A segment interrupted on a destination that came back is recovered once
+/// left untouched this long (a segment being written changes every few
+/// seconds).
+const STALE_PART: Duration = Duration::from_secs(5 * 60);
+
+/// Recovers, a while after `dest` came back, the segments interrupted on it
+/// while it was away (the share went in the middle of a segment): without
+/// this they would wait for the next start of RustNVR.
+fn recover_after_outage(dest: &Destination) {
+    let (id, root) = (dest.id.clone(), dest.root.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(STALE_PART).await;
+        let Ok(report) =
+            tokio::task::spawn_blocking(move || recover_stale_tree(&root, STALE_PART)).await
+        else {
+            return;
+        };
+        if !report.recovered.is_empty() || !report.deleted.is_empty() {
+            info!(destination = %id, recovered = report.recovered.len(), deleted = report.deleted.len(), "recovered segments interrupted by the outage");
+        }
+        for (path, error) in &report.failed {
+            warn!(path = %path.display(), %error, "could not recover segment");
+        }
+    });
+}
+
 /// Longest wait for the check of one destination (a hung network share).
 const DESTINATION_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// First check after the start, once the webhooks and MQTT listen.
@@ -2341,7 +2416,10 @@ async fn run_disk_monitor(shared: Arc<Shared>, cancel: CancellationToken) {
             }
             match now {
                 Some(problem) => warn!(destination = %dest.id, %problem, "destination unusable"),
-                None => info!(destination = %dest.id, "destination usable again"),
+                None => {
+                    info!(destination = %dest.id, "destination usable again");
+                    recover_after_outage(dest);
+                }
             }
             let _ = shared.engine.events.send(NvrEvent::StorageState {
                 destination: dest.id.clone(),

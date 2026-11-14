@@ -454,6 +454,46 @@ pub(crate) fn ptz_config(
     )
 }
 
+/// Discovery topics of the PTZ move buttons of camera `cam`.
+pub(crate) fn ptz_move_config_topics(prefix: &str, client_id: &str, cam: &CameraId) -> Vec<String> {
+    crate::PtzStep::ALL
+        .iter()
+        .map(|(_, key, _, _)| {
+            config_topic(prefix, "button", client_id, &format!("{cam}_ptz_{key}"))
+        })
+        .collect()
+}
+
+/// Discovery messages of the PTZ move buttons of camera `c`: each press moves
+/// it a little (`<p>/<camera>/ptz/move`).
+pub(crate) fn ptz_move_configs(
+    prefix: &str,
+    client_id: &str,
+    topics: &Topics,
+    c: &CameraView,
+) -> Vec<(String, String)> {
+    let node = node_id(client_id);
+    crate::PtzStep::ALL
+        .iter()
+        .map(|(_, key, name, icon)| {
+            (
+                config_topic(prefix, "button", client_id, &format!("{}_ptz_{key}", c.id)),
+                json!({
+                    "name": name,
+                    "unique_id": format!("{node}_{}_ptz_{key}", c.id),
+                    "object_id": format!("{node}_{}_ptz_{key}", c.id),
+                    "icon": icon,
+                    "command_topic": topics.camera(&c.id, "ptz/move"),
+                    "payload_press": key,
+                    "device": camera_device(&node, c),
+                    "availability": [{ "topic": topics.availability() }],
+                })
+                .to_string(),
+            )
+        })
+        .collect()
+}
+
 /// Discovery messages of the presence of `line` of camera `c`: who is inside
 /// (sensor) and a reset button.
 pub(crate) fn presence_configs(
@@ -531,7 +571,25 @@ mod tests {
             person_detection: true,
             presence: vec![("Porte du garage".into(), 1)],
             ptz_presets: vec!["Portail".into(), "Allée".into()],
+            ptz: true,
         };
+        // PTZ moves: six buttons sending their direction.
+        let moves = ptz_move_configs("homeassistant", "rustnvr", &topics, &cam);
+        assert_eq!(moves.len(), 6);
+        assert_eq!(
+            moves.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(),
+            ptz_move_config_topics("homeassistant", "rustnvr", &cam.id)
+        );
+        assert_eq!(
+            moves[0].0,
+            "homeassistant/button/rustnvr/jardin_ptz_left/config"
+        );
+        let left: Value = serde_json::from_str(&moves[0].1).expect("json");
+        assert_eq!(left["command_topic"], "rustnvr/jardin/ptz/move");
+        assert_eq!(left["payload_press"], "left");
+        assert_eq!(left["name"], "PTZ gauche");
+        let zoom: Value = serde_json::from_str(&moves[5].1).expect("json");
+        assert_eq!(zoom["payload_press"], "zoom_out");
         // PTZ presets: a selector whose options are their names.
         let (topic, payload) = ptz_config("homeassistant", "rustnvr", &topics, &cam);
         assert_eq!(

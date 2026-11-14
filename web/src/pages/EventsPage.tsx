@@ -8,6 +8,8 @@ import { Card, PageHeader } from '../components/ui/Card'
 import { EmptyState, ErrorState, LoadingState, Unavailable } from '../components/ui/States'
 import { Segmented } from '../components/ui/Tabs'
 import { useCapability, useIsDemo, useLive } from '../data/DataContext'
+import { getMotion } from '../api/endpoints'
+import { useAsync } from '../hooks/useAsync'
 import { useEvents } from '../hooks/useEvents'
 import { useNow, useStoredFlag } from '../hooks/useUi'
 import { navigate } from '../lib/router'
@@ -19,6 +21,7 @@ const PERIODS = [
   { value: 6, label: '6 h' },
   { value: 24, label: '24 h' },
   { value: 168, label: t('7 j', '7 d') },
+  { value: 720, label: t('30 j', '30 d') },
 ] as const
 type PeriodHours = (typeof PERIODS)[number]['value']
 const PAGE = 60
@@ -41,7 +44,11 @@ export function EventsPage() {
   const [showStats, setShowStats] = useStoredFlag('rustnvr.events.stats', true)
   const demo = useIsDemo()
   const [limit, setLimit] = useState(PAGE)
-  const query = useMemo(() => ({ camera: camera || null, fromMs: now - hours * 3_600_000, toMs: now, kinds }), [camera, hours, kinds, now])
+  const [zone, setZone] = useState('')
+  // Zones of the chosen camera, to search its events by zone.
+  const motion = useAsync(() => (camera && !demo ? getMotion(camera).catch(() => null) : Promise.resolve(null)), [camera, demo])
+  const zoneNames = motion.data?.zones.map((z) => z.name) ?? []
+  const query = useMemo(() => ({ camera: camera || null, fromMs: now - hours * 3_600_000, toMs: now, kinds, zones: zone ? [zone] : null }), [camera, hours, kinds, now, zone])
   const events = useEvents(query)
   const names = useMemo(() => new Map(cameras.map((c) => [c.id, c.name])), [cameras])
   const open = (cam: string, t: number) => navigate(`/playback?camera=${encodeURIComponent(cam)}&t=${t}`)
@@ -87,7 +94,7 @@ export function EventsPage() {
       <Card className="mb-4 flex flex-wrap items-center gap-4 p-3">
         <label className="flex items-center gap-2 text-sm">
           <span className="text-muted">{t('Caméra', 'Camera')}</span>
-          <select className="h-8 rounded-md border border-line bg-bg-2 px-2 text-sm" value={camera} onChange={(e) => (setCamera(e.target.value), setLimit(PAGE))}>
+          <select className="h-8 rounded-md border border-line bg-bg-2 px-2 text-sm" value={camera} onChange={(e) => (setCamera(e.target.value), setZone(''), setLimit(PAGE))}>
             <option value="">{t('Toutes', 'All')}</option>
             {cameras.map((c) => (
               <option key={c.id} value={c.id}>
@@ -96,6 +103,19 @@ export function EventsPage() {
             ))}
           </select>
         </label>
+        {zoneNames.length > 0 && (
+          <label className="flex items-center gap-2 text-sm">
+            <span className="text-muted">{t('Zone', 'Zone')}</span>
+            <select className="h-8 rounded-md border border-line bg-bg-2 px-2 text-sm" value={zone} onChange={(e) => (setZone(e.target.value), setLimit(PAGE))}>
+              <option value="">{t('Toutes', 'All')}</option>
+              {zoneNames.map((z) => (
+                <option key={z} value={z}>
+                  {z}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <div className="flex items-center gap-2 text-sm">
           <span className="text-muted">{t('Période', 'Period')}</span>
           <Segmented label={t('Période', 'Period')} options={[...PERIODS]} value={hours} onChange={(h) => (setHours(h), setLimit(PAGE))} />

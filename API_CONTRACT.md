@@ -115,7 +115,7 @@ Ce que le serveur sait réellement faire. L'interface s'en sert pour afficher
 ```json
 { "api_version": 1, "live_video": true, "live_transcode": true, "live_webrtc": true, "snapshots": true, "events": true,
   "motion_detection": true, "camera_management": true, "camera_probe": true,
-  "recordings": true, "export": true, "protect": true, "retention": true, "settings_write": true,
+  "recordings": true, "export": true, "protect": true, "bookmarks": true, "retention": true, "settings_write": true,
   "mqtt": true, "ai": false, "users": true, "audit": true, "backup": true, "ptz": true,
   "usb_cameras": true, "restream_port": 8554, "restream_local_only": false }
 ```
@@ -247,8 +247,9 @@ des seuils (couleur moyenne ≤ 2,5 : nuit, ≥ 5 : jour). `codec`, `width`, `he
 renseignés qu'en `online`. `recorder` est `null` si l'enregistrement est
 désactivé. 404 si la caméra n'existe pas.
 
-`motion` : `{ "enabled", "paused", "running", "active", "error" }` — détection
-activée pour cette caméra, détection en pause sur toutes les caméras (voir
+`motion` : `{ "enabled", "off_schedule", "paused", "running", "active", "error" }` — détection
+activée pour cette caméra, hors des plages de sa programmation en ce moment
+(arrêtée jusqu'à la suivante), détection en pause sur toutes les caméras (voir
 `PUT /detection/pause`), images en cours d'analyse, événement en cours,
 dernière erreur du décodeur.
 
@@ -258,9 +259,27 @@ dernière erreur du décodeur.
 `onvif_port`), **jamais le mot de passe**. Pour les caméras de `config.toml`,
 `edit` est `null`.
 
+La liste suit l'ordre choisi dans l'interface (`PUT /camera-order`), puis
+celui de la configuration pour les caméras qui n'y sont pas.
+
 `ptz` : un service ONVIF est réglé pour la caméra (`onvif` dans la
 configuration) ; l'interface propose alors le pilotage PTZ. Que la caméra
 soit vraiment motorisée ne se sait qu'en l'interrogeant (`GET …/ptz`).
+
+### `GET /api/v1/camera-order` · `PUT /api/v1/camera-order`
+
+```json
+{ "cameras": ["portail", "jardin", "garage"] }
+```
+
+Ordre des caméras choisi dans l'interface (glisser-déposer de la vue
+d'ensemble), gardé dans la base : le même sur tous les appareils et pour
+tous les comptes. `GET` le donne (liste vide : ordre de la configuration) ;
+`PUT` (administrateurs) le remplace — identifiants valides, sans doublon,
+1000 au plus, sinon 400 ; liste vide : retour à l'ordre de la
+configuration ; 503 sans base de données. Les caméras absentes de la liste
+viennent ensuite, dans l'ordre de la configuration. Le changement est
+annoncé sur le WebSocket (`cameras`).
 
 ### `POST /api/v1/cameras` · `PUT /api/v1/cameras/{id}` · `DELETE /api/v1/cameras/{id}`
 
@@ -473,6 +492,22 @@ de H.265 2304×1296 sur un processeur de bureau), gardée en cache (24 h, 2 Go
 au plus, dans `<data_dir>/h264-cache`), puis servie avec `Range`. 503 si
 `live.transcode = false`. L'interface l'utilise d'elle-même : fichier par
 fichier, en préparant le suivant pendant la lecture.
+
+### `GET /api/v1/bookmarks?from={ms}&to={ms}[&camera=]` · `POST /api/v1/bookmarks` · `DELETE /api/v1/bookmarks/{id}`
+
+```json
+{ "id": 4, "camera": "portail", "at_ms": 1793557400000, "note": "Livraison colis",
+  "author": "admin", "created_ms": 1793560000000 }
+```
+
+Signets de la timeline : un moment d'une caméra avec une note, pour le
+retrouver sans tout relire. Nécessite la base de données
+(`capabilities.bookmarks`, sinon 503). `GET` : les signets de la période
+(31 jours au plus, 2000 au plus), du plus ancien au plus récent, sur les
+caméras que voit le compte. `POST` (administrateurs) : `{ "camera", "at_ms",
+"note" }`, note de 1 à 200 caractères ; 201 et le signet ; `author` est le
+compte connecté. `DELETE` : 204, 404 si inconnu. Un signet ne protège pas la
+vidéo de la rétention, et reste quand elle est effacée.
 
 ### `GET /api/v1/protected` · `POST /api/v1/protected` · `DELETE /api/v1/protected/{id}`
 
@@ -825,6 +860,20 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   ses appels (`motion`, `objects`, `end`), les suivants sont sautés en
   entier ; les passages de ligne ont leur propre délai ; `storage`,
   `camera` et `recording` ne sont jamais retenus.
+- `clip` (facultatif, `false` par défaut ; Discord, ntfy et Telegram) : une
+  courte vidéo de chaque événement appelé est envoyée en plus, dans un second
+  message, une fois son enregistrement fini (le segment se ferme : environ
+  une minute après, 5 minutes au plus d'attente). De 2 s avant le début à la
+  fin de l'événement, entre 5 et 13 s après le début ; H.264 de 480 lignes au
+  plus, son AAC, masques de confidentialité incrustés, 9 Mo au plus (sinon pas
+  envoyé). Discord : pièce jointe `evenement.mp4` ; ntfy : pièce jointe ;
+  Telegram : `sendVideo`. Une vidéo à la fois est convertie. Pas de vidéo pour
+  le JSON de RustNVR.
+- `schedule` (facultatif, vide par défaut : tout le temps) : plages où les
+  détections sont appelées (`motion`, `objects`, `end`, `crossing`), même
+  forme que le `schedule` d'une caméra (voir `/cameras/{id}/motion`). Un
+  événement suit la plage de son heure de début (envoyé en entier ou pas du
+  tout) ; `storage`, `camera` et `recording` passent toujours.
 - `cameras` vide : toutes ; `objects` vide : tous les événements. Avec des
   objets, les appels `motion` sont sautés, `objects` / `end` n'ont lieu que
   si l'un de ces objets a été reconnu, et `crossing` seulement pour un passage
@@ -985,7 +1034,7 @@ l'interface et appliqués sans redémarrage :
 { "settings": { "provider": { "type": "onnx", "model": "/var/lib/rustnvr/models/yolox_nano.onnx" },
                 "min_score": 0.5, "labels": ["person", "car"], "timeout_seconds": 10,
                 "max_pictures": 5, "interval_seconds": 3,
-                "night": { "min_score": 0.75, "from": "20:00", "to": "07:00" } },
+                "night": { "min_score": 0.75, "when": "hours", "from": "20:00", "to": "07:00" } },
   "active": "onnx", "device": "CPU", "error": null, "onnx_available": true,
   "detection_ready": true, "managed": true,
   "models": [{ "id": "yolox_nano", "name": "YOLOX-nano", "bytes": 3659407, "license": "Apache-2.0", "hint": "Le plus léger : …",
@@ -994,7 +1043,11 @@ l'interface et appliqués sans redémarrage :
 
 - `night` (facultatif, `null` : aucun) : de `from` à `to` (heure locale du
   serveur, `HH:MM`, à cheval sur minuit quand `from` est plus tard), un objet
-  doit atteindre `night.min_score` au lieu de `min_score`.
+  doit atteindre `night.min_score` au lieu de `min_score`. Avec `when:
+  "night_vision"` (`"hours"` par défaut), la nuit d'une caméra est le temps où
+  elle filme en vision nocturne (`night` de la caméra) ; les heures servent
+  tant que ce n'est pas encore mesuré, et pour le rejeu sur les images
+  gardées.
 - `PUT` prend l'objet `settings` (sans `provider` : reconnaissance coupée ;
   `{"type":"deepstack_http","url":"…","api_key_env":"…"}` pour CodeProject.AI).
   Le fournisseur est démarré avant l'enregistrement : un modèle absent ou
@@ -1066,6 +1119,18 @@ valent aussi pour les caméras de `config.toml`.
 
 - `sensitivity` : 1 (seuls les grands changements contrastés) à 100 (le
   moindre changement) ; sans zone, elle s'applique à toute l'image.
+- `schedule` : plages où les mouvements et les passages comptent, 16 au
+  plus, `{ "days": [1, 2, 3, 4, 5], "from": "08:00", "to": "18:00" }` —
+  `days` de 1 (lundi) à 7 (dimanche), vide : tous les jours ; heures locales
+  du serveur ; `to` plus tôt que `from` : jusqu'au lendemain (`22:00` →
+  `06:00`, les jours cités sont ceux du début) ; égales : toute la journée.
+  Vide (défaut) : tout le temps. En dehors des plages, un mouvement qui
+  commence est ignoré jusqu'à sa fin (ni événement, ni notification, ni
+  enregistrement d'une caméra « sur mouvement ») ; un passage aussi. Les
+  événements manuels et l'enregistrement continu ne changent pas. Hors plage,
+  la détection est arrêtée (aucun décodage) et reprend à la plage suivante
+  (vérifié toutes les 30 s) ; `motion.off_schedule` vaut alors `true` dans
+  `GET /cameras`.
 - `objects` : objets à reconnaître pour cette caméra (IA optionnelle), parmi
   les `labels` de `[ai]` ; vide ou absent : tous.
 - `zones` : 8 au plus, 3 à 32 points chacune, coordonnées en fractions de
@@ -1124,7 +1189,7 @@ après 2 images consécutives avec mouvement, se termine après
 `motion.post_seconds` sans mouvement (sa fin est le dernier mouvement vu) et
 est découpé au-delà de `motion.max_event_seconds`.
 
-### `GET /api/v1/events?camera=&from=&to=&limit=`
+### `GET /api/v1/events?camera=&from=&to=&limit=&objects=&zones=`
 
 Événements chevauchant `[from, to)` (par défaut les dernières 24 h), du plus
 récent au plus ancien ; `kind` : `motion`, ou `manual` (bouton Home
@@ -1132,6 +1197,12 @@ Assistant « Créer un événement », commande MQTT `<p>/<caméra>/event/create
 score 0, sans zones ; non compté dans les statistiques d'activité) ; `limit` 200 par défaut, 1000 au plus ; 31 jours au plus
 par requête. Un événement en cours a `end_ms: null`. 503 si la base de données
 n'a pas pu être ouverte.
+
+Recherche faite par le serveur (sur un mois entier, avant `limit`) :
+`objects=person,dog` ne garde que les événements où l'un de ces objets a été
+reconnu ; `zones=Allée,Portail` ceux qui ont bougé dans l'une de ces zones,
+ou dont un objet reconnu y est. Valeurs séparées par des virgules, 64 au
+plus, 64 caractères chacune.
 
 ```json
 [ { "id": "42", "camera": "jardin", "kind": "motion",

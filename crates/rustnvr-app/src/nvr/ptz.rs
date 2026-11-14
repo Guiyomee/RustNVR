@@ -23,6 +23,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MOVE_LIMIT: Duration = Duration::from_secs(10);
 /// Longest preset name.
 const MAX_PRESET_NAME: usize = 64;
+/// How long a step of the Home Assistant buttons moves the camera.
+const STEP: Duration = Duration::from_millis(600);
 
 /// Open sessions, by camera, with the address and user they were opened
 /// for; the last presets read, by camera.
@@ -33,6 +35,8 @@ pub(super) struct Sessions {
     /// The records of the cameras, as last read (any ONVIF camera, with or
     /// without PTZ).
     devices: std::sync::Mutex<HashMap<String, CameraDevice>>,
+    /// Cameras that answered in ONVIF PTZ (motorised).
+    motorised: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Sessions {
@@ -55,11 +59,31 @@ impl Sessions {
             .unwrap_or_default()
     }
 
-    /// Keeps the presets of `camera`; whether they changed.
+    /// Whether `camera` answered in ONVIF PTZ.
+    pub(super) fn is_motorised(&self, camera: &str) -> bool {
+        self.motorised
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(camera)
+    }
+
+    /// Notes whether `camera` is motorised; whether that changed.
+    fn set_motorised(&self, camera: &str, motorised: bool) -> bool {
+        let mut all = self.motorised.lock().unwrap_or_else(|e| e.into_inner());
+        if motorised {
+            all.insert(camera.to_owned())
+        } else {
+            all.remove(camera)
+        }
+    }
+
+    /// Keeps the presets of `camera` (so it is motorised); whether they
+    /// changed.
     fn keep(&self, camera: &str, presets: &[PtzPreset]) -> bool {
+        let newly = self.set_motorised(camera, true);
         let mut all = self.presets.lock().unwrap_or_else(|e| e.into_inner());
         if all.get(camera).is_some_and(|p| p == presets) {
-            return false;
+            return newly;
         }
         all.insert(camera.to_owned(), presets.to_vec());
         true
@@ -231,8 +255,12 @@ where
 /// The presets of `camera`, read from it (and kept: a change updates the
 /// Home Assistant selector).
 pub(super) async fn presets(shared: &Shared, camera: &str) -> Result<Vec<PtzPreset>, ControlError> {
-    let presets: Vec<PtzPreset> = with_camera(shared, camera, |c| async move { c.presets().await })
-        .await?
+    let read = with_camera(shared, camera, |c| async move { c.presets().await }).await;
+    // No PTZ service: not motorised (any move buttons go away).
+    if matches!(read, Err(ControlError::NotFound(_))) && shared.ptz.set_motorised(camera, false) {
+        let _ = shared.engine.events.send(NvrEvent::CamerasChanged);
+    }
+    let presets: Vec<PtzPreset> = read?
         .into_iter()
         .map(|p| PtzPreset {
             token: p.token,
@@ -293,6 +321,25 @@ pub(super) async fn read_all(shared: Arc<Shared>) {
             Err(e) => debug!(camera, error = %e, "PTZ presets not read"),
         }
     }
+}
+
+/// Moves `camera` a little: a continuous move of [`STEP`], then a stop
+/// (Home Assistant buttons).
+pub(super) async fn step(
+    shared: &Shared,
+    camera: &str,
+    pan: f32,
+    tilt: f32,
+    zoom: f32,
+) -> Result<(), ControlError> {
+    command(
+        shared,
+        camera,
+        PtzCommand::Move(rustnvr_api::control::PtzMove { pan, tilt, zoom }),
+    )
+    .await?;
+    tokio::time::sleep(STEP).await;
+    command(shared, camera, PtzCommand::Stop).await
 }
 
 /// Moves `camera`, or changes its presets.

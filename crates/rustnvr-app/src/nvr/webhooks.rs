@@ -43,6 +43,8 @@ const FOLLOWED: usize = 500;
 
 /// Name of the picture attached to Discord, ntfy and Telegram messages.
 const DISCORD_PICTURE: &str = "evenement.jpg";
+/// Name of the video clip attached to them.
+const CLIP_FILE: &str = "evenement.mp4";
 /// Telegram's bot API.
 const TELEGRAM_API: &str = "https://api.telegram.org";
 /// Longest caption of a Telegram photo (characters).
@@ -59,6 +61,13 @@ enum Body {
     Message {
         payload: Value,
         jpeg: Option<Bytes>,
+        delivery: Delivery,
+    },
+    /// A short video of an event (`clip`), as a message with the MP4
+    /// attached (Discord, ntfy, Telegram).
+    Clip {
+        payload: Value,
+        mp4: Bytes,
         delivery: Delivery,
     },
 }
@@ -217,7 +226,7 @@ fn ntfy_request(
     client: &reqwest::Client,
     hook: &WebhookConfig,
     payload: &Value,
-    jpeg: Option<&Bytes>,
+    attachment: Option<(&Bytes, &'static str)>,
     delivery: Delivery,
 ) -> Result<reqwest::RequestBuilder, Failure> {
     let note = note(payload);
@@ -246,9 +255,9 @@ fn ntfy_request(
             }
             None => {}
         }
-        if jpeg.is_some() {
+        if let Some((_, name)) = attachment {
             query.append_pair("message", &text);
-            query.append_pair("filename", DISCORD_PICTURE);
+            query.append_pair("filename", name);
         }
     }
     let mut request = client.post(url);
@@ -260,8 +269,8 @@ fn ntfy_request(
     {
         request = request.bearer_auth(token);
     }
-    Ok(match jpeg {
-        Some(jpeg) => request.body(jpeg.clone()),
+    Ok(match attachment {
+        Some((bytes, _)) => request.body(bytes.clone()),
         None => request.body(text),
     })
 }
@@ -329,6 +338,48 @@ fn telegram_request(
     })
 }
 
+/// The Telegram message of a clip: a video with the message as its caption.
+fn telegram_video_request(
+    client: &reqwest::Client,
+    hook: &WebhookConfig,
+    payload: &Value,
+    mp4: &Bytes,
+    delivery: Delivery,
+) -> Result<reqwest::RequestBuilder, Failure> {
+    let note = note(payload);
+    let token = hook.token.as_deref().unwrap_or_default().trim();
+    let chat = hook
+        .chat_id
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let room = TELEGRAM_CAPTION.saturating_sub(note.title.chars().count() + 2);
+    let body: String = note.text.chars().take(room).collect();
+    let mut text = format!("<b>{}</b>", telegram_escape(&note.title));
+    if !body.is_empty() {
+        text.push('\n');
+        text.push_str(&telegram_escape(&body));
+    }
+    let video = reqwest::multipart::Part::bytes(mp4.to_vec())
+        .file_name(CLIP_FILE)
+        .mime_str("video/mp4")
+        .map_err(|_| Failure {
+            status: None,
+            message: "échec de l'envoi".to_owned(),
+        })?;
+    let form = reqwest::multipart::Form::new()
+        .text("chat_id", chat)
+        .text("caption", text)
+        .text("parse_mode", "HTML")
+        .text("supports_streaming", "true")
+        .text("disable_notification", delivery.silent.to_string())
+        .part("video", video);
+    Ok(client
+        .post(format!("{TELEGRAM_API}/bot{token}/sendVideo"))
+        .multipart(form))
+}
+
 /// One call to make.
 struct Call {
     hook: WebhookConfig,
@@ -363,7 +414,42 @@ async fn post(client: &reqwest::Client, hook: &WebhookConfig, body: &Body) -> Re
                 jpeg,
                 delivery,
             },
-        ) => ntfy_request(client, hook, payload, jpeg.as_ref(), *delivery)?,
+        ) => ntfy_request(
+            client,
+            hook,
+            payload,
+            jpeg.as_ref().map(|j| (j, DISCORD_PICTURE)),
+            *delivery,
+        )?,
+        (
+            WebhookKind::Ntfy,
+            Body::Clip {
+                payload,
+                mp4,
+                delivery,
+            },
+        ) => ntfy_request(client, hook, payload, Some((mp4, CLIP_FILE)), *delivery)?,
+        (
+            WebhookKind::Telegram,
+            Body::Clip {
+                payload,
+                mp4,
+                delivery,
+            },
+        ) => telegram_video_request(client, hook, payload, mp4, *delivery)?,
+        (_, Body::Clip { payload, mp4, .. }) => {
+            let video = reqwest::multipart::Part::bytes(mp4.to_vec())
+                .file_name(CLIP_FILE)
+                .mime_str("video/mp4")
+                .map_err(|_| Failure {
+                    status: None,
+                    message: "échec de l'envoi".to_owned(),
+                })?;
+            let form = reqwest::multipart::Form::new()
+                .text("payload_json", payload.to_string())
+                .part("files[0]", video);
+            client.post(&hook.url).multipart(form)
+        }
         (
             WebhookKind::Telegram,
             Body::Message {
@@ -486,9 +572,20 @@ struct Sent {
     objects: bool,
 }
 
-/// Whether `hook` wants the `kind` call for `event`.
+/// Whether the schedule of `hook` covers `at_ms` (local time of the
+/// server): always without ranges.
+fn in_schedule(hook: &WebhookConfig, at_ms: i64) -> bool {
+    if hook.schedule.is_empty() {
+        return true;
+    }
+    let (day, minute) = super::detection::week_minute_at(at_ms);
+    rustnvr_core::schedule::active(&hook.schedule, day, minute)
+}
+
+/// Whether `hook` wants the `kind` call for `event` (the whole event follows
+/// the schedule at its start).
 fn wanted(hook: &WebhookConfig, kind: WebhookEvent, event: &DetectionEvent) -> bool {
-    if !hook.enabled || !hook.events.contains(&kind) {
+    if !hook.enabled || !hook.events.contains(&kind) || !in_schedule(hook, event.start_ms) {
         return false;
     }
     if !hook.cameras.is_empty() && !hook.cameras.iter().any(|c| c == event.camera.as_str()) {
@@ -1317,9 +1414,15 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
     let mut failures = Failures::default();
     let mut cooldowns = Cooldowns::default();
     let mut ticker = tokio::time::interval(AVAILABILITY_CHECK);
+    // Clips are made off the loop (they wait for the recordings), then queued.
+    let (clip_tx, mut clips) = mpsc::channel::<(WebhookConfig, Body)>(16);
     loop {
         let event = tokio::select! {
             _ = cancel.cancelled() => return,
+            Some((hook, body)) = clips.recv() => {
+                queues.push(&hook, body);
+                continue;
+            }
             _ = ticker.tick() => None,
             e = events.recv() => match e {
                 Ok(e @ (NvrEvent::Detection(_)
@@ -1427,6 +1530,7 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                 };
                 for hook in hooks.iter().filter(|h| {
                     wants_crossing(h, call.camera, call.object)
+                        && in_schedule(h, at_ms)
                         && cooldowns.crossing(h, call.camera, now)
                 }) {
                     let jpeg = picture.as_ref().filter(|_| hook.image);
@@ -1493,6 +1597,22 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
             continue;
         }
         let camera_name = camera_name(&shared, &event.camera).await;
+        if event.end_ms.is_some() {
+            let wanting: Vec<WebhookConfig> = hooks
+                .iter()
+                .filter(|h| wants_clip(h, &event) && cooldowns.event(h, &event, now))
+                .cloned()
+                .collect();
+            if !wanting.is_empty() {
+                tokio::spawn(send_clip(
+                    shared.clone(),
+                    event.clone(),
+                    camera_name.clone(),
+                    wanting,
+                    clip_tx.clone(),
+                ));
+            }
+        }
         for kind in kinds {
             let targets: Vec<&WebhookConfig> = hooks
                 .iter()
@@ -1513,6 +1633,83 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                     request(hook, kind_name(kind), &event, &camera_name, jpeg),
                 );
             }
+        }
+    }
+}
+
+/// Whether `hook` wants the clip of `event`: a messaging webhook with
+/// `clip`, called for its detections (motion or objects), and the event
+/// passes its filters.
+fn wants_clip(hook: &WebhookConfig, event: &DetectionEvent) -> bool {
+    hook.clip
+        && gets_messages(hook)
+        && (wanted(hook, WebhookEvent::Objects, event) || wanted(hook, WebhookEvent::Motion, event))
+}
+
+/// The message of the clip of `event` (a Discord message, rendered for ntfy
+/// and Telegram).
+fn clip_discord(event: &DetectionEvent, camera_name: &str) -> Value {
+    let vars = event_vars(event, camera_name);
+    let var = |name: &str| {
+        vars.iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    let start = when_vars(event.start_ms);
+    let heure = start
+        .iter()
+        .find(|(n, _)| *n == "heure")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    let mut text = format!("Vidéo de {heure}");
+    let duree = var("duree");
+    if !duree.is_empty() {
+        text.push_str(&format!(" · événement de {duree}"));
+    }
+    json!({
+        "username": "RustNVR",
+        "embeds": [{
+            "title": format!("🎬 {} · {camera_name}", var("objet")),
+            "description": text,
+            "color": 0x3B_82_F6,
+        }],
+    })
+}
+
+/// Makes the clip of `event` (once its recordings are finished) and hands
+/// it to the webhooks that want it.
+async fn send_clip(
+    shared: Arc<Shared>,
+    event: DetectionEvent,
+    camera_name: String,
+    hooks: Vec<WebhookConfig>,
+    out: mpsc::Sender<(WebhookConfig, Body)>,
+) {
+    let mp4 = match super::clips::event_clip(&shared, &event).await {
+        Ok(mp4) => mp4,
+        Err(e) => {
+            warn!(camera = %event.camera, id = event.id, error = %e, "event clip not made");
+            return;
+        }
+    };
+    let payload = clip_discord(&event, &camera_name);
+    for hook in hooks {
+        let silent = hook
+            .messages
+            .get(&WebhookEvent::Objects)
+            .or_else(|| hook.messages.get(&WebhookEvent::Motion))
+            .is_some_and(|m| m.silent);
+        let body = Body::Clip {
+            payload: payload.clone(),
+            mp4: mp4.clone(),
+            delivery: Delivery {
+                priority: None,
+                silent,
+            },
+        };
+        if out.send((hook, body)).await.is_err() {
+            return;
         }
     }
 }
@@ -1618,6 +1815,8 @@ mod tests {
             image: true,
             messages: Default::default(),
             cooldown_minutes: 0,
+            schedule: Vec::new(),
+            clip: false,
         }
     }
 
@@ -1641,6 +1840,95 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn clips_go_as_videos_to_messaging_webhooks() {
+        let ended = DetectionEvent {
+            end_ms: Some(9_001),
+            ..event("jardin", &["person"])
+        };
+        let telegram = WebhookConfig {
+            url: String::new(),
+            kind: Some(WebhookKind::Telegram),
+            token: Some("123:AAH-secret".into()),
+            chat_id: Some("42".into()),
+            clip: true,
+            ..hook()
+        };
+        assert!(wants_clip(&telegram, &ended));
+        let off = WebhookConfig {
+            clip: false,
+            ..telegram.clone()
+        };
+        assert!(!wants_clip(&off, &ended));
+        // RustNVR's JSON gets no video.
+        let json = WebhookConfig {
+            clip: true,
+            ..hook()
+        };
+        assert!(!wants_clip(&json, &ended));
+        // Only for the events the webhook is called for.
+        let cars = WebhookConfig {
+            objects: vec!["car".into()],
+            ..telegram.clone()
+        };
+        assert!(!wants_clip(&cars, &ended));
+
+        let payload = clip_discord(&ended, "Jardin");
+        let title = payload["embeds"][0]["title"].as_str().expect("title");
+        assert!(title.contains("Personne · Jardin"), "{title}");
+        let mp4 = Bytes::from_static(b"mp4");
+        let video =
+            telegram_video_request(&client(), &telegram, &payload, &mp4, Delivery::default())
+                .expect("request")
+                .build()
+                .expect("build");
+        assert!(video.url().as_str().ends_with("/sendVideo"));
+        let ntfy = WebhookConfig {
+            url: "https://ntfy.sh/maison".into(),
+            kind: Some(WebhookKind::Ntfy),
+            ..hook()
+        };
+        let r = ntfy_request(
+            &client(),
+            &ntfy,
+            &payload,
+            Some((&mp4, CLIP_FILE)),
+            Delivery::default(),
+        )
+        .expect("request")
+        .build()
+        .expect("build");
+        assert!(
+            r.url()
+                .query()
+                .unwrap_or_default()
+                .contains("filename=evenement.mp4")
+        );
+    }
+
+    #[test]
+    fn the_schedule_follows_the_start_of_the_event() {
+        let e = event("jardin", &[]);
+        let (day, _) = super::super::detection::week_minute_at(e.start_ms);
+        let range = |day: u8| rustnvr_core::schedule::TimeRange {
+            days: vec![day],
+            from: "00:00".into(),
+            to: "00:00".into(),
+        };
+        let that_day = WebhookConfig {
+            schedule: vec![range(day)],
+            ..hook()
+        };
+        assert!(wanted(&that_day, WebhookEvent::Motion, &e));
+        let other_day = WebhookConfig {
+            schedule: vec![range(day % 7 + 1)],
+            ..hook()
+        };
+        assert!(!wanted(&other_day, WebhookEvent::Motion, &e));
+        assert!(!wanted(&other_day, WebhookEvent::End, &e));
+        assert!(in_schedule(&hook(), e.start_ms), "no schedule: always");
     }
 
     #[test]

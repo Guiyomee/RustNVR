@@ -66,6 +66,7 @@ async fn start(live: bool) -> (ApiServer, FrameFanout) {
         record_mode: Default::default(),
         retention: Default::default(),
         motion: None,
+        motion_off_schedule: false,
     }];
     let state = ApiState::new(
         cameras,
@@ -192,6 +193,7 @@ async fn h265_source(settings: LiveSettings) -> (ApiServer, tokio::task::JoinHan
         record_mode: Default::default(),
         retention: Default::default(),
         motion: None,
+        motion_off_schedule: false,
     }];
     let state = ApiState::new(cameras, std::env::temp_dir(), event_bus(8), None, settings);
     let server = ApiServer::start("127.0.0.1:0".parse().unwrap(), state, "/nonexistent".into())

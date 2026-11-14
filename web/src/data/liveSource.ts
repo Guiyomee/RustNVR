@@ -122,10 +122,10 @@ export function createLiveSource(): DataSource {
       // (optional AI provider).
       if (q.kinds?.length === 0) return []
       try {
-        const all = await getEvents({ camera: q.camera, fromMs: q.fromMs, toMs: q.toMs })
+        // Objects and zones are searched by the server: a whole month fits.
         const kinds = q.kinds
-        if (!kinds || kinds.includes('motion')) return all
-        return all.filter((e) => e.objects.some((o) => kinds.some((k) => OBJECT_KINDS[k]?.includes(o.label))))
+        const objects = !kinds || kinds.includes('motion') ? null : kinds.flatMap((k) => OBJECT_KINDS[k] ?? [])
+        return await getEvents({ camera: q.camera, fromMs: q.fromMs, toMs: q.toMs, limit: 1000, objects, zones: q.zones ?? null })
       } catch (e) {
         if (e instanceof ApiError && e.status === 503) {
           throw new UnavailableError('GET /api/v1/events', t("Ce serveur n'enregistre pas d'événements (base de données indisponible).", "This server does not record events (database unavailable)."))
