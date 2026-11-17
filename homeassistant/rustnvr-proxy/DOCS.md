@@ -12,8 +12,27 @@ ne savent pas s'afficher sous ingress.
 | Option   | Valeur                                                                      |
 | -------- | --------------------------------------------------------------------------- |
 | `server` | Adresse de RustNVR vue depuis Home Assistant, sans chemin : `http://192.168.1.10:8080` (ou `https://…` si RustNVR sert lui-même le HTTPS). |
+| `page`   | Page ouverte par le panneau : `overview` (vue d'ensemble, par défaut), `wall` (mur d'écrans), `events`, `images` ou `playback`. Avec `overview`, chaque navigateur suit sa propre page d'accueil (Paramètres → Général de RustNVR, à partir de la 2026.11.09). |
+| `users`  | Facultatif : les comptes Home Assistant qui peuvent ouvrir le panneau, administrateurs compris (voir plus bas). |
 
 Démarrez l'app, puis cochez « Afficher dans la barre latérale ».
+
+## Qui voit le panneau
+
+Depuis la version 1.1.0, le panneau apparaît pour tous les comptes Home
+Assistant, administrateurs ou non. Ce que chacun peut faire dépend de son
+compte **RustNVR** : donnez un compte « lecteur » à ceux qui doivent seulement
+regarder (direct, enregistrements, événements, sans rien modifier).
+
+- **Sans `users`**, l'app n'ouvre l'interface que si RustNVR demande une
+  connexion. S'il n'a aucun compte, le panneau affiche une page qui
+  l'explique, sinon tout compte Home Assistant pourrait tout y modifier :
+  créez un compte administrateur en ouvrant RustNVR à son adresse. L'app le
+  vérifie toutes les 30 s.
+- **Avec `users`**, seuls ces comptes Home Assistant passent (leur nom
+  d'utilisateur, pas le nom affiché), même si RustNVR n'a pas de comptes.
+  Pensez à y mettre aussi les administrateurs. Un compte refusé voit son nom
+  d'utilisateur sur la page de refus : il suffit de le recopier dans `users`.
 
 ## Connexion
 

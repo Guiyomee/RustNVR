@@ -1,0 +1,10 @@
+configuration:
+  server:
+    name: Adresse de RustNVR
+    description: Vue depuis Home Assistant, sans chemin, par exemple http://192.168.1.10:8080 (ou https://… si RustNVR sert lui-même le HTTPS).
+  page:
+    name: Page d'accueil du panneau
+    description: "overview : vue d'ensemble ; wall : mur d'écrans ; events : événements ; images ; playback : lecture. Avec overview, chaque navigateur suit sa propre page d'accueil (Paramètres → Général de RustNVR, à partir de la 2026.11.09)."
+  users:
+    name: Comptes Home Assistant autorisés
+    description: Noms d'utilisateur qui peuvent ouvrir le panneau, administrateurs compris. Vide, tous les comptes peuvent l'ouvrir si RustNVR demande une connexion ; les droits sont alors ceux du compte RustNVR (lecteur ou administrateur).

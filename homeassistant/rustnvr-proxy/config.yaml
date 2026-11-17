@@ -1,5 +1,5 @@
 name: RustNVR Proxy
-version: "1.0.0"
+version: "1.1.0"
 slug: rustnvr_proxy
 description: L'interface de RustNVR dans la barre latérale de Home Assistant (RustNVR tourne sur une autre machine).
 url: https://github.com/Guiyomee/RustNVR/tree/main/homeassistant/rustnvr-proxy
@@ -12,7 +12,15 @@ ingress_port: 8099
 ingress_stream: true
 panel_icon: mdi:cctv
 panel_title: RustNVR
+# Every Home Assistant user sees the panel; run.sh lets them in only when
+# RustNVR asks for a login, or when they are in `users`.
+panel_admin: false
 options:
   server: http://192.168.1.10:8080
+  page: overview
+  users: []
 schema:
   server: url
+  page: list(overview|wall|events|images|playback)?
+  users:
+    - str?
