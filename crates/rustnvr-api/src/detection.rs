@@ -524,6 +524,47 @@ pub(crate) async fn logs(
     Ok(Json(LogsDto { entries, last_seq }))
 }
 
+/// `GET /wall`: the settings of the video wall, the same on every device.
+pub(crate) async fn wall(State(state): State<Arc<ApiState>>) -> Json<crate::dto::WallSettings> {
+    Json(state.wall())
+}
+
+/// What is wrong with wall settings, if anything.
+fn wall_problems(wall: &crate::dto::WallSettings) -> Option<String> {
+    if wall.cameras.len() > MAX_CAMERA_ORDER {
+        return Some("too many cameras".to_owned());
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Some(id) = wall
+        .cameras
+        .iter()
+        .find(|id| CameraId::new(id.as_str()).is_err() || !seen.insert(id.as_str()))
+    {
+        return Some(format!("invalid or repeated camera {id:?}"));
+    }
+    wall.columns
+        .filter(|c| !(1..=4).contains(c))
+        .map(|c| format!("columns must be between 1 and 4, not {c}"))
+}
+
+/// `PUT /wall`: the settings of the video wall, kept on the server for every
+/// device (administrators).
+pub(crate) async fn set_wall(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<crate::dto::WallSettings>,
+) -> Result<Json<crate::dto::WallSettings>, ApiError> {
+    if let Some(problem) = wall_problems(&input) {
+        return Err(ApiError::bad_request(problem));
+    }
+    let json = serde_json::to_string(&input).map_err(internal)?;
+    database(&state)?
+        .set_wall_settings(&json)
+        .await
+        .map_err(internal)?;
+    state.set_wall(input);
+    Ok(Json(state.wall()))
+}
+
 /// `PUT /camera-order` body, and answer of `GET /camera-order`.
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -566,4 +607,29 @@ pub(crate) async fn set_camera_order(
     state.set_camera_order(input.cameras);
     let _ = state.events.send(rustnvr_core::NvrEvent::CamerasChanged);
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dto::WallSettings;
+
+    #[test]
+    fn checks_the_wall_settings() {
+        assert_eq!(wall_problems(&WallSettings::default()), None);
+        let wall = |cameras: &[&str], columns| WallSettings {
+            cameras: cameras.iter().map(|c| (*c).to_owned()).collect(),
+            columns,
+            focus: false,
+        };
+        assert_eq!(wall_problems(&wall(&["garage", "entree"], Some(4))), None);
+        assert!(wall_problems(&wall(&["garage", "garage"], None)).is_some());
+        assert!(wall_problems(&wall(&["../x"], None)).is_some());
+        assert!(wall_problems(&wall(&[], Some(0))).is_some());
+        assert!(wall_problems(&wall(&[], Some(5))).is_some());
+        // Absent fields: every camera, automatic layout, enlarged motion.
+        let parsed: WallSettings = serde_json::from_str("{}").expect("json");
+        assert_eq!(parsed, WallSettings::default());
+        assert!(serde_json::from_str::<WallSettings>(r#"{"other":1}"#).is_err());
+    }
 }

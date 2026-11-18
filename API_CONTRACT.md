@@ -281,6 +281,23 @@ configuration ; 503 sans base de données. Les caméras absentes de la liste
 viennent ensuite, dans l'ordre de la configuration. Le changement est
 annoncé sur le WebSocket (`cameras`).
 
+### `GET /api/v1/wall` · `PUT /api/v1/wall`
+
+```json
+{ "cameras": ["portail", "garage"], "columns": 2, "focus": true }
+```
+
+Réglage général du mur d'écrans (`/mur`), gardé dans la base (table
+`wall_settings`) : le même sur tous les appareils, le panneau Home Assistant
+compris. `cameras` : caméras affichées, dans cet ordre (vide : toutes, dans
+l'ordre des caméras) ; `columns` : 1 à 4 par ligne (`null` : selon le
+nombre) ; `focus` : la caméra en mouvement est agrandie. Champs absents :
+ces valeurs par défaut. `GET` est ouvert à tous les comptes ; `PUT`
+(administrateurs) le remplace et renvoie le réglage enregistré —
+identifiants valides sans doublon, `columns` hors de 1 à 4 : 400 ; 503 sans
+base de données. Une adresse `/mur?cameras=…&cols=…&focus=0` garde ses
+propres réglages sur un écran (favori d'une tablette).
+
 ### `POST /api/v1/cameras` · `PUT /api/v1/cameras/{id}` · `DELETE /api/v1/cameras/{id}`
 
 Gestion des caméras sans redémarrage (corps JSON obligatoire : un formulaire
@@ -1133,6 +1150,11 @@ valent aussi pour les caméras de `config.toml`.
   `GET /cameras`.
 - `objects` : objets à reconnaître pour cette caméra (IA optionnelle), parmi
   les `labels` de `[ai]` ; vide ou absent : tous.
+- `mute_notifications` : `true` coupe les notifications (webhooks) de ses
+  mouvements, objets et passages ; l'enregistrement, les événements et MQTT
+  continuent, les pannes passent toujours. Absent : `false` (il n'est écrit
+  que s'il vaut `true`). Le changer seul ne relance pas la détection. Aussi
+  par MQTT (`<p>/<caméra>/notifications/set`, entité « Notifications »).
 - `zones` : 8 au plus, 3 à 32 points chacune, coordonnées en fractions de
   l'image (0..1). Le mouvement n'est compté que dans les zones.
   Chaque zone peut avoir `objects` (IA optionnelle) : ces objets ne comptent

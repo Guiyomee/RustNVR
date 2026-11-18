@@ -292,6 +292,7 @@ mod tests {
             masks: Vec::new(),
             lines: Vec::new(),
             schedule: Vec::new(),
+            mute_notifications: false,
         }
     }
 

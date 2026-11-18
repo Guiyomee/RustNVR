@@ -1,5 +1,11 @@
 # RustNVR
 
+[![Stars](https://img.shields.io/github/stars/Guiyomee/RustNVR?style=flat&logo=github)](https://github.com/Guiyomee/RustNVR/stargazers)
+[![Téléchargements](https://img.shields.io/github/downloads/Guiyomee/RustNVR/total?style=flat&label=t%C3%A9l%C3%A9chargements)](https://github.com/Guiyomee/RustNVR/releases)
+[![Version](https://img.shields.io/github/v/release/Guiyomee/RustNVR?style=flat&label=version)](https://github.com/Guiyomee/RustNVR/releases/latest)
+[![Licence](https://img.shields.io/badge/licence-MIT%20%2F%20Apache--2.0-blue?style=flat)](#licence)
+[![Discord](https://img.shields.io/badge/Discord-rejoindre-5865F2?style=flat&logo=discord&logoColor=white)](https://discord.gg/6aDKTM6pXY)
+
 <img src="web/public/favicon.svg" width="96" height="96" alt="Logo RustNVR : un objectif de caméra à anneau cuivre">
 
 [English](README.md) · **Français**

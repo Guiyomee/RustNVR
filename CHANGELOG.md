@@ -5,6 +5,53 @@ précautions) sont sur la page de chaque
 [release](https://github.com/Guiyomee/RustNVR/releases). Versions
 « calendrier » : année.mois.numéro dans le mois.
 
+## 2026.11.09 (2026-11-18)
+
+### Nouveautés
+- **Couper les notifications d'une caméra** sans toucher à son
+  enregistrement : fiche de la caméra → Détection → « Envoyer les
+  notifications de cette caméra », ou l'interrupteur « Notifications » de la
+  caméra dans Home Assistant. Une automatisation peut ainsi couper le garage
+  quand quelqu'un est à la maison et garder la sonnette. Les pannes sont
+  toujours signalées.
+- **Mur d'écrans** : toucher une caméra l'affiche seule, en grand et avec son
+  son ; la toucher encore, Échap ou « retour » ramène au mur. Merci
+  Warrior1300 pour l'idée !
+- **Mur d'écrans, réglage général** : les caméras affichées, le nombre par
+  ligne et l'agrandissement (bouton ⚙ du mur) sont maintenant gardés sur le
+  serveur et valent pour tous les écrans, le panneau Home Assistant compris.
+  Un administrateur les change ; une adresse avec ses propres réglages (favori
+  d'une tablette) les garde pour cet écran. La base de données est migrée au
+  premier démarrage : une version plus ancienne ne pourra plus la rouvrir.
+- **Page d'accueil au choix** (Paramètres → Général) : un navigateur peut
+  ouvrir RustNVR directement sur le mur d'écrans, les événements, les images
+  ou la lecture, par exemple pour un écran réservé au mur. Le choix est
+  gardé par ce navigateur ; le menu « Vue d'ensemble » y mène toujours.
+- **App Home Assistant « RustNVR Proxy » 1.1.0** (publiée à part le
+  2026-11-17, elle marche avec la 2026.11.08) : option `page` pour la
+  page ouverte par le panneau, et panneau visible aussi par les comptes Home
+  Assistant qui ne sont pas administrateurs. L'app ne l'ouvre que si RustNVR
+  demande une connexion : chacun a les droits de son compte RustNVR (par
+  exemple « lecteur »). Option `users` pour n'autoriser que certains comptes.
+  **Si RustNVR n'a aucun compte**, le panneau reste fermé après la mise à
+  jour de l'app, le temps d'en créer un.
+
+### Corrections
+- **Page Stockage** : la carte « Disque des enregistrements » montrait le
+  disque du dossier local même quand les caméras enregistrent sur un NAS
+  par défaut (par exemple 643 Go de vidéos sur un disque de 7,8 Go). Elle
+  montre maintenant le point de stockage par défaut, comme la vue
+  d'ensemble : son disque, ses vidéos et son autonomie.
+- **TP-Link Tapo C200 (ancienne version)** : son flux H.264 contient des
+  zéros que la norme interdit ; RustNVR coupait la session toutes les
+  quelques secondes (« invalid sequence 00 00 00 21 »), d'où des segments de
+  4 à 8 s et des trous. Ces zéros sont maintenant gardés tels quels, comme le
+  fait FFmpeg (copie corrigée de Retina dans `crates/retina`, voir
+  `PATCH.md`). Merci stefsec pour l'analyse !
+- **Son à travers go2rtc** : go2rtc donne un nouvel identifiant de session à
+  chaque piste ; RustNVR refusait la piste audio (« session id changed »). Il
+  garde maintenant le premier, comme FFmpeg.
+
 ## 2026.11.08 (2026-11-13)
 
 ### Nouveautés

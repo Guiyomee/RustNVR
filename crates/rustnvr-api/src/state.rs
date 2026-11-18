@@ -197,6 +197,8 @@ pub struct ApiState {
     /// Order of the cameras chosen in the interface (identifiers); the
     /// others follow in the order of the configuration.
     camera_order: RwLock<Vec<String>>,
+    /// Settings of the video wall chosen in the interface.
+    wall: RwLock<crate::dto::WallSettings>,
     /// Whether FFmpeg could be started (snapshots and motion detection need it).
     pub(crate) ffmpeg_available: OnceLock<bool>,
     /// Object recognition provider, when one is configured.
@@ -273,6 +275,7 @@ impl ApiState {
             logs: OnceLock::new(),
             database: OnceLock::new(),
             camera_order: RwLock::new(Vec::new()),
+            wall: RwLock::new(crate::dto::WallSettings::default()),
             ffmpeg_available: OnceLock::new(),
             ai_provider: RwLock::new(None),
             updates: RwLock::new(crate::dto::UpdateStatus {
@@ -324,6 +327,25 @@ impl ApiState {
     /// Sets the order of the cameras (read from the database at startup).
     pub fn set_camera_order(&self, order: Vec<String>) {
         *self.camera_order.write().unwrap_or_else(|e| e.into_inner()) = order;
+    }
+
+    /// The settings of the video wall.
+    pub(crate) fn wall(&self) -> crate::dto::WallSettings {
+        self.wall.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Sets the settings of the video wall.
+    pub(crate) fn set_wall(&self, wall: crate::dto::WallSettings) {
+        *self.wall.write().unwrap_or_else(|e| e.into_inner()) = wall;
+    }
+
+    /// Sets the settings of the video wall from their JSON in the database
+    /// (at startup); unreadable ones are left out with a warning.
+    pub fn set_wall_json(&self, json: &str) {
+        match serde_json::from_str(json) {
+            Ok(wall) => self.set_wall(wall),
+            Err(e) => tracing::warn!(error = %e, "video wall settings not read"),
+        }
     }
 
     /// Enables events and detection settings. Returns false if already set.

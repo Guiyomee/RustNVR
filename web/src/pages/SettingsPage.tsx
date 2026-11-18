@@ -17,6 +17,7 @@ import { formatBytes, formatDuration, formatNumber, formatPercent } from '../lib
 import type { SystemInfo } from '../types/api'
 import { useLocation } from '../lib/router'
 import { useTheme } from '../lib/theme'
+import { HOME_PAGES, useHomePage } from '../lib/home'
 import { Segmented } from '../components/ui/Tabs'
 import { lang, setLang, t } from '../lib/i18n'
 
@@ -70,6 +71,19 @@ function ThemeSetting() {
   )
 }
 
+function HomePageSetting() {
+  const [home, setHome] = useHomePage()
+  return (
+    <select aria-label={t("Page d'accueil", 'Home page')} className="h-8 rounded-md border border-line bg-bg-2 px-2 text-sm" value={home} onChange={(e) => setHome(e.target.value)}>
+      {HOME_PAGES.map((p) => (
+        <option key={p.to} value={p.to}>
+          {p.label}
+        </option>
+      ))}
+    </select>
+  )
+}
+
 /** A viewer account changes nothing: its preferences and its password only. */
 const VIEWER_CATEGORIES: { key: Category; label: string }[] = [
   { key: 'general', label: t('Général', 'General') },
@@ -102,6 +116,9 @@ function Section({ category }: { category: Category }) {
               value={lang()}
               onChange={setLang}
             />
+          </SettingRow>
+          <SettingRow label={t("Page d'accueil", 'Home page')} help={t("Page ouverte par ce navigateur à l'adresse de RustNVR, par exemple le mur d'écrans pour un écran qui lui est réservé. Le menu « Vue d'ensemble » y mène toujours.", "Page this browser opens at RustNVR's address, for instance the video wall on a screen kept for it. The « Overview » menu still leads to the overview.")}>
+            <HomePageSetting />
           </SettingRow>
         </SettingsSection>
       )

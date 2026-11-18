@@ -34,6 +34,7 @@ const CAMERA_ENTITIES: &[(&str, &str)] = &[
     ("switch", "active"),
     ("button", "reboot"),
     ("binary_sensor", "night"),
+    ("switch", "notifications"),
 ];
 
 /// Discovery node identifier: the client identifier restricted to the
@@ -311,6 +312,21 @@ pub(crate) fn camera_configs(
             "payload_off": "OFF",
         }),
     );
+    // Off: no notification of its detections, recording and events go on
+    // (an automation mutes a camera while someone is home). Shown with the
+    // main controls.
+    push(
+        "switch",
+        "notifications",
+        entity("notifications", "Notifications"),
+        json!({
+            "icon": "mdi:bell",
+            "state_topic": topics.camera(&c.id, "notifications"),
+            "command_topic": topics.camera(&c.id, "notifications/set"),
+            "payload_on": "ON",
+            "payload_off": "OFF",
+        }),
+    );
     out
 }
 
@@ -560,6 +576,7 @@ mod tests {
             motion_active: false,
             audio_enabled: true,
             active: true,
+            notifications: true,
             onvif: true,
             night: Some(true),
             device: Some(crate::DeviceView {
@@ -685,6 +702,16 @@ mod tests {
         let night: Value = serde_json::from_str(&configs[14].1).expect("json");
         assert_eq!(night["state_topic"], "rustnvr/jardin/night");
         assert_eq!(night["name"], "Vision nocturne");
+        assert_eq!(
+            configs[15].0,
+            "homeassistant/switch/rustnvr/jardin_notifications/config"
+        );
+        let notifications: Value = serde_json::from_str(&configs[15].1).expect("json");
+        assert_eq!(
+            notifications["command_topic"],
+            "rustnvr/jardin/notifications/set"
+        );
+        assert_eq!(notifications["name"], "Notifications");
         // The NVR: a switch pausing detection everywhere.
         let nvr = nvr_configs("homeassistant", "rustnvr", &topics);
         assert_eq!(nvr[0].0, "homeassistant/switch/rustnvr/detection/config");

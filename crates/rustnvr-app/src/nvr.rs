@@ -2086,6 +2086,11 @@ async fn start_web(
             Ok(order) => state.set_camera_order(order),
             Err(e) => warn!(error = %e, "camera order not read"),
         }
+        match db.wall_settings().await {
+            Ok(Some(json)) => state.set_wall_json(&json),
+            Ok(None) => {}
+            Err(e) => warn!(error = %e, "video wall settings not read"),
+        }
     }
     state.set_ffmpeg_available(shared.ffmpeg_ok);
     state.set_trusted_proxies(web.proxies().map_err(anyhow::Error::msg)?);

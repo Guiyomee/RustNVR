@@ -9,7 +9,10 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   erreurs listées en une fois, clés inconnues refusées).
 - Client RTSP [Retina](https://crates.io/crates/retina) : TCP (défaut) ou UDP
   (expérimental), H.264 et H.265, authentification Basic (testée) et Digest
-  (fournie par Retina, pas encore testée).
+  (fournie par Retina, pas encore testée). Retina est une copie corrigée
+  (`crates/retina/PATCH.md`) : les zéros non échappés dans un NAL (Tapo
+  C200 v2) sont gardés comme le fait FFmpeg ; un serveur qui change
+  d'identifiant de session à chaque SETUP (go2rtc) est accepté.
 - Une supervision par caméra : délais d'attente, détection de flux bloqué,
   reconnexion avec backoff exponentiel et gigue.
 - Enregistrement continu en fMP4 (`avc1`/`hvc1`), segments coupés sur image
@@ -137,6 +140,10 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   dernier mouvement par caméra ; commandes : mode d'enregistrement, événement
   manuel, capture tout de suite, pause de la détection sur toutes les caméras
   (mode présent / absent) ([MQTT.md](MQTT.md)).
+- Notifications coupées pour une seule caméra (onglet Détection, ou
+  interrupteur « Notifications » dans Home Assistant), sans toucher à son
+  enregistrement ; les pannes passent toujours (⚠ pas encore essayé avec
+  un vrai webhook ni dans Home Assistant).
 - Notifications (Paramètres → Webhooks) : webhook JSON, Discord, ntfy et
   Telegram, pour les mouvements, objets reconnus, passages de ligne et les
   pannes (stockage, caméra hors ligne, erreur d'enregistrement) ; messages
@@ -147,7 +154,20 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   un vrai téléphone).
 - Interface dans la barre latérale de Home Assistant (ingress), avec l'app
   « RustNVR Proxy » de ce dépôt
-  ([wiki](https://github.com/Guiyomee/RustNVR/wiki/FR-Home-Assistant)).
+  ([wiki](https://github.com/Guiyomee/RustNVR/wiki/FR-Home-Assistant)) ;
+  depuis l'app 1.1.0, page d'ouverture au choix (`page`) et panneau visible
+  par les comptes Home Assistant non administrateurs, ouvert seulement si
+  RustNVR demande une connexion ou aux comptes de l'option `users` (testé
+  avec nginx dans un conteneur, ⚠ pas encore dans un vrai Home Assistant).
+- Mur d'écrans : toucher une caméra l'affiche seule, avec son son, et la
+  toucher encore ramène au mur (⚠ pas encore essayé dans un navigateur).
+- Mur d'écrans, réglage général gardé sur le serveur (caméras, nombre par
+  ligne, agrandissement), le même sur tous les écrans et dans Home
+  Assistant ; une adresse avec ses propres réglages reste possible (⚠ pas
+  encore essayé dans un navigateur).
+- Page d'accueil au choix par navigateur (Paramètres → Général : vue
+  d'ensemble, mur d'écrans, événements, images ou lecture ; ⚠ pas encore
+  essayée dans un navigateur).
 - API REST `/api/v1` et WebSocket temps réel
   ([API_CONTRACT.md](../API_CONTRACT.md)) ; comptes administrateur / lecteur
   avec page de connexion (mots de passe Argon2, sessions par cookie, blocage

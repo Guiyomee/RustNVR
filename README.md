@@ -1,5 +1,11 @@
 # RustNVR
 
+[![Stars](https://img.shields.io/github/stars/Guiyomee/RustNVR?style=flat&logo=github)](https://github.com/Guiyomee/RustNVR/stargazers)
+[![Downloads](https://img.shields.io/github/downloads/Guiyomee/RustNVR/total?style=flat&label=downloads)](https://github.com/Guiyomee/RustNVR/releases)
+[![Version](https://img.shields.io/github/v/release/Guiyomee/RustNVR?style=flat&label=version)](https://github.com/Guiyomee/RustNVR/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=flat)](#license)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?style=flat&logo=discord&logoColor=white)](https://discord.gg/6aDKTM6pXY)
+
 <img src="web/public/favicon.svg" width="96" height="96" alt="RustNVR logo: a camera lens with a copper ring">
 
 **English** · [Français](README.fr.md)

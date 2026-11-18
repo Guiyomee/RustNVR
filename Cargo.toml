@@ -16,12 +16,15 @@ members = [
     "crates/rustnvr-discovery",
     "crates/rustnvr-restream",
 ]
+# A copy of retina with a patch, used through [patch.crates-io] below: not a
+# member (its code is not linted or formatted with RustNVR's).
+exclude = ["crates/retina"]
 
 [workspace.package]
 # Calendar versions: year.month.number of the release in the month. Cargo
 # forbids leading zeros: 2026.11.1 here, published as v2026.11.01 (RustNVR's
 # update check reads both the same).
-version = "2026.11.8"
+version = "2026.11.9"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -67,6 +70,12 @@ missing_docs = "warn"
 dbg_macro = "warn"
 todo = "warn"
 unwrap_used = "warn"
+
+# retina 0.4.21 with a RustNVR patch (crates/retina/PATCH.md): unescaped
+# zeros inside an H.264/H.265 NAL are kept, as FFmpeg does, instead of ending
+# the RTSP session (TP-Link Tapo C200 v2).
+[patch.crates-io]
+retina = { path = "crates/retina" }
 
 [profile.release]
 lto = "thin"

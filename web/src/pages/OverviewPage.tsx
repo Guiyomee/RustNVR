@@ -17,7 +17,7 @@ import { EmptyState, ErrorState, LoadingState, Unavailable } from '../components
 import { useIsDemo, useLive } from '../data/DataContext'
 import { useAsync } from '../hooks/useAsync'
 import { bucketByHour, useEvents } from '../hooks/useEvents'
-import { diskPercent, isRemote, useStorage } from '../hooks/useStorage'
+import { defaultDiskDestination, diskPercent, useStorage } from '../hooks/useStorage'
 import { useNow } from '../hooks/useUi'
 import { formatBytes, formatNumber, formatPercent } from '../lib/format'
 import { Link, navigate } from '../lib/router'
@@ -193,7 +193,7 @@ export function OverviewPage() {
   // Disk of the default destination (where cameras record unless told
   // otherwise); the recordings directory's disk for S3 / SFTP or before the
   // server reports it.
-  const defaultDest = storage.data?.destinations.find((d) => d.id === storage.data?.default_destination && !isRemote(d))
+  const defaultDest = defaultDiskDestination(storage.data)
   const shownDisk = defaultDest ? defaultDest.disk : storage.data?.disk
   const diskPct = diskPercent(shownDisk)
   // Rows only change when cameras are added/renamed, not on every live update.

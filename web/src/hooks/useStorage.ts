@@ -10,8 +10,12 @@ export function useStorage(): AsyncState<Storage> {
   return state
 }
 
-export function storagePercent(s: Storage | null): number | null {
-  return diskPercent(s?.disk)
+/**
+ * The default destination (where cameras record unless told otherwise) when
+ * it has a disk of its own: not for S3 / SFTP, whose disk is the local outbox.
+ */
+export function defaultDiskDestination(s: Storage | null | undefined): Destination | undefined {
+  return s?.destinations.find((d) => d.id === s.default_destination && !isRemote(d))
 }
 
 export function diskPercent(disk: Disk | null | undefined): number | null {

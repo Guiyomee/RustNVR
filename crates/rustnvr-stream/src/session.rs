@@ -79,10 +79,13 @@ pub(crate) async fn describe(
         username: c.username.clone(),
         password: c.password.expose().to_owned(),
     });
+    // Some servers (go2rtc) answer each SETUP with a new session id: keep the
+    // first one, as FFmpeg does, instead of refusing the audio track.
     let session_opts = retina::client::SessionOptions::default()
         .creds(creds)
         .user_agent(opts.user_agent.clone())
-        .session_group(group);
+        .session_group(group)
+        .session_id(retina::client::SessionIdPolicy::UseFirst);
     step(
         "DESCRIBE",
         opts.connect_timeout,

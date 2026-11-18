@@ -4,6 +4,7 @@
 
 import { API_BASE, apiGet, apiSend, apiSendForFile } from './client'
 import type {
+  WallSettings,
   BackupPreview,
   Bookmark,
   BackupRestored,
@@ -201,6 +202,9 @@ export const rebootCamera = (id: string) => apiSend<{ message: string }>('POST',
 /** Order of the cameras kept on the server (empty: the configuration's order). */
 export const getCameraOrder = (signal?: AbortSignal) => apiGet<{ cameras: string[] }>('/camera-order', undefined, signal)
 export const setCameraOrder = (cameras: string[]) => apiSend<void>('PUT', '/camera-order', { cameras })
+/** Settings of the video wall, the same on every device. */
+export const getWall = (signal?: AbortSignal) => apiGet<WallSettings>('/wall', undefined, signal)
+export const setWall = (wall: WallSettings) => apiSend<WallSettings>('PUT', '/wall', wall)
 export const setCameraPaused = (id: string, paused: boolean) => apiSend<Camera>('PUT', `/cameras/${encodeURIComponent(id)}/pause`, { paused }, 30_000)
 export const setAudio = (id: string, enabled: boolean) => apiSend<Camera>('PUT', `/cameras/${encodeURIComponent(id)}/audio`, { enabled }, 30_000)
 

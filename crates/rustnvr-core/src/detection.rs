@@ -48,6 +48,12 @@ pub struct MotionSettings {
     /// records); empty: all the time.
     #[serde(default)]
     pub schedule: Vec<crate::schedule::TimeRange>,
+    /// No notification (webhooks: motion, objects, crossings) for this
+    /// camera; events, recording and MQTT go on, and failure notifications
+    /// (camera offline, storage, recording) still go through. Written only
+    /// when set, so that an older version still reads the settings.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mute_notifications: bool,
 }
 
 /// Most crossing lines per camera.
@@ -100,6 +106,7 @@ impl Default for MotionSettings {
             masks: Vec::new(),
             lines: Vec::new(),
             schedule: Vec::new(),
+            mute_notifications: false,
         }
     }
 }
@@ -359,6 +366,7 @@ mod tests {
             masks: Vec::new(),
             lines: Vec::new(),
             schedule: Vec::new(),
+            mute_notifications: false,
         };
         let object = |label: &str, bbox: [f32; 4]| DetectedObject {
             label: label.into(),
@@ -468,6 +476,7 @@ mod tests {
             masks: Vec::new(),
             lines: Vec::new(),
             schedule: Vec::new(),
+            mute_notifications: false,
         };
         assert_eq!(bad.problems().len(), 5, "{:?}", bad.problems());
     }

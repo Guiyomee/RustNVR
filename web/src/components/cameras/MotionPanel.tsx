@@ -139,6 +139,15 @@ export function MotionPanel({ camera }: { camera: Camera }) {
               </span>
             </span>
           </label>
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={!s.mute_notifications} disabled={reason !== null} onChange={(e) => edit({ mute_notifications: !e.target.checked })} />
+            <span>
+              {t('Envoyer les notifications de cette caméra', 'Send the notifications of this camera')}
+              <span className="block text-xs text-muted">
+                {t('Décoché : plus de notification de ses mouvements, objets et passages (Paramètres → Webhooks), mais elle enregistre et garde ses événements. Les pannes sont toujours signalées. Dans Home Assistant : interrupteur « Notifications » de la caméra.', 'Unticked: no more notifications of its motion, objects and crossings (Settings → Webhooks), but it still records and keeps its events. Failures are still reported. In Home Assistant: the camera\'s « Notifications » switch.')}
+              </span>
+            </span>
+          </label>
           <div className="flex flex-wrap items-center gap-2">
             <MotionStatus camera={camera} />
             {camera.motion.error && <span className="text-xs text-err">{camera.motion.error}</span>}

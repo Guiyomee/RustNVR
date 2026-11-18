@@ -681,3 +681,35 @@ pub struct ErrorDetail {
     /// Human-readable message.
     pub message: String,
 }
+
+/// Settings of the video wall chosen in the interface, the same on every
+/// device (`GET` / `PUT /wall`). The address of the wall page may override
+/// them on one screen.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WallSettings {
+    /// Cameras shown, in this order; empty: every camera, in the cameras'
+    /// order.
+    #[serde(default)]
+    pub cameras: Vec<String>,
+    /// Cameras per row, 1 to 4; `None`: chosen from the number of cameras.
+    #[serde(default)]
+    pub columns: Option<u8>,
+    /// The camera with motion is enlarged.
+    #[serde(default = "default_true")]
+    pub focus: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for WallSettings {
+    fn default() -> Self {
+        Self {
+            cameras: Vec::new(),
+            columns: None,
+            focus: true,
+        }
+    }
+}

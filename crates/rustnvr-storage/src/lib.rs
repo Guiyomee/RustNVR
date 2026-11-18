@@ -918,6 +918,29 @@ impl Database {
         Ok(())
     }
 
+    /// Settings of the video wall (JSON, as the API writes them), if chosen.
+    pub async fn wall_settings(&self) -> Result<Option<String>, DbError> {
+        Ok(
+            sqlx::query("SELECT settings FROM wall_settings WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.try_get("settings"))
+                .transpose()?,
+        )
+    }
+
+    /// Stores the settings of the video wall (JSON).
+    pub async fn set_wall_settings(&self, json: &str) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO wall_settings (id, settings) VALUES (1, ?) \
+             ON CONFLICT(id) DO UPDATE SET settings = excluded.settings",
+        )
+        .bind(json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Removes crossings older than `before_ms` (with the events retention).
     pub async fn delete_crossings_before(&self, before_ms: i64) -> Result<u64, DbError> {
         Ok(sqlx::query("DELETE FROM crossings WHERE at_ms < ?")
@@ -1556,6 +1579,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wall_settings_round_trip() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        assert_eq!(db.wall_settings().await.expect("empty"), None);
+        db.set_wall_settings(r#"{"cameras":["a"]}"#)
+            .await
+            .expect("set");
+        db.set_wall_settings(r#"{"cameras":["b"]}"#)
+            .await
+            .expect("replace");
+        assert_eq!(
+            db.wall_settings().await.expect("get").as_deref(),
+            Some(r#"{"cameras":["b"]}"#)
+        );
+    }
+
+    #[tokio::test]
     async fn motion_settings_round_trip() {
         let dir = tempfile::tempdir().expect("tmp");
         let db = Database::open(dir.path()).await.expect("open");
@@ -1572,6 +1612,7 @@ mod tests {
             masks: Vec::new(),
             lines: Vec::new(),
             schedule: Vec::new(),
+            mute_notifications: false,
         };
         db.set_motion_settings(&cam("a"), &s).await.expect("set");
         db.set_motion_settings(&cam("a"), &s).await.expect("upsert");
@@ -1582,5 +1623,20 @@ mod tests {
         let json = r#"{"enabled":true,"sensitivity":60,"zones":[{"name":"Z","points":[[0,0],[1,0],[0.5,1]],"sensitivity":40}]}"#;
         let parsed: MotionSettings = serde_json::from_str(json).expect("json");
         assert!(parsed.problems().is_empty());
+        assert!(!parsed.mute_notifications);
+        // Muted notifications are kept; unmuted, the field is not written,
+        // so that an older version still reads the settings.
+        let muted = MotionSettings {
+            mute_notifications: true,
+            ..s.clone()
+        };
+        db.set_motion_settings(&cam("b"), &muted)
+            .await
+            .expect("set");
+        assert_eq!(
+            db.motion_settings().await.expect("get").get("b"),
+            Some(&muted)
+        );
+        assert!(!serde_json::to_string(&s).expect("json").contains("mute"));
     }
 }

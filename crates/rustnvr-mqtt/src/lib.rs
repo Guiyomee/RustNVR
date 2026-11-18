@@ -21,6 +21,8 @@
 //! | `<p>/<camera>/audio/set` | `ON` / `OFF` (command) | — |
 //! | `<p>/<camera>/active` | `ON` / `OFF` (camera running, not paused) | yes |
 //! | `<p>/<camera>/active/set` | `ON` / `OFF` (command: resume / pause until restart) | — |
+//! | `<p>/<camera>/notifications` | `ON` / `OFF` (notifications of its detections sent) | yes |
+//! | `<p>/<camera>/notifications/set` | `ON` / `OFF` (command) | — |
 //! | `<p>/<camera>/person` | `ON` / `OFF` (person recognized, optional AI) | yes |
 //! | `<p>/<camera>/snapshot` | JPEG of the last event | yes |
 //! | `<p>/<camera>/<object>/snapshot` | JPEG of the last recognized object of that kind (`person`, `car`…), boxes drawn | yes |
@@ -109,6 +111,8 @@ pub struct CameraView {
     pub audio_enabled: bool,
     /// Enabled and not paused (the « Caméra active » switch).
     pub active: bool,
+    /// Notifications of its detections are sent (webhooks).
+    pub notifications: bool,
     /// An ONVIF port is set: the camera can be restarted from MQTT.
     pub onvif: bool,
     /// Films in night vision, once known.
@@ -244,6 +248,13 @@ pub trait NvrView: Send + Sync + 'static {
         &self,
         camera: CameraId,
         active: bool,
+    ) -> BoxFuture<'_, Result<(), String>>;
+    /// Sends the notifications of the detections of a camera, or mutes them
+    /// (command from MQTT).
+    fn set_notifications(
+        &self,
+        camera: CameraId,
+        enabled: bool,
     ) -> BoxFuture<'_, Result<(), String>>;
     /// Starts the presence count of the line of `camera` whose topic level
     /// is `label` again from zero (command from MQTT).
@@ -497,13 +508,16 @@ impl Topics {
     }
 
     /// Camera and switch of a `<p>/<camera>/motion_detection/set`,
-    /// `<p>/<camera>/audio/set` or `<p>/<camera>/active/set` topic.
+    /// `<p>/<camera>/audio/set`, `<p>/<camera>/active/set` or
+    /// `<p>/<camera>/notifications/set` topic.
     fn command(&self, topic: &str) -> Option<(CameraId, Switch)> {
         let rest = topic.strip_prefix(&self.prefix)?.strip_prefix('/')?;
         let (cam, switch) = if let Some(cam) = rest.strip_suffix("/motion_detection/set") {
             (cam, Switch::Motion)
         } else if let Some(cam) = rest.strip_suffix("/active/set") {
             (cam, Switch::Active)
+        } else if let Some(cam) = rest.strip_suffix("/notifications/set") {
+            (cam, Switch::Notifications)
         } else {
             (rest.strip_suffix("/audio/set")?, Switch::Audio)
         };
@@ -517,6 +531,7 @@ enum Switch {
     Motion,
     Audio,
     Active,
+    Notifications,
 }
 
 fn on_off(v: bool) -> &'static str {
@@ -682,6 +697,7 @@ impl Client {
             (t.camera(&c.id, "record_mode"), record_mode_name(c)),
             (t.camera(&c.id, "audio"), on_off(c.audio_enabled)),
             (t.camera(&c.id, "active"), on_off(c.active)),
+            (t.camera(&c.id, "notifications"), on_off(c.notifications)),
         ];
         for (topic, payload) in msgs {
             self.publish(topic, true, payload);
@@ -814,6 +830,7 @@ impl Client {
             "capture",
             "audio",
             "active",
+            "notifications",
             "night",
             "person",
         ] {
@@ -877,6 +894,8 @@ impl Client {
                 self.publish(topic, true, on_off(c.audio_enabled));
                 let topic = self.topics.camera(&c.id, "active");
                 self.publish(topic, true, on_off(c.active));
+                let topic = self.topics.camera(&c.id, "notifications");
+                self.publish(topic, true, on_off(c.notifications));
                 if let Some(night) = c.night {
                     let topic = self.topics.camera(&c.id, "night");
                     self.publish(topic, true, on_off(night));
@@ -925,6 +944,7 @@ impl Client {
             "motion_detection/set",
             "audio/set",
             "active/set",
+            "notifications/set",
             "line/+/presence/reset",
             "ptz/preset/set",
             "ptz/move",
@@ -1056,6 +1076,7 @@ impl Client {
                 Switch::Motion => view.set_motion_enabled(camera.clone(), enabled).await,
                 Switch::Audio => view.set_audio_enabled(camera.clone(), enabled).await,
                 Switch::Active => view.set_camera_active(camera.clone(), enabled).await,
+                Switch::Notifications => view.set_notifications(camera.clone(), enabled).await,
             };
             if let Err(e) = result {
                 tracing::warn!(%camera, ?switch, error = %e, "MQTT: command failed");
@@ -1314,6 +1335,11 @@ mod tests {
             parse("home/nvr/jardin/active/set"),
             Some(("jardin".into(), Switch::Active))
         );
+        assert_eq!(
+            parse("home/nvr/jardin/notifications/set"),
+            Some(("jardin".into(), Switch::Notifications))
+        );
+        assert!(parse("home/nvr/jardin/notifications").is_none());
         assert!(parse("home/nvr/jardin/motion").is_none());
         assert!(parse("home/nvr/jardin/audio").is_none());
         assert!(parse("home/nvr/jardin/active").is_none());
@@ -1351,6 +1377,7 @@ mod tests {
             motion_active: false,
             audio_enabled: false,
             active: true,
+            notifications: true,
             onvif: false,
             night: None,
             device: None,

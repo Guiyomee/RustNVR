@@ -1,12 +1,17 @@
-import { LogOut, Maximize, Settings2, X } from 'lucide-react'
+import { LayoutGrid, LogOut, Maximize, Settings2, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CameraPlayer } from '../components/cameras/CameraPlayer'
 import { Segmented } from '../components/ui/Tabs'
-import { useLive } from '../data/DataContext'
+import { Button } from '../components/ui/Button'
+import { getWall, setWall } from '../api/endpoints'
+import { describeError } from '../api/client'
+import { useIsViewer } from '../auth/AuthGate'
+import { useIsDemo, useLive } from '../data/DataContext'
+import { useAsync } from '../hooks/useAsync'
 import { useNow } from '../hooks/useUi'
 import { formatTime } from '../lib/format'
 import { Link, navigate, useLocation } from '../lib/router'
-import type { Camera } from '../types/api'
+import type { Camera, WallSettings } from '../types/api'
 import { t } from '../lib/i18n'
 
 type Columns = 'auto' | 1 | 2 | 3 | 4
@@ -24,15 +29,10 @@ const RELOAD_AFTER_MS = 120_000
 /** Controls disappear after this long without moving the mouse or touching. */
 const CONTROLS_MS = 4_000
 
-/** Order chosen on the overview (same browser), if any. */
-function overviewOrder(): string[] {
-  try {
-    const v: unknown = JSON.parse(window.localStorage.getItem('rustnvr.overview.order') ?? '[]')
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
-  } catch {
-    return []
-  }
-}
+/** Every camera, automatic layout, enlarged motion: before anything is chosen. */
+const DEFAULT_WALL: WallSettings = { cameras: [], columns: null, focus: true }
+
+const toColumns = (n: number | null | undefined): Columns => (n === 1 || n === 2 || n === 3 || n === 4 ? n : 'auto')
 
 /** Keeps the screen on while the wall is shown (browsers that allow it). */
 function useWakeLock() {
@@ -61,11 +61,39 @@ export function WallPage() {
   const root = useRef<HTMLDivElement>(null)
   useWakeLock()
 
-  // Settings in the address, so that a tablet can keep them as a bookmark.
-  const chosen = query.get('cameras')?.split(',').filter(Boolean) ?? null
-  const colsParam = query.get('cols')
-  const columns: Columns = colsParam === '1' || colsParam === '2' || colsParam === '3' || colsParam === '4' ? (Number(colsParam) as Columns) : 'auto'
-  const focusOn = query.get('focus') !== '0'
+  // The general settings (server, every device), unless the address of this
+  // screen has its own (a tablet bookmark). An administrator changes the
+  // general ones; a viewer, or a screen with its own, changes the address.
+  const demo = useIsDemo()
+  const viewer = useIsViewer()
+  const loaded = useAsync((signal) => (demo ? Promise.resolve(DEFAULT_WALL) : getWall(signal)), [demo])
+  const [saved, setSaved] = useState<WallSettings | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const general = saved ?? loaded.data ?? DEFAULT_WALL
+  const own = query.has('cameras') || query.has('cols') || query.has('focus')
+  // No camera shown before the general settings are known: players would
+  // start, then stop when they arrive.
+  const waiting = !own && !demo && saved === null && loaded.data === null && !loaded.error
+  const canSave = !demo && !viewer
+  const chosen = own ? (query.get('cameras')?.split(',').filter(Boolean) ?? null) : general.cameras.length > 0 ? general.cameras : null
+  const columns: Columns = own ? toColumns(Number(query.get('cols'))) : toColumns(general.columns)
+  const focusOn = own ? query.get('focus') !== '0' : general.focus
+  const save = (wall: WallSettings) => {
+    setSaveError(null)
+    setWall(wall).then(
+      (w) => {
+        setSaved(w)
+        // This screen follows the general settings from now on.
+        if (own) navigate('/mur', { replace: true })
+      },
+      (e: unknown) => setSaveError(describeError(e)),
+    )
+  }
+  const apply = (next: { cameras?: string[] | null; cols?: Columns; focus?: boolean }) => {
+    if (own || !canSave) return setParams(next)
+    const cols = next.cols ?? columns
+    save({ cameras: (next.cameras === undefined ? chosen : next.cameras) ?? [], columns: cols === 'auto' ? null : cols, focus: next.focus ?? focusOn })
+  }
   const setParams = (next: { cameras?: string[] | null; cols?: Columns; focus?: boolean }) => {
     const p = new URLSearchParams()
     const cams = next.cameras === undefined ? chosen : next.cameras
@@ -77,12 +105,38 @@ export function WallPage() {
     navigate(`/mur${qs ? `?${qs}` : ''}`, { replace: true })
   }
 
-  const cameras = useMemo(() => {
+  // Without a choice, every camera in the order kept on the server.
+  const wall = useMemo(() => {
     const enabled = all.filter((c) => c.enabled)
+    if (waiting) return []
     if (chosen) return chosen.map((id) => enabled.find((c) => c.id === id)).filter((c): c is Camera => Boolean(c))
-    const rank = new Map(overviewOrder().map((id, i) => [id, i]))
-    return [...enabled].sort((a, b) => (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9))
-  }, [all, chosen?.join(',')])
+    return enabled
+  }, [all, chosen?.join(','), waiting])
+  // A camera clicked on is shown alone (the others stop); in the address, so
+  // that the back button of the browser or the tablet returns to the wall.
+  const soloId = query.get('solo')
+  const solo = soloId ? wall.find((c) => c.id === soloId) : undefined
+  const cameras = solo ? [solo] : wall
+  // Opened from the wall: going back returns to it. Opened from a bookmark:
+  // there is no wall to go back to, the address is changed instead.
+  const openedHere = useRef(false)
+  const openSolo = (id: string) => {
+    const p = new URLSearchParams(window.location.search)
+    p.set('solo', id)
+    openedHere.current = true
+    navigate(`/mur?${p.toString()}`)
+  }
+  const closeSolo = () => {
+    if (openedHere.current) window.history.back()
+    else setParams({})
+    openedHere.current = false
+  }
+  useEffect(() => {
+    if (!solo) return
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && closeSolo()
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [solo?.id])
 
   // Last time each camera saw motion: the most recent one is enlarged.
   const lastMotion = useRef(new Map<string, number>())
@@ -131,7 +185,7 @@ export function WallPage() {
   return (
     <div ref={root} className={`fixed inset-0 bg-black text-fg ${controls ? '' : 'cursor-none'}`}>
       {n === 0 ? (
-        <div className="flex h-full items-center justify-center text-sm text-muted">{t('Aucune caméra à afficher.', 'No camera to show.')}</div>
+        <div className="flex h-full items-center justify-center text-sm text-muted">{waiting ? t('Chargement…', 'Loading…') : t('Aucune caméra à afficher.', 'No camera to show.')}</div>
       ) : (
         <div className="grid h-full w-full gap-0.5" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))` }}>
           {cameras.map((c) => {
@@ -139,7 +193,17 @@ export function WallPage() {
             return (
               // Same order in the page whatever the focus (CSS `order` puts the
               // enlarged one first): moving a playing <video> stops its stream.
-              <div key={c.id} style={{ order: big ? -1 : 0 }} className={`relative min-h-0 min-w-0 overflow-hidden bg-bg-2 ${big ? 'col-span-2 row-span-2 ring-2 ring-warn ring-inset' : ''}`}>
+              <div
+                key={c.id}
+                style={{ order: big ? -1 : 0 }}
+                role="button"
+                tabIndex={0}
+                aria-label={solo ? t('Revenir au mur', 'Back to the wall') : t(`Afficher ${c.name} seule`, `Show ${c.name} alone`)}
+                title={solo ? t('Revenir au mur', 'Back to the wall') : t(`Afficher ${c.name} seule`, `Show ${c.name} alone`)}
+                onClick={() => (solo ? closeSolo() : openSolo(c.id))}
+                onKeyDown={(e) => e.key === 'Enter' && (solo ? closeSolo() : openSolo(c.id))}
+                className={`relative min-h-0 min-w-0 cursor-pointer overflow-hidden bg-bg-2 ${big ? 'col-span-2 row-span-2 ring-2 ring-warn ring-inset' : ''}`}
+              >
                 <CameraPlayer camera={c} active large={n === 1} />
                 <div className="pointer-events-none absolute top-1.5 left-1.5 flex gap-1">
                   <span className="rounded bg-black/60 px-1.5 py-0.5 text-xs font-semibold text-white">{c.name}</span>
@@ -158,6 +222,11 @@ export function WallPage() {
 
       {(controls || panel) && (
         <div className="absolute top-2 right-2 flex gap-1.5">
+          {solo && (
+            <button type="button" title={t('Revenir au mur', 'Back to the wall')} aria-label={t('Revenir au mur', 'Back to the wall')} className="rounded-md bg-black/70 p-2 text-white hover:bg-black" onClick={closeSolo}>
+              <LayoutGrid className="size-4" />
+            </button>
+          )}
           <button type="button" title={t('Plein écran', 'Full screen')} aria-label={t('Plein écran', 'Full screen')} className="rounded-md bg-black/70 p-2 text-white hover:bg-black" onClick={() => void (document.fullscreenElement ? document.exitFullscreen() : root.current?.requestFullscreen())?.catch(() => undefined)}>
             <Maximize className="size-4" />
           </button>
@@ -193,8 +262,8 @@ export function WallPage() {
                       className={`rounded-full border px-2.5 py-0.5 text-xs ${on ? 'border-accent bg-accent/15' : 'border-line text-muted'}`}
                       onClick={() => {
                         const next = on ? current.filter((x) => x !== c.id) : [...current, c.id]
-                        // All of them, in the overview order: no need to keep a list.
-                        setParams({ cameras: next.length === enabledIds.length && next.every((x) => enabledIds.includes(x)) ? null : next })
+                        // All of them, in the cameras' order: no need to keep a list.
+                        apply({ cameras: next.length === enabledIds.length && next.every((x) => enabledIds.includes(x)) ? null : next })
                       }}
                     >
                       {c.name}
@@ -205,16 +274,37 @@ export function WallPage() {
           </div>
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs text-muted">{t('Par ligne', 'Per row')}</span>
-            <Segmented label={t('Caméras par ligne', 'Cameras per row')} options={COLUMNS} value={columns} onChange={(v) => setParams({ cols: v })} />
+            <Segmented label={t('Caméras par ligne', 'Cameras per row')} options={COLUMNS} value={columns} onChange={(v) => apply({ cols: v })} />
           </div>
           <label className="flex items-start gap-2">
-            <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={focusOn} onChange={(e) => setParams({ focus: e.target.checked })} />
+            <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={focusOn} onChange={(e) => apply({ focus: e.target.checked })} />
             <span>
               {t('Agrandir la caméra en mouvement', 'Enlarge the camera with motion')}
               <span className="block text-xs text-muted">{t('Pendant le mouvement et 10 s après.', 'During motion and 10 s after.')}</span>
             </span>
           </label>
-          <p className="text-xs text-muted">{t('Ces réglages sont dans l’adresse de la page : ajoutez-la aux favoris (ou à l’écran d’accueil de la tablette) pour la retrouver telle quelle. L’écran reste allumé et la page se reconnecte seule.', 'These settings are in the page address: bookmark it (or add it to the tablet home screen) to get it back as it is. The screen stays on and the page reconnects by itself.')}</p>
+          <p className="text-xs text-muted">{t('Touchez une caméra pour l’afficher seule (avec son son, s’il en a), touchez-la encore ou faites « retour » pour revenir au mur.', 'Tap a camera to show it alone (with its sound, if any), tap it again or go back to return to the wall.')}</p>
+          {own ? (
+            <div className="space-y-2 rounded-md border border-line p-2.5 text-xs">
+              <p className="text-muted">{t('Réglages propres à cet écran (dans l’adresse de la page, à garder en favori).', 'Settings of this screen only (in the page address, to keep as a bookmark).')}</p>
+              <div className="flex flex-wrap gap-1.5">
+                <Button size="sm" disabledReason={canSave ? null : demo ? t('Indisponible en mode démo.', 'Not available in demo mode.') : t('Seul un administrateur peut changer le réglage de tous les écrans.', 'Only an administrator can change the setting of every screen.')} onClick={() => save({ cameras: chosen ?? [], columns: columns === 'auto' ? null : columns, focus: focusOn })}>
+                  {t('Utiliser pour tous les écrans', 'Use on every screen')}
+                </Button>
+                <Button size="sm" onClick={() => navigate('/mur', { replace: true })}>
+                  {t('Reprendre le réglage général', 'Back to the general setting')}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted">
+              {canSave
+                ? t('Réglage général : il vaut pour tous les écrans, le panneau Home Assistant compris.', 'General setting: it applies to every screen, the Home Assistant panel included.')
+                : t('Réglage général, choisi par un administrateur. Vos changements ne valent que pour cet écran (dans l’adresse de la page).', 'General setting, chosen by an administrator. Your changes apply to this screen only (in the page address).')}
+            </p>
+          )}
+          {saveError && <p className="text-xs text-err">{saveError}</p>}
+          <p className="text-xs text-muted">{t('L’écran reste allumé et la page se reconnecte seule.', 'The screen stays on and the page reconnects by itself.')}</p>
         </div>
       )}
     </div>

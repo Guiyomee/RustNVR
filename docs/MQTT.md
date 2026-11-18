@@ -39,6 +39,7 @@ Par caméra (appareil nommé comme la caméra) :
 | Vision nocturne | `binary_sensor` | la caméra filme en vision nocturne (image en noir et blanc, infrarouge), mesuré chaque minute sur l'image ; publié une fois connu |
 | Redémarrer la caméra | `button` (configuration) | redémarre la caméra par ONVIF ; seulement pour les caméras dont le port ONVIF est réglé (compte administrateur de la caméra nécessaire) |
 | Caméra active | `switch` | coupé : la caméra est mise en pause (ni connexion, ni enregistrement, ni détection) jusqu'à ce qu'on le rallume ou jusqu'au redémarrage de RustNVR, qui ne garde pas la pause ; toutes les caméras, celles de `config.toml` comprises |
+| Notifications | `switch` | coupé : plus de notification (webhooks) des mouvements, objets et passages de la caméra ; elle enregistre et garde ses événements, ses entités MQTT continuent, les pannes sont toujours signalées. Gardé au redémarrage (réglages de détection de la caméra) |
 | Personne | `binary_sensor` (`occupancy`) | personne reconnue pendant le mouvement (seulement avec l'IA optionnelle, [AI.md](AI.md)) |
 | Dernier mouvement | `camera` | image prise au début du dernier événement |
 | Dernière personne | `camera` | image où une personne a été reconnue, cadres bleus dessinés (seulement avec l'IA optionnelle) |
@@ -87,6 +88,8 @@ retenus vides).
 | `<p>/<caméra>/reboot` | n'importe quel message (commande) : redémarre la caméra par ONVIF | — |
 | `<p>/<caméra>/active` | `ON` / `OFF` (caméra en marche, pas en pause) | oui |
 | `<p>/<caméra>/active/set` | commande `ON` (reprendre) / `OFF` (pause jusqu'au redémarrage) | — |
+| `<p>/<caméra>/notifications` | `ON` / `OFF` (notifications de ses détections envoyées) | oui |
+| `<p>/<caméra>/notifications/set` | commande `ON` / `OFF` | — |
 | `<p>/<caméra>/person` | `ON` / `OFF` (personne reconnue, IA optionnelle) | oui |
 | `<p>/<caméra>/recording` | `ON` / `OFF` | oui |
 | `<p>/<caméra>/record_mode` | `Continu` / `Sur mouvement` / `Arrêté` | oui |

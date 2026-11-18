@@ -913,8 +913,14 @@ pub(super) async fn set_motion(
         .await
         .map_err(|e| ControlError::Internal(e.to_string()))?;
     let enabled = settings.enabled;
+    // Muting the notifications alone leaves the detection running.
+    let restart = state.motion.get(&id).is_none_or(|old| {
+        let mut same = old.clone();
+        same.mute_notifications = settings.mute_notifications;
+        same != settings
+    });
     state.motion.insert(id.clone(), settings);
-    if let Some(rt) = state.running.get_mut(&id) {
+    if restart && let Some(rt) = state.running.get_mut(&id) {
         if let Some(old) = rt.motion.take() {
             old.stop().await;
         }
@@ -1078,6 +1084,10 @@ impl NvrView for MqttBridge {
                             .is_some_and(|m| m.status.borrow().active),
                         audio_enabled: c.record.audio,
                         active: c.enabled && !state.paused.contains(&c.id),
+                        notifications: !state
+                            .motion
+                            .get(&c.id)
+                            .is_some_and(|m| m.mute_notifications),
                         onvif: c.onvif.is_some(),
                         night: state.night.get(&c.id).copied(),
                         device: shared.ptz.device(c.id.as_str()).map(|d| {
@@ -1195,6 +1205,27 @@ impl NvrView for MqttBridge {
             let shared = self.0.upgrade().ok_or("NVR arrêté")?;
             Controller(shared)
                 .set_camera_paused(camera.to_string(), !active)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn set_notifications(
+        &self,
+        camera: CameraId,
+        enabled: bool,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let shared = self.0.upgrade().ok_or("NVR arrêté")?;
+            let mut settings = Controller(shared.clone())
+                .motion(camera.to_string())
+                .await
+                .map_err(|e| e.to_string())?;
+            if settings.mute_notifications == !enabled {
+                return Ok(());
+            }
+            settings.mute_notifications = !enabled;
+            set_motion(&shared, camera.as_str(), settings)
                 .await
                 .map_err(|e| e.to_string())
         })

@@ -1,5 +1,5 @@
 import { HardDrive } from 'lucide-react'
-import { destinationsDefaultFirst, diskPercent, isRemote, storagePercent } from '../../hooks/useStorage'
+import { defaultDiskDestination, destinationsDefaultFirst, diskPercent, isRemote } from '../../hooks/useStorage'
 import { formatBytes, formatNumber } from '../../lib/format'
 import type { Destination, Storage } from '../../types/api'
 import { Badge, Card, CardHeader } from '../ui/Card'
@@ -71,16 +71,24 @@ export function DestinationDisks({ storage }: { storage: Storage }) {
   )
 }
 
+/**
+ * The disk of the default destination (the recordings directory's disk for
+ * S3 / SFTP), with the recordings it holds and its estimated time left.
+ */
 export function StorageSummary({ storage }: { storage: Storage }) {
-  const pct = storagePercent(storage)
-  const d = storage.disk
+  const dest = defaultDiskDestination(storage)
+  const d = dest ? dest.disk : storage.disk
+  const pct = diskPercent(d)
+  const recordings = dest ? dest.recordings_bytes : storage.recordings_bytes
+  const daysLeft = dest ? dest.estimated_days_until_full : storage.estimated_days_until_full
   return (
     <div className="space-y-3">
       <div className="flex items-end justify-between">
         <div className="tabular text-2xl font-semibold">{pct === null ? '—' : `${formatNumber(pct)} %`}</div>
-        <div className="text-right text-xs text-muted">{d ? `${formatBytes(d.used_bytes)} / ${formatBytes(d.total_bytes)}` : t('Disque inconnu', 'Unknown disk')}</div>
+        <div className="text-right text-xs text-muted">{d ? `${formatBytes(d.used_bytes)} / ${formatBytes(d.total_bytes)}` : dest && !dest.available ? t('Point de stockage indisponible', 'Destination unavailable') : t('Disque inconnu', 'Unknown disk')}</div>
       </div>
       <Meter value={pct} label={t('Occupation du disque des enregistrements', 'Recordings disk usage')} />
+      {dest && !dest.available && dest.unavailable_reason && <p className="text-xs text-err">{dest.unavailable_reason}</p>}
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
         <div>
           <dt className="text-xs text-muted">{t('Libre', 'Free')}</dt>
@@ -88,16 +96,16 @@ export function StorageSummary({ storage }: { storage: Storage }) {
         </div>
         <div>
           <dt className="text-xs text-muted">{t('Enregistrements', 'Recordings')}</dt>
-          <dd className="tabular">{formatBytes(storage.recordings_bytes)}</dd>
+          <dd className="tabular">{formatBytes(recordings)}</dd>
         </div>
         <div className="col-span-2">
           <dt className="text-xs text-muted">{t('Autonomie estimée', 'Estimated time left')}</dt>
           <dd className="text-sm">
-            {storage.estimated_days_until_full === null ? (
+            {daysLeft == null ? (
               <span className="text-muted">{t("Pas assez d'historique (≥ 1 h d'enregistrements requis)", "Not enough history (≥ 1 h of recordings needed)")}</span>
             ) : (
               <>
-                <span className="tabular">≈ {formatNumber(storage.estimated_days_until_full)}{t(' jours', ' days')}</span>
+                <span className="tabular">≈ {formatNumber(daysLeft)}{t(' jours', ' days')}</span>
                 <span className="text-xs text-muted">{t(' avant disque plein au rythme actuel', ' before the disk is full at the current rate')}</span>
               </>
             )}

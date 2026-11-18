@@ -82,11 +82,17 @@ CR=$(run -v "$(host "$WORK/src"):/src:ro" debian:12 \
 [ -z "$CR" ] || die "fins de ligne CRLF dans l'export : $CR"
 
 # --- 3. Build ----------------------------------------------------------------------
+# The latest images, not those of an earlier release kept by Docker (the
+# controls must run with the latest stable Rust).
+say "Images à jour (node:24, rust:1-bookworm)"
+docker pull -q node:24-bookworm >/dev/null
+docker pull -q rust:1-bookworm >/dev/null
 say "Interface (node:24)"
 run -v "$(host "$WORK/src"):/src" -w /src/web node:24-bookworm \
     sh -c 'npm ci --silent --no-audit --no-fund >/dev/null && npm run build >/dev/null && ls dist/index.html >/dev/null'
 say "Contrôles (fmt, clippy) et programme (Debian 12 : quelques minutes)"
-run -v rnvr-cargo-registry:/usr/local/cargo/registry -v rnvr-bookworm-target:/target \
+# CARGO_BUILD_JOBS=2 scripts/release.sh … on a machine short of memory.
+run -e CARGO_BUILD_JOBS -v rnvr-cargo-registry:/usr/local/cargo/registry -v rnvr-bookworm-target:/target \
     -v "$(host "$WORK/src"):/src" -v "$(host "$WORK/dist"):/out" rust:1-bookworm bash -c '
         set -euo pipefail
         apt-get update -qq && apt-get install -y -qq --no-install-recommends cmake clang >/dev/null
@@ -126,14 +132,16 @@ run -v "$(host "$WORK/old"):/old:ro" -v "$(host "$WORK/dist/archive"):/dist:ro" 
 # --- 5. Output ---------------------------------------------------------------------
 mkdir -p "$OUT"
 cp "$WORK/dist/archive/"* "$OUT/"
-[ -z "$NOTES" ] || cp "$NOTES" "$OUT/notes-v$VERSION.md"
+# The notes may already be there (written in --out).
+[ -z "$NOTES" ] || [ "$NOTES" -ef "$OUT/notes-v$VERSION.md" ] || cp "$NOTES" "$OUT/notes-v$VERSION.md"
 (cd "$OUT" && sha256sum -c --quiet ./*.sha256)
 say "Prêt dans $OUT"
 
 # --- 6. GitHub export --------------------------------------------------------------
 # Kept out of the public copy: notes for the maintainers and the homelab setup.
 INTERNAL=(CLAUDE.md ROADMAP.md compose.homelab.yaml
-    docs/CAHIER_DES_CHARGES.md docs/MESURES.md docs/VERIFICATION.md scripts/push-image.sh)
+    docs/CAHIER_DES_CHARGES.md docs/MESURES.md docs/PROCEDURE.md docs/VERIFICATION.md
+    scripts/push-image.sh .claude)
 if [ -n "$GITHUB" ] && [ "$REHEARSE" = 0 ]; then
     say "Export vers le clone GitHub $GITHUB"
     (
@@ -150,7 +158,7 @@ if [ -n "$GITHUB" ] && [ "$REHEARSE" = 0 ]; then
         find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
         git -C "$ROOT" -c core.autocrlf=false archive HEAD | tar -x
         cp "$KEEP/compose.yaml" . && cp -r "$KEEP/.github" . && rm -rf "$KEEP"
-        rm -f "${INTERNAL[@]}"
+        rm -rf "${INTERNAL[@]}"
         git add -A
         # Scripts stay executable (a Windows clone may have lost the bit).
         git ls-files 'scripts/*.sh' 'scripts/*.py' 'packaging/*.sh' 'packaging/**/*.sh' \

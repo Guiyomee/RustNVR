@@ -15,3 +15,7 @@
 # Settings of one machine (NAS folder, graphics card), merged with compose.yaml.
 compose.override.yaml
 /.release-leaks
+# Written by the tests of the retina copy (crates/retina/PATCH.md).
+/crates/retina/Cargo.lock
+# Claude Code settings of one machine.
+/.claude/settings.local.json

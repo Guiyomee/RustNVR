@@ -5,7 +5,7 @@ import { Button } from '../components/ui/Button'
 import { Badge, Card, CardHeader, PageHeader } from '../components/ui/Card'
 import { EmptyState, ErrorState, LoadingState } from '../components/ui/States'
 import { useCapability, useLive } from '../data/DataContext'
-import { useStorage } from '../hooks/useStorage'
+import { defaultDiskDestination, useStorage } from '../hooks/useStorage'
 import { formatBytes, formatDate, formatDateTime, formatNumber } from '../lib/format'
 import { navigate } from '../lib/router'
 import type { DayStorage, Destination } from '../types/api'
@@ -70,10 +70,13 @@ export function StoragePage() {
   const retention = useCapability('retention')
   const names = useMemo(() => new Map(cameras.map((c) => [c.id, c.name])), [cameras])
   const s = storage.data
+  // Where cameras record unless told otherwise (the recordings directory for S3 / SFTP).
+  const dest = defaultDiskDestination(s)
+  const where = dest ? dest.path : s?.recordings_dir
 
   return (
     <>
-      <PageHeader title={t('Stockage', 'Storage')} description={s ? t(`Enregistrements dans ${s.recordings_dir}`, `Recordings in ${s.recordings_dir}`) : undefined} />
+      <PageHeader title={t('Stockage', 'Storage')} description={s ? t(`Enregistrements dans ${where}`, `Recordings in ${where}`) : undefined} />
       {storage.error && !s ? (
         <Card>
           <ErrorState error={storage.error} onRetry={storage.reload} />
@@ -83,7 +86,7 @@ export function StoragePage() {
       ) : (
         <div className="grid gap-4 xl:grid-cols-3">
           <Card>
-            <CardHeader title={t('Disque des enregistrements', 'Recordings disk')} icon={<HardDrive className="size-4" />} subtitle={t(`Calculé le ${formatDateTime(s.computed_at_ms)}`, `Computed on ${formatDateTime(s.computed_at_ms)}`)} />
+            <CardHeader title={t('Disque des enregistrements', 'Recordings disk')} icon={<HardDrive className="size-4" />} subtitle={`${dest ? `${dest.name} · ` : ''}${t(`Calculé le ${formatDateTime(s.computed_at_ms)}`, `Computed on ${formatDateTime(s.computed_at_ms)}`)}`} />
             <div className="p-4">
               <StorageSummary storage={s} />
             </div>

@@ -216,6 +216,8 @@ export interface MotionSettings {
   lines?: CrossingLine[]
   /** When motion and crossings count (and « on motion » recording records); empty or absent: all the time. */
   schedule?: TimeRange[]
+  /** No notification of its detections (webhooks); events, recording and MQTT go on. Absent: false. */
+  mute_notifications?: boolean
 }
 
 /**
@@ -949,4 +951,14 @@ export interface ReplayResult {
   changed: number
   /** Pictures of the day left out (beyond 200). */
   skipped: number
+}
+
+/** Settings of the video wall, the same on every device (`GET` / `PUT /wall`). */
+export interface WallSettings {
+  /** Cameras shown, in this order; empty: every camera. */
+  cameras: string[]
+  /** Cameras per row, 1 to 4; null: chosen from the number of cameras. */
+  columns: number | null
+  /** The camera with motion is enlarged. */
+  focus: boolean
 }

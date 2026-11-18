@@ -615,6 +615,7 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
             "/camera-order",
             get(detection::camera_order).put(detection::set_camera_order),
         )
+        .route("/wall", get(detection::wall).put(detection::set_wall))
         .route(
             "/cameras/{id}/presence/reset",
             post(crate::stats::reset_presence),

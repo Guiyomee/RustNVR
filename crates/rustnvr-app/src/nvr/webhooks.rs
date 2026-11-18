@@ -993,6 +993,18 @@ async fn camera_name(shared: &Shared, camera: &rustnvr_core::CameraId) -> String
         .unwrap_or_else(|| camera.as_str().to_owned())
 }
 
+/// Whether the notifications of the detections of `camera` are muted (its
+/// « Notifications » switch is off). Failures still go through.
+async fn muted(shared: &Shared, camera: &rustnvr_core::CameraId) -> bool {
+    shared
+        .state
+        .lock()
+        .await
+        .motion
+        .get(camera)
+        .is_some_and(|m| m.mute_notifications)
+}
+
 /// The « at most one notification every N minutes per camera » of each
 /// webhook: the first event of a camera goes through with all its calls
 /// (motion, objects, end), the next ones within the wait are left out
@@ -1518,6 +1530,9 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                 object,
                 picture,
             } => {
+                if muted(&shared, &camera).await {
+                    continue;
+                }
                 let name = camera_name(&shared, &camera).await;
                 let call = CrossingCall {
                     camera: camera.as_str(),
@@ -1576,6 +1591,9 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
             }
             _ => continue,
         };
+        if muted(&shared, &event.camera).await {
+            continue;
+        }
         if sent.len() > FOLLOWED {
             sent.clear();
         }
