@@ -3,7 +3,7 @@
 [![Stars](https://img.shields.io/github/stars/Guiyomee/RustNVR?style=flat&logo=github)](https://github.com/Guiyomee/RustNVR/stargazers)
 [![Downloads](https://img.shields.io/github/downloads/Guiyomee/RustNVR/total?style=flat&label=downloads)](https://github.com/Guiyomee/RustNVR/releases)
 [![Version](https://img.shields.io/github/v/release/Guiyomee/RustNVR?style=flat&label=version)](https://github.com/Guiyomee/RustNVR/releases/latest)
-[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=flat)](#license)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-orange?style=flat)](#license)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?style=flat&logo=discord&logoColor=white)](https://discord.gg/6aDKTM6pXY)
 
 <img src="web/public/favicon.svg" width="96" height="96" alt="RustNVR logo: a camera lens with a copper ring">
@@ -162,11 +162,28 @@ And if RustNVR is useful to you: [a coffee on Ko-fi](https://ko-fi.com/Q4Z62AA83
 
 ## License
 
-Your choice: [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE).
+Since 22 November 2026 (this branch, and every version from 2026.11.10 on),
+RustNVR is **source-available** under the
+[PolyForm Noncommercial License 1.0.0](LICENSE):
+
+- **free for any non-commercial use**: at home, in a homelab, for an
+  association, education or research; you may read, change and share it,
+  keeping the `Required Notice` line of [LICENSE](LICENSE);
+- **any commercial use needs the author's written permission**: selling it
+  or a modified version, offering it as a paid service, using it in a
+  company or inside a product. Ask on [Discord](https://discord.gg/6aDKTM6pXY)
+  or in an [issue](https://github.com/Guiyomee/RustNVR/issues).
+
+Versions up to 2026.11.09 were published under MIT or Apache 2.0
+([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)) and stay under
+them; the contributions received under those licenses are included under
+their terms. The name « RustNVR » and its logo are not covered by any of
+these licenses.
 
 The compiled program contains libopus (Xiph.Org and others, 3-clause BSD
 license: [LICENSE-libopus](LICENSE-libopus)), shipped with the release
 archives.
 
-Unless stated otherwise, any contribution submitted for inclusion in RustNVR
-is licensed under both, without any additional terms.
+By submitting a contribution, you agree that it is distributed under the
+PolyForm Noncommercial License 1.0.0 and that the author may also offer it
+under other terms (a commercial license, for instance).

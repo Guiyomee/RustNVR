@@ -5,6 +5,16 @@ précautions) sont sur la page de chaque
 [release](https://github.com/Guiyomee/RustNVR/releases). Versions
 « calendrier » : année.mois.numéro dans le mois.
 
+## Non publiée
+
+### Licence
+- **RustNVR passe sous la licence PolyForm Noncommercial 1.0.0** (fichier
+  `LICENSE`, depuis le 22/11/2026) : toujours gratuit pour tout usage non
+  commercial (maison, homelab, associations, enseignement), mais un usage
+  commercial (vente, service payant, entreprise, produit) demande l'accord
+  de l'auteur. Les versions jusqu'à la 2026.11.09 restent sous MIT ou
+  Apache 2.0.
+
 ## 2026.11.09 (2026-11-18)
 
 ### Nouveautés

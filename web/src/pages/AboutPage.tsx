@@ -41,7 +41,7 @@ export function AboutPage() {
             <dt className="text-muted">API</dt>
             <dd>v{capabilities?.api_version ?? '—'}</dd>
             <dt className="text-muted">{t('Licence', 'Licence')}</dt>
-            <dd>MIT OR Apache-2.0</dd>
+            <dd>PolyForm Noncommercial 1.0.0</dd>
             <dt className="text-muted">{t('Interface', 'Interface')}</dt>
             <dd>React, TypeScript, Tailwind CSS, Lucide</dd>
           </dl>
