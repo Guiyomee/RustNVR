@@ -124,11 +124,6 @@ impl DestinationStore {
         }
     }
 
-    /// Shared flag telling whether segments currently go to the fallback.
-    pub fn fallback_flag(&self) -> Arc<AtomicBool> {
-        self.using_fallback.clone()
-    }
-
     fn switch(&self, to_fallback: bool, reason: &str) {
         if self.using_fallback.swap(to_fallback, Ordering::Relaxed) != to_fallback {
             if to_fallback {
@@ -246,17 +241,16 @@ mod tests {
         let cam = CameraId::new("cam").expect("id");
         let mut store =
             DestinationStore::new(&cam, dest(&missing, false), Some(local.path().to_owned()));
-        let flag = store.fallback_flag();
 
         let f = store.create(&cam, SystemTime::now()).expect("fallback");
         assert!(f.path().starts_with(local.path()));
-        assert!(flag.load(Ordering::Relaxed));
+        assert!(store.using_fallback.load(Ordering::Relaxed));
         f.abandon();
 
         std::fs::create_dir(&missing).expect("share appears");
         let f = store.create(&cam, SystemTime::now()).expect("primary");
         assert!(f.path().starts_with(&missing));
-        assert!(!flag.load(Ordering::Relaxed));
+        assert!(!store.using_fallback.load(Ordering::Relaxed));
         f.abandon();
 
         // Without fallback the error names the destination.

@@ -1,0 +1,14 @@
+# Update asked from the RustNVR interface. RustNVR, which runs without root
+# rights, only writes the wanted version in /var/lib/rustnvr/update-request;
+# this unit then starts rustnvr-update.service, as root. Installed and
+# enabled by install.sh (Debian, Proxmox LXC); Docker has no such unit.
+
+[Unit]
+Description=RustNVR: update asked from the interface
+
+[Path]
+PathExists=/var/lib/rustnvr/update-request
+Unit=rustnvr-update.service
+
+[Install]
+WantedBy=multi-user.target

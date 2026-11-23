@@ -54,6 +54,41 @@ pub struct MotionSettings {
     /// when set, so that an older version still reads the settings.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mute_notifications: bool,
+    /// A short video of each day (one picture a minute) is made every
+    /// night from the recordings. Written only when set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timelapse: bool,
+    /// The picture of an event (thumbnail, object recognition, notifications)
+    /// is the photo the camera gives through ONVIF (`GetSnapshotUri`, full
+    /// definition) instead of a picture of the detection stream; that one
+    /// when the photo fails. Needs the camera's ONVIF port. Written only
+    /// when set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub camera_photo: bool,
+    /// Widest camera photo kept, in pixels: one of [`CAMERA_PHOTO_WIDTHS`],
+    /// 0 for the camera's own size. Written only when not the default.
+    #[serde(
+        default = "default_camera_photo_width",
+        skip_serializing_if = "is_default_camera_photo_width"
+    )]
+    pub camera_photo_width: u32,
+    /// Do not report a frozen or covered picture for this camera (a camera
+    /// filming a dark room whose light is switched off at night, for
+    /// example). Written only when set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_picture_check: bool,
+}
+
+/// Widths offered for the camera photo (0: the camera's own size).
+pub const CAMERA_PHOTO_WIDTHS: [u32; 3] = [1280, 1920, 0];
+
+fn default_camera_photo_width() -> u32 {
+    1920
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_camera_photo_width(w: &u32) -> bool {
+    *w == default_camera_photo_width()
 }
 
 /// Most crossing lines per camera.
@@ -107,6 +142,10 @@ impl Default for MotionSettings {
             lines: Vec::new(),
             schedule: Vec::new(),
             mute_notifications: false,
+            timelapse: false,
+            camera_photo: false,
+            camera_photo_width: 1920,
+            no_picture_check: false,
         }
     }
 }
@@ -178,6 +217,11 @@ impl MotionSettings {
     /// Every problem of these settings (empty when valid).
     pub fn problems(&self) -> Vec<String> {
         let mut p = Vec::new();
+        if !CAMERA_PHOTO_WIDTHS.contains(&self.camera_photo_width) {
+            p.push(
+                "taille de la photo de la caméra : 1280, 1920 ou 0 (taille d'origine)".to_owned(),
+            );
+        }
         if !(1..=100).contains(&self.sensitivity) {
             p.push("la sensibilité doit être comprise entre 1 et 100".to_owned());
         }
@@ -344,6 +388,9 @@ pub struct DetectionEvent {
     pub has_thumbnail: bool,
     /// Objects recognized in the thumbnail (optional AI; empty without it).
     pub objects: Vec<DetectedObject>,
+    /// Journey between cameras it belongs to: the identifier of the first
+    /// event of the journey (see [`crate::journey`]).
+    pub journey: Option<i64>,
 }
 
 #[cfg(test)]
@@ -367,6 +414,10 @@ mod tests {
             lines: Vec::new(),
             schedule: Vec::new(),
             mute_notifications: false,
+            timelapse: false,
+            camera_photo: false,
+            camera_photo_width: 1920,
+            no_picture_check: false,
         };
         let object = |label: &str, bbox: [f32; 4]| DetectedObject {
             label: label.into(),
@@ -461,6 +512,35 @@ mod tests {
     }
 
     #[test]
+    fn camera_photo_width_has_a_default_and_three_choices() {
+        // Older settings (no width) keep 1920; the default is not written.
+        let old: MotionSettings = toml::from_str(
+            "enabled = true
+sensitivity = 50
+camera_photo = true",
+        )
+        .expect("old");
+        assert_eq!(old.camera_photo_width, 1920);
+        assert!(
+            !toml::to_string(&old)
+                .expect("toml")
+                .contains("camera_photo_width")
+        );
+        for w in CAMERA_PHOTO_WIDTHS {
+            let s = MotionSettings {
+                camera_photo_width: w,
+                ..MotionSettings::default()
+            };
+            assert!(s.problems().is_empty(), "{w}");
+        }
+        let odd = MotionSettings {
+            camera_photo_width: 1000,
+            ..MotionSettings::default()
+        };
+        assert_eq!(odd.problems().len(), 1);
+    }
+
+    #[test]
     fn validates_settings() {
         assert!(MotionSettings::default().problems().is_empty());
         let bad = MotionSettings {
@@ -477,6 +557,10 @@ mod tests {
             lines: Vec::new(),
             schedule: Vec::new(),
             mute_notifications: false,
+            timelapse: false,
+            camera_photo: false,
+            camera_photo_width: 1920,
+            no_picture_check: false,
         };
         assert_eq!(bad.problems().len(), 5, "{:?}", bad.problems());
     }

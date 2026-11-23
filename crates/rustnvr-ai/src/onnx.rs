@@ -1,6 +1,8 @@
 //! Built-in object recognition: a YOLOX model (ONNX, e.g. `yolox_nano.onnx`,
-//! Apache-2.0, from the YOLOX releases) run in process by tract, in pure
-//! Rust. No model is shipped: the user downloads one.
+//! Apache-2.0, from the YOLOX releases) run in process by ONNX Runtime when
+//! its library is installed (`crate::ort_engine`), else by tract, in pure
+//! Rust. Both get the same input and give the same rows. No model is
+//! shipped: the user downloads one.
 //!
 //! YOLOX pre/post-processing (as in its reference demo): the picture is
 //! scaled to fit the square input (aspect kept, padded with grey 114 at the
@@ -112,16 +114,46 @@ const PAD: f32 = 114.0;
 
 type Plan = Arc<TypedRunnableModel>;
 
+/// What runs the model.
+enum Engine {
+    /// ONNX Runtime, with the library it was loaded from and its threads.
+    Ort(
+        std::sync::Mutex<ort::session::Session>,
+        std::path::PathBuf,
+        usize,
+    ),
+    /// tract, in pure Rust.
+    Tract(Plan),
+}
+
 /// A YOLOX ONNX model ready to run.
 pub struct OnnxDetector {
-    plan: Plan,
+    engine: Engine,
     /// Side of the square input, in pixels.
     size: usize,
 }
 
 impl OnnxDetector {
-    /// Loads and optimizes the model at `path` (a few hundred ms).
+    /// Loads the model at `path` (a few hundred ms): with ONNX Runtime when
+    /// its library is installed, else (or when it fails) with tract.
     pub fn load(path: &Path) -> Result<Self, String> {
+        match crate::ort_engine::load(path) {
+            Ok(Some((session, size, library, threads))) => {
+                return Ok(Self {
+                    engine: Engine::Ort(std::sync::Mutex::new(session), library, threads),
+                    size,
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "ONNX Runtime not usable: object recognition runs on tract");
+            }
+        }
+        Self::load_tract(path)
+    }
+
+    /// The model with tract (optimized for the processor).
+    pub fn load_tract(path: &Path) -> Result<Self, String> {
         let mut model = tract_onnx::onnx()
             .model_for_path(path)
             .map_err(|e| format!("cannot read the model {}: {e}", path.display()))?;
@@ -142,7 +174,35 @@ impl OnnxDetector {
             .into_optimized()
             .and_then(|m| m.into_runnable())
             .map_err(|e| format!("unsupported model {}: {e}", path.display()))?;
-        Ok(Self { plan, size })
+        Ok(Self {
+            engine: Engine::Tract(plan),
+            size,
+        })
+    }
+
+    /// The engine running the model, for the interface and the log:
+    /// `ONNX Runtime` or `tract`.
+    pub fn engine(&self) -> &'static str {
+        match self.engine {
+            Engine::Ort(..) => "ONNX Runtime",
+            Engine::Tract(_) => "tract",
+        }
+    }
+
+    /// The ONNX Runtime library in use, if any.
+    pub fn library(&self) -> Option<&Path> {
+        match &self.engine {
+            Engine::Ort(_, library, _) => Some(library),
+            Engine::Tract(_) => None,
+        }
+    }
+
+    /// Processor threads used for one picture (tract: one).
+    pub fn threads(&self) -> usize {
+        match &self.engine {
+            Engine::Ort(_, _, threads) => *threads,
+            Engine::Tract(_) => 1,
+        }
     }
 
     /// Input side of the model.
@@ -154,20 +214,28 @@ impl OnnxDetector {
     pub fn detect_blocking(&self, jpeg: &[u8]) -> Result<Vec<DetectedObject>, AiError> {
         let (rgb, width, height) = decode_rgb(jpeg)?;
         let (input, ratio) = letterbox(&rgb, width, height, self.size);
-        let tensor: Tensor =
-            tract_ndarray::Array4::from_shape_vec((1, 3, self.size, self.size), input)
-                .map_err(|e| AiError::Provider(e.to_string()))?
-                .into();
-        let outputs = self
-            .plan
-            .run(tvec!(tensor.into()))
-            .map_err(|e| AiError::Provider(format!("inference: {e}")))?;
-        let out = outputs[0]
-            .to_plain_array_view::<f32>()
-            .map_err(|e| AiError::Provider(e.to_string()))?;
+        let out = match &self.engine {
+            Engine::Ort(session, ..) => {
+                let mut session = session.lock().unwrap_or_else(|e| e.into_inner());
+                crate::ort_engine::run(&mut session, input, self.size).map_err(AiError::Provider)?
+            }
+            Engine::Tract(plan) => {
+                let tensor: Tensor =
+                    tract_ndarray::Array4::from_shape_vec((1, 3, self.size, self.size), input)
+                        .map_err(|e| AiError::Provider(e.to_string()))?
+                        .into();
+                let outputs = plan
+                    .run(tvec!(tensor.into()))
+                    .map_err(|e| AiError::Provider(format!("inference: {e}")))?;
+                let view = outputs[0]
+                    .to_plain_array_view::<f32>()
+                    .map_err(|e| AiError::Provider(e.to_string()))?;
+                view.as_slice()
+                    .ok_or_else(|| AiError::Provider("unexpected output layout".to_owned()))?
+                    .to_vec()
+            }
+        };
         let rows: Vec<&[f32]> = out
-            .as_slice()
-            .ok_or_else(|| AiError::Provider("unexpected output layout".to_owned()))?
             .as_chunks::<85>()
             .0
             .iter()
@@ -210,6 +278,8 @@ type Job = (
 /// cameras moving together wait for each other instead.
 pub struct SharedOnnx {
     jobs: std::sync::mpsc::SyncSender<Job>,
+    /// The engine, for [`ObjectDetector::device`].
+    engine: &'static str,
 }
 
 impl SharedOnnx {
@@ -217,6 +287,7 @@ impl SharedOnnx {
     /// [`SharedOnnx`].
     pub fn new(detector: OnnxDetector) -> Result<Self, String> {
         let (jobs, queue) = std::sync::mpsc::sync_channel::<Job>(QUEUE);
+        let engine = detector.engine();
         std::thread::Builder::new()
             .name("ai-onnx".to_owned())
             .spawn(move || {
@@ -225,7 +296,7 @@ impl SharedOnnx {
                 }
             })
             .map_err(|e| format!("cannot start the analysis thread: {e}"))?;
-        Ok(Self { jobs })
+        Ok(Self { jobs, engine })
     }
 }
 
@@ -252,9 +323,10 @@ impl ObjectDetector for SharedOnnx {
         })
     }
 
-    /// tract has no GPU support: always the processor, one core per picture.
+    /// Always the processor (tract has no GPU support, ONNX Runtime is
+    /// used without one here), with the engine.
     fn device(&self) -> Option<String> {
-        Some("CPU".to_owned())
+        Some(format!("CPU · {}", self.engine))
     }
 }
 

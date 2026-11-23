@@ -18,6 +18,8 @@ export interface Capabilities {
   protect: boolean
   /** Bookmarks on the timeline (`/bookmarks`). */
   bookmarks: boolean
+  /** Journeys between cameras (`/journeys`). */
+  journeys: boolean
   retention: boolean
   settings_write: boolean
   mqtt: boolean
@@ -190,6 +192,8 @@ export interface MotionState {
   active: boolean
   /** Last decoder failure. */
   error: string | null
+  /** What is wrong with the picture while the stream flows: `frozen` (the same picture for 5 min) or `covered` (uniform at once for 1 min). */
+  picture?: 'frozen' | 'covered' | null
 }
 
 /** Polygon in picture fractions (0..1). */
@@ -218,6 +222,30 @@ export interface MotionSettings {
   schedule?: TimeRange[]
   /** No notification of its detections (webhooks); events, recording and MQTT go on. Absent: false. */
   mute_notifications?: boolean
+  /** A time-lapse of every day, made the next night. Absent: false. */
+  timelapse?: boolean
+  /** Event pictures are the photo the camera gives through ONVIF (`GET /cameras/{id}/photo` tries it), the usual picture when it fails. Absent: false. */
+  camera_photo?: boolean
+  /** Widest camera photo kept: 1280, 1920 or 0 for the camera's own size. Absent: 1920. */
+  camera_photo_width?: number
+  /** No report of a frozen or covered picture for this camera. Absent: false. */
+  no_picture_check?: boolean
+}
+
+/** GET /api/v1/cameras/{id}/timelapses: one item, newest first. */
+export interface Timelapse {
+  /** Local day of the server, `YYYY-MM-DD`. */
+  day: string
+  /** `ready`, or on its way: `waiting`, `making`, `failed` (absent before 2026.11.11: ready). */
+  state?: 'ready' | 'waiting' | 'making' | 'failed'
+  /** 0 while it is not ready. */
+  bytes: number
+  /** Storage destination holding it (empty while it is not ready). */
+  destination: string
+  /** How far it is made, 0 to 100 (`making`). */
+  percent?: number
+  /** Why it could not be made (`failed`). */
+  error?: string
 }
 
 /**
@@ -282,6 +310,8 @@ export interface AiSettings {
   timeout_seconds: number
   max_pictures: number
   interval_seconds: number
+  /** Then one picture every so many seconds while the event lasts and nothing is recognized; 0: no more. Absent (older server): 0. */
+  watch_seconds?: number
   /** Keep every analysed picture in the default destination, to replay the AI on them. */
   keep_pictures?: boolean
   /**
@@ -302,6 +332,10 @@ export interface AiView {
   device?: string | null
   /** Why the configured provider is not running. */
   error: string | null
+  /** Analyses of events that failed in a row (0 after a success); from 3, the « ai » webhooks report it. */
+  failures?: number
+  /** Error of the last of these failures. */
+  failure?: string | null
   onnx_available: boolean
   detection_ready: boolean
   managed: boolean
@@ -594,6 +628,7 @@ export type WsMessage =
   | { type: 'event'; event: NvrEvent }
   | { type: 'recorder_error'; camera: string; message: string }
   | { type: 'crossing'; crossing: Crossing }
+  | { type: 'journey'; journey: JourneyNotice }
 
 export interface ApiErrorBody {
   error: { code: string; message: string }
@@ -619,6 +654,45 @@ export interface NvrEvent {
   zones: string[]
   /** Objects recognized in the thumbnail by the optional AI provider (empty without it). */
   objects: DetectedObject[]
+  /** Journey between cameras it belongs to (`GET /journeys/{id}`); null or absent: none. */
+  journey?: string | null
+}
+
+/** An arrow between two cameras (`GET/PUT /api/v1/journeys/settings`). */
+export interface JourneyLink {
+  from: string
+  to: string
+  /** Longest time from the end of the event on `from` to the start of the one on `to`, 1 to 600 s. */
+  max_delay_s: number
+  /** Also from `to` to `from`. */
+  both_ways: boolean
+}
+
+export interface JourneySettings {
+  links: JourneyLink[]
+}
+
+export type JourneyDirection = 'arrival' | 'departure'
+
+/** GET /api/v1/journeys/{id}. */
+export interface Journey {
+  id: string
+  label: string | null
+  direction: JourneyDirection | null
+  start_ms: number
+  end_ms: number | null
+  /** One per camera, in order. */
+  events: NvrEvent[]
+}
+
+/** WebSocket `journey`: a journey grew or ended. */
+export interface JourneyNotice {
+  id: string
+  label: string
+  direction: JourneyDirection | null
+  cameras: string[]
+  events: string[]
+  ended: boolean
 }
 
 export interface DetectedObject {
@@ -735,6 +809,20 @@ export interface UpdateStatus {
   error: string | null
   /** How this RustNVR runs: installation instructions to show. */
   install: 'docker' | 'systemd' | 'other'
+  /** An update can be asked from the interface (installation made by install.sh). */
+  can_install: boolean
+  /** The last update asked from the interface, if any. */
+  install_state: InstallState | null
+}
+
+/** An update asked from the interface. */
+export interface InstallState {
+  /** `requested` (waiting for root), `running`, `done` or `failed`. */
+  state: 'requested' | 'running' | 'done' | 'failed'
+  version: string | null
+  at_ms: number | null
+  /** End of the output of a failed update. */
+  message: string | null
 }
 
 /** A bookmark on the timeline (`GET /api/v1/bookmarks`): a moment of a camera with a note. */
@@ -762,7 +850,7 @@ export interface ProtectedRange {
 export type WebhookKind = 'json' | 'discord' | 'ntfy' | 'telegram'
 
 /** What a webhook is called for. */
-export type WebhookEvent = 'motion' | 'objects' | 'end' | 'crossing' | 'storage' | 'camera' | 'recording'
+export type WebhookEvent = 'motion' | 'objects' | 'end' | 'crossing' | 'storage' | 'camera' | 'recording' | 'ai'
 
 /** The message chosen for one kind of call (Discord, ntfy, Telegram); absent fields keep the default. */
 export interface WebhookMessage {
@@ -803,6 +891,8 @@ export interface Webhook {
   schedule?: TimeRange[]
   /** Discord, ntfy, Telegram: a short video of each event called, about a minute after it. */
   clip?: boolean
+  /** Journeys between cameras: the next cameras of a journey are silent, one message sums it up at its end. */
+  journeys?: boolean
 }
 
 /** POST /api/v1/webhooks/test */
@@ -910,6 +1000,10 @@ export interface BackupPreview {
   cameras: { id: string; name: string }[]
   /** Cameras whose detection settings (zones, lines, masks) are in it. */
   motion: string[]
+  /** Whether the settings of the video wall are in it (absent before 2026.11.10). */
+  wall?: boolean
+  /** Arrows between cameras (journeys) in it. */
+  journeys?: number
   /** Why the restored configuration would not load (empty when it would). */
   problems: string[]
 }
@@ -918,7 +1012,53 @@ export interface BackupPreview {
 export interface BackupRestored {
   files: string[]
   motion: number
+  wall?: boolean
+  journeys?: number
   restart_needed: boolean
+}
+
+/** One automatic backup. */
+export interface AutoBackupFile {
+  name: string
+  bytes: number
+  created_ms: number
+}
+
+/** One attempt at an automatic backup. */
+export interface AutoBackupRun {
+  at_ms: number
+  file: string | null
+  error: string | null
+}
+
+/** GET /api/v1/backup/auto. */
+export interface AutoBackupView {
+  enabled: boolean
+  /** Storage destination written to, empty if none. */
+  destination: string
+  every_days: number
+  keep: number
+  /** A passphrase is stored (never shown). */
+  has_passphrase: boolean
+  /** Folder they are written to. */
+  folder: string | null
+  /** Why that folder cannot be used now. */
+  folder_problem: string | null
+  /** Newest first. */
+  backups: AutoBackupFile[]
+  /** Last attempt since the server started. */
+  last: AutoBackupRun | null
+  /** When the next one is due, while enabled. */
+  next_ms: number | null
+}
+
+/** PUT /api/v1/backup/auto body; `passphrase` absent or empty: the stored one is kept. */
+export interface AutoBackupInput {
+  enabled: boolean
+  destination: string
+  every_days: number
+  keep: number
+  passphrase?: string
 }
 
 /** Kept pictures of one camera on one day (`GET /ai/captures`). */

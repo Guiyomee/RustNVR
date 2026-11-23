@@ -27,8 +27,37 @@ puissante ; reportez-vous à leur documentation.
 ## IA intégrée (`onnx`) : sans autre programme
 
 RustNVR peut exécuter lui-même un modèle de détection **YOLOX** au format
-ONNX, avec la bibliothèque `tract` (pur Rust : ni Python, ni DLL, ni carte
-graphique). Aucun modèle n'est fourni avec le programme. Le plus simple :
+ONNX, avec l'un de ces deux moteurs :
+
+- **ONNX Runtime** (2026.11.10), quand sa bibliothèque est installée
+  à côté de RustNVR : l'archive Debian / Proxmox livre `libonnxruntime.so`
+  1.32.0 (version officielle de Microsoft, tirée de son paquet PyPI,
+  empreinte vérifiée par `scripts/fetch-onnxruntime.sh`, licence MIT) dans
+  `/usr/local/lib/rustnvr/`. Elle est chargée au démarrage, rien n'est lié à
+  la compilation. **2 à 4 fois plus rapide** que tract sur le même processeur,
+  avec les mêmes détections (voir « Mesures »).
+- **tract** (pur Rust : ni Python, ni DLL), le moteur de secours : sans la
+  bibliothèque (image Docker pour l'instant), si elle ne se charge pas (le
+  journal dit pourquoi), ou avec `RUSTNVR_ORT_LIB=off`.
+
+Ordre de recherche de la bibliothèque : `RUSTNVR_ORT_LIB` (un chemin, ou
+`off`), `../lib/rustnvr/libonnxruntime.so` à côté du programme,
+`/usr/local/lib/rustnvr/`, `/usr/lib/rustnvr/`. Le moteur utilisé est écrit
+dans le journal (« object recognition model loaded … engine=ONNX Runtime
+threads=4 ») et affiché dans Paramètres → IA (« Calcul : CPU · ONNX
+Runtime »).
+
+ONNX Runtime répartit une image sur **tous les cœurs que RustNVR a le droit
+d'utiliser** (ceux d'un LXC, d'une limite Docker `cpus` ou d'une affinité,
+pas ceux de la machine) : le temps dépend donc du nombre de cœurs (YOLOX-m
+sur le LXC : 790 ms avec 2 cœurs, 320 ms avec 4), alors que tract n'en prend
+qu'un. `RUSTNVR_AI_THREADS=3` (dans `/etc/rustnvr/rustnvr.env`) en fixe le
+nombre, par exemple pour laisser un cœur libre et limiter la chauffe d'un
+Raspberry Pi (82 °C après une minute d'analyses sur ses 4 cœurs). Entre deux
+images, ses fils ne tournent pas à vide (réglage par défaut d'ONNX Runtime
+coupé : il consomme du processeur pour rien sur une machine partagée).
+
+Aucun modèle n'est fourni avec le programme. Le plus simple :
 Paramètres → Intelligence artificielle → « Intégrée » → **Télécharger**
 (YOLOX-nano, 3,7 Mo, licence Apache-2.0) : le serveur le récupère depuis la
 publication officielle, vérifie son empreinte SHA-256
@@ -154,7 +183,13 @@ mot de passe est refusée.
   de large) est analysée, puis une nouvelle image toutes les
   `interval_seconds` (3 s) tant que le mouvement dure et que rien n'est
   reconnu, au plus `max_pictures` images (5) : une personne qui entre dans
-  le champ après le début du mouvement est vue. L'image où l'objet est
+  le champ après le début du mouvement est vue. Ensuite, tant que le
+  mouvement dure encore, une image toutes les `watch_seconds` (30 s ; 0 :
+  plus rien) : la pluie, le vent ou des phares font durer un mouvement de
+  longues minutes (10 min de suite sur une sonnette en infrarouge sous la
+  pluie, 21/11/2026), et quelqu'un qui passe pendant ce temps doit être vu.
+  Avec YOLOX-m sur processeur (≈ 1,3 s par image), c'est ≈ 4 % d'un cœur par
+  caméra concernée, seulement pendant ces mouvements. L'image où l'objet est
   reconnu devient la vignette de l'événement. Pas d'analyse en continu du flux.
 - Les objets retenus (confiance ≥ `min_score`, étiquette dans `labels`)
   sont enregistrés avec l'événement : API (`objects`), WebSocket, message
@@ -197,8 +232,11 @@ parking : « rien » devient quatre voitures), noms de fichiers piégés refusé
 
 ## Carte graphique (GPU)
 
-La reconnaissance intégrée calcule **toujours sur le processeur**, un cœur
-par image : tract, le moteur en Rust pur, n'utilise pas de carte graphique.
+La reconnaissance intégrée calcule **toujours sur le processeur** : tract
+n'utilise pas de carte graphique, et ONNX Runtime est livré sans (il prend
+alors tous les cœurs pour une image). Essai du 22/11 sur la puce Intel HD 530
+d'un i5-6500 avec OpenVINO : YOLOX-m en 151 ms au lieu de 343 ms sur le
+processeur ; pas encore proposé (bibliothèques OpenVINO de 200 Mo de plus).
 Les images sont analysées **une à la fois**, sur un seul fil : quand
 plusieurs caméras bougent ensemble, leurs images attendent leur tour. C'est ce
 qui garde la mémoire au niveau du modèle (YOLOX-l : 474 Mio contre 617 Mio

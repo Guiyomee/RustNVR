@@ -27,6 +27,17 @@ OLD=$(ls /old/*.tar.gz)
 tar -xzf "$OLD" -C /tmp
 RUSTNVR_WEB_PASSWORD=essai-local-1234 bash /tmp/rustnvr-*/install.sh --archive "$OLD" --no-start >/dev/null
 start
-bash /usr/local/bin/rustnvr-update --archive "$(ls /dist/*.tar.gz)" --no-start >/dev/null
+NEW=$(ls /dist/*.tar.gz)
+bash /usr/local/bin/rustnvr-update --archive "$NEW" --no-start >/dev/null
+# The units of one-click updates: installed by an updater of 2026.11.10 or
+# later; after an older one, reinstalling once (as the interface says)
+# brings them.
+if [ ! -f /etc/systemd/system/rustnvr-update.path ]; then
+    echo "  service de mise à jour absent après l'ancien rustnvr-update : réinstallation"
+    bash /usr/local/bin/rustnvr-update --archive "$NEW" --no-start >/dev/null
+fi
+for unit in rustnvr-update.path rustnvr-update.service; do
+    [ -f "/etc/systemd/system/$unit" ] || { echo "ÉCHEC : $unit pas installée"; exit 1; }
+done
 start
 echo "OK : mise à jour depuis $(basename "$OLD")"

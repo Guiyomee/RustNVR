@@ -75,6 +75,15 @@ Réparer manuellement des segments interrompus (fait aussi au démarrage) :
 Journaux : niveau via `RUST_LOG` (par défaut `info`, ex. `RUST_LOG=debug`),
 format JSON via `--log-format json`.
 
+Essayer un modèle YOLOX (ONNX) de l'IA intégrée sur quelques images, sans
+lancer RustNVR : il affiche, pour chaque image, les objets trouvés (score
+0,4 ou plus, avec leur cadre) et le temps d'analyse, puis les temps minimal,
+médian et maximal.
+
+```sh
+cargo run --release -p rustnvr-ai --example onnx_check --features onnx -- yolox_nano.onnx entree.jpg jardin.jpg
+```
+
 ## Tests
 
 ```sh

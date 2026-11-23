@@ -160,6 +160,42 @@ pub struct UserRecord {
     pub created_ms: i64,
     /// Cameras a viewer may see (`None`: all of them).
     pub cameras: Option<Vec<String>>,
+    /// The two-step login (TOTP) is on.
+    pub totp: bool,
+}
+
+/// An API token of an account (its secret is never kept).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiTokenRecord {
+    /// Identifier.
+    pub id: i64,
+    /// Account the token signs in as.
+    pub username: String,
+    /// Name given at its creation (the device or script).
+    pub name: String,
+    /// Reading only, even for an administrator.
+    pub read_only: bool,
+    /// Creation time (ms since the Unix epoch).
+    pub created_ms: i64,
+    /// Last use, if any.
+    pub last_used_ms: Option<i64>,
+}
+
+/// Who an API token signs in as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenUser {
+    /// Token identifier.
+    pub id: i64,
+    /// Account.
+    pub username: String,
+    /// Role of the account.
+    pub role: String,
+    /// Cameras the account sees (`None`: all of them).
+    pub cameras: Option<Vec<String>>,
+    /// Reading only.
+    pub read_only: bool,
+    /// Last use, if any.
+    pub last_used_ms: Option<i64>,
 }
 
 /// A line of the activity log of the accounts.
@@ -210,6 +246,7 @@ fn event_from_row(row: &SqliteRow) -> Result<DetectionEvent, DbError> {
         zones: serde_json::from_str(&zones)?,
         has_thumbnail: thumbnail.is_some(),
         objects: serde_json::from_str(&objects)?,
+        journey: row.try_get("journey")?,
     })
 }
 
@@ -290,6 +327,7 @@ impl Database {
             zones: zones.to_vec(),
             has_thumbnail: false,
             objects: Vec::new(),
+            journey: None,
         })
     }
 
@@ -454,7 +492,7 @@ impl Database {
     /// Every account, by name.
     pub async fn users(&self) -> Result<Vec<UserRecord>, DbError> {
         let rows =
-            sqlx::query("SELECT username, role, created_ms, cameras FROM users ORDER BY username")
+            sqlx::query("SELECT username, role, created_ms, cameras, totp_secret IS NOT NULL AS totp FROM users ORDER BY username")
                 .fetch_all(&self.pool)
                 .await?;
         rows.iter()
@@ -464,6 +502,7 @@ impl Database {
                     role: r.try_get("role")?,
                     created_ms: r.try_get("created_ms")?,
                     cameras: cameras_from_row(r)?,
+                    totp: r.try_get("totp")?,
                 })
             })
             .collect()
@@ -543,14 +582,195 @@ impl Database {
         Ok(done.rows_affected() == 1)
     }
 
-    /// Deletes an account and its sessions; false if it did not exist.
+    /// Deletes an account, its sessions, its API tokens and its recovery
+    /// codes; false if it did not exist.
     pub async fn delete_user(&self, username: &str) -> Result<bool, DbError> {
         self.delete_sessions_of(username).await?;
+        sqlx::query("DELETE FROM api_tokens WHERE username = ?")
+            .bind(username)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM recovery_codes WHERE username = ?")
+            .bind(username)
+            .execute(&self.pool)
+            .await?;
         let done = sqlx::query("DELETE FROM users WHERE username = ?")
             .bind(username)
             .execute(&self.pool)
             .await?;
         Ok(done.rows_affected() == 1)
+    }
+
+    /// The TOTP secret of an account (base32), if its two-step login is on.
+    pub async fn user_totp(&self, username: &str) -> Result<Option<String>, DbError> {
+        Ok(
+            sqlx::query("SELECT totp_secret FROM users WHERE username = ?")
+                .bind(username)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.try_get::<Option<String>, _>("totp_secret"))
+                .transpose()?
+                .flatten(),
+        )
+    }
+
+    /// Turns the two-step login of an account on with `secret`, with these
+    /// recovery codes (SHA-256), or off (`None`, codes forgotten); false if
+    /// the account does not exist.
+    pub async fn set_user_totp(
+        &self,
+        username: &str,
+        secret: Option<&str>,
+        recovery_hashes: &[String],
+    ) -> Result<bool, DbError> {
+        let mut tx = self.pool.begin().await?;
+        let done =
+            sqlx::query("UPDATE users SET totp_secret = ?, totp_step = NULL WHERE username = ?")
+                .bind(secret)
+                .bind(username)
+                .execute(&mut *tx)
+                .await?;
+        sqlx::query("DELETE FROM recovery_codes WHERE username = ?")
+            .bind(username)
+            .execute(&mut *tx)
+            .await?;
+        if secret.is_some() {
+            for hash in recovery_hashes {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO recovery_codes (username, code_hash) VALUES (?, ?)",
+                )
+                .bind(username)
+                .bind(hash)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Records that the code of 30-second `step` was used; false if that
+    /// step, or a later one, was already used (a code works once).
+    pub async fn use_totp_step(&self, username: &str, step: i64) -> Result<bool, DbError> {
+        let done = sqlx::query(
+            "UPDATE users SET totp_step = ? WHERE username = ?              AND totp_secret IS NOT NULL AND (totp_step IS NULL OR totp_step < ?)",
+        )
+        .bind(step)
+        .bind(username)
+        .bind(step)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Uses a recovery code (SHA-256); false if it is not one of the account.
+    pub async fn use_recovery_code(
+        &self,
+        username: &str,
+        code_hash: &str,
+    ) -> Result<bool, DbError> {
+        let done = sqlx::query("DELETE FROM recovery_codes WHERE username = ? AND code_hash = ?")
+            .bind(username)
+            .bind(code_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Recovery codes an account has left.
+    pub async fn recovery_codes_left(&self, username: &str) -> Result<i64, DbError> {
+        Ok(
+            sqlx::query("SELECT COUNT(*) AS n FROM recovery_codes WHERE username = ?")
+                .bind(username)
+                .fetch_one(&self.pool)
+                .await?
+                .try_get("n")?,
+        )
+    }
+
+    /// Creates an API token (SHA-256 of its secret); its identifier.
+    pub async fn create_api_token(
+        &self,
+        username: &str,
+        name: &str,
+        token_hash: &str,
+        read_only: bool,
+        now_ms: i64,
+    ) -> Result<i64, DbError> {
+        Ok(sqlx::query(
+            "INSERT INTO api_tokens (username, name, token_hash, read_only, created_ms)              VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(username)
+        .bind(name)
+        .bind(token_hash)
+        .bind(read_only)
+        .bind(now_ms)
+        .execute(&self.pool)
+        .await?
+        .last_insert_rowid())
+    }
+
+    /// The API tokens of an account, newest first.
+    pub async fn api_tokens(&self, username: &str) -> Result<Vec<ApiTokenRecord>, DbError> {
+        let rows = sqlx::query(
+            "SELECT id, username, name, read_only, created_ms, last_used_ms FROM api_tokens              WHERE username = ? ORDER BY id DESC",
+        )
+        .bind(username)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(ApiTokenRecord {
+                    id: r.try_get("id")?,
+                    username: r.try_get("username")?,
+                    name: r.try_get("name")?,
+                    read_only: r.try_get("read_only")?,
+                    created_ms: r.try_get("created_ms")?,
+                    last_used_ms: r.try_get("last_used_ms")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Revokes an API token of an account; false if it has no such token.
+    pub async fn delete_api_token(&self, username: &str, id: i64) -> Result<bool, DbError> {
+        let done = sqlx::query("DELETE FROM api_tokens WHERE id = ? AND username = ?")
+            .bind(id)
+            .bind(username)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Who the API token of this SHA-256 signs in as.
+    pub async fn api_token_user(&self, token_hash: &str) -> Result<Option<TokenUser>, DbError> {
+        let row = sqlx::query(
+            "SELECT t.id, t.read_only, t.last_used_ms, u.username, u.role, u.cameras              FROM api_tokens t JOIN users u ON u.username = t.username WHERE t.token_hash = ?",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| {
+            Ok(TokenUser {
+                id: r.try_get("id")?,
+                username: r.try_get("username")?,
+                role: r.try_get("role")?,
+                cameras: cameras_from_row(&r)?,
+                read_only: r.try_get("read_only")?,
+                last_used_ms: r.try_get("last_used_ms")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Records the last use of an API token.
+    pub async fn touch_api_token(&self, id: i64, now_ms: i64) -> Result<(), DbError> {
+        sqlx::query("UPDATE api_tokens SET last_used_ms = ? WHERE id = ?")
+            .bind(now_ms)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Records a login session.
@@ -939,6 +1159,50 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The arrows between cameras (JSON of `JourneySettings`), if chosen.
+    pub async fn journey_settings(&self) -> Result<Option<String>, DbError> {
+        Ok(
+            sqlx::query("SELECT settings FROM journey_settings WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.try_get("settings"))
+                .transpose()?,
+        )
+    }
+
+    /// Stores the arrows between cameras (JSON).
+    pub async fn set_journey_settings(&self, json: &str) -> Result<(), DbError> {
+        sqlx::query(
+            "INSERT INTO journey_settings (id, settings) VALUES (1, ?) \
+             ON CONFLICT(id) DO UPDATE SET settings = excluded.settings",
+        )
+        .bind(json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Puts the events `ids` into the journey `journey` (the identifier of
+    /// its first event).
+    pub async fn set_journey(&self, ids: &[i64], journey: i64) -> Result<(), DbError> {
+        sqlx::query("UPDATE events SET journey = ?1 WHERE id IN (SELECT value FROM json_each(?2))")
+            .bind(journey)
+            .bind(serde_json::to_string(ids)?)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The events of a journey, in order; empty when there is none (or its
+    /// events were removed by the retention).
+    pub async fn journey_events(&self, journey: i64) -> Result<Vec<DetectionEvent>, DbError> {
+        let rows = sqlx::query("SELECT * FROM events WHERE journey = ? ORDER BY start_ms, id")
+            .bind(journey)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(event_from_row).collect()
     }
 
     /// Removes crossings older than `before_ms` (with the events retention).
@@ -1579,6 +1843,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_step_login_and_api_tokens() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        assert!(db.create_user("anne", "h", "admin", 1).await.expect("user"));
+        assert_eq!(db.user_totp("anne").await.expect("none"), None);
+
+        // On, with two recovery codes; each step and each code works once.
+        let codes = ["c1".to_owned(), "c2".to_owned()];
+        assert!(
+            db.set_user_totp("anne", Some("SECRET"), &codes)
+                .await
+                .expect("on")
+        );
+        assert_eq!(
+            db.user_totp("anne").await.expect("on").as_deref(),
+            Some("SECRET")
+        );
+        assert!(db.users().await.expect("users")[0].totp);
+        assert!(db.use_totp_step("anne", 100).await.expect("step"));
+        assert!(!db.use_totp_step("anne", 100).await.expect("again"));
+        assert!(!db.use_totp_step("anne", 99).await.expect("older"));
+        assert!(db.use_totp_step("anne", 101).await.expect("next"));
+        assert!(db.use_recovery_code("anne", "c1").await.expect("code"));
+        assert!(!db.use_recovery_code("anne", "c1").await.expect("used"));
+        assert_eq!(db.recovery_codes_left("anne").await.expect("left"), 1);
+        // Off: secret and codes forgotten.
+        assert!(db.set_user_totp("anne", None, &[]).await.expect("off"));
+        assert_eq!(db.user_totp("anne").await.expect("off"), None);
+        assert_eq!(db.recovery_codes_left("anne").await.expect("left"), 0);
+        assert!(!db.use_totp_step("anne", 200).await.expect("no secret"));
+
+        // Tokens: found by their hash, revoked by their account only.
+        let id = db
+            .create_api_token("anne", "Home Assistant", "hash1", true, 5)
+            .await
+            .expect("token");
+        let user = db
+            .api_token_user("hash1")
+            .await
+            .expect("get")
+            .expect("found");
+        assert_eq!(
+            (user.username.as_str(), user.role.as_str()),
+            ("anne", "admin")
+        );
+        assert!(user.read_only && user.last_used_ms.is_none());
+        db.touch_api_token(id, 9).await.expect("touch");
+        let list = db.api_tokens("anne").await.expect("list");
+        assert_eq!((list.len(), list[0].last_used_ms), (1, Some(9)));
+        assert!(!db.delete_api_token("bob", id).await.expect("not bob's"));
+        assert!(db.delete_api_token("anne", id).await.expect("revoke"));
+        assert_eq!(db.api_token_user("hash1").await.expect("gone"), None);
+
+        // Removing the account removes its tokens.
+        db.create_api_token("anne", "script", "hash2", false, 6)
+            .await
+            .expect("token");
+        assert!(db.delete_user("anne").await.expect("delete"));
+        assert_eq!(db.api_token_user("hash2").await.expect("gone"), None);
+    }
+
+    #[tokio::test]
     async fn wall_settings_round_trip() {
         let dir = tempfile::tempdir().expect("tmp");
         let db = Database::open(dir.path()).await.expect("open");
@@ -1593,6 +1919,46 @@ mod tests {
             db.wall_settings().await.expect("get").as_deref(),
             Some(r#"{"cameras":["b"]}"#)
         );
+    }
+
+    #[tokio::test]
+    async fn journeys_group_events() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        assert_eq!(db.journey_settings().await.expect("empty"), None);
+        db.set_journey_settings(r#"{"links":[]}"#)
+            .await
+            .expect("set");
+        assert_eq!(
+            db.journey_settings().await.expect("get").as_deref(),
+            Some(r#"{"links":[]}"#)
+        );
+        let a = db
+            .start_event(&cam("sonnette"), EventKind::Motion, 1_000, 0.2, &[])
+            .await
+            .expect("a");
+        let b = db
+            .start_event(&cam("entree"), EventKind::Motion, 9_000, 0.2, &[])
+            .await
+            .expect("b");
+        let other = db
+            .start_event(&cam("jardin"), EventKind::Motion, 5_000, 0.2, &[])
+            .await
+            .expect("other");
+        db.set_journey(&[a.id, b.id], a.id).await.expect("join");
+        let journey = db.journey_events(a.id).await.expect("journey");
+        let cams: Vec<&str> = journey.iter().map(|e| e.camera.as_str()).collect();
+        assert_eq!(cams, ["sonnette", "entree"]);
+        assert!(journey.iter().all(|e| e.journey == Some(a.id)));
+        assert_eq!(
+            db.event(other.id)
+                .await
+                .expect("get")
+                .expect("some")
+                .journey,
+            None
+        );
+        assert!(db.journey_events(other.id).await.expect("none").is_empty());
     }
 
     #[tokio::test]
@@ -1613,6 +1979,10 @@ mod tests {
             lines: Vec::new(),
             schedule: Vec::new(),
             mute_notifications: false,
+            timelapse: false,
+            camera_photo: false,
+            camera_photo_width: 1920,
+            no_picture_check: false,
         };
         db.set_motion_settings(&cam("a"), &s).await.expect("set");
         db.set_motion_settings(&cam("a"), &s).await.expect("upsert");

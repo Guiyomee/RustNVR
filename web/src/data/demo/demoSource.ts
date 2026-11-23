@@ -43,6 +43,7 @@ const DEMO_CAPABILITIES: Capabilities = {
   export: false,
   protect: false,
   bookmarks: false,
+  journeys: false,
   retention: false,
   settings_write: false,
   mqtt: false,

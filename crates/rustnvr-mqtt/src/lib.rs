@@ -1167,9 +1167,16 @@ impl Client {
                 self.publish(topic, true, present.to_string());
             }
             NvrEvent::StorageState { .. } => self.publish_system().await,
+            // A journey between cameras, once ended: `<p>/journey`.
+            NvrEvent::Journey(j) if j.ended => {
+                let topic = self.topics.system("journey");
+                self.publish(topic, false, journey_json(&j).to_string());
+            }
             NvrEvent::StreamState { .. }
             | NvrEvent::SegmentFinished(_)
-            | NvrEvent::RecorderError { .. } => {}
+            | NvrEvent::RecorderError { .. }
+            | NvrEvent::PictureState { .. }
+            | NvrEvent::Journey(_) => {}
         }
     }
 
@@ -1239,9 +1246,47 @@ impl Client {
     }
 }
 
+/// JSON of an ended journey between cameras (`<p>/journey`).
+fn journey_json(j: &rustnvr_core::journey::JourneyUpdate) -> serde_json::Value {
+    serde_json::json!({
+        "id": j.id,
+        "label": j.label,
+        "direction": j.direction,
+        "cameras": j.steps.iter().map(|s| s.camera.as_str()).collect::<Vec<_>>(),
+        "events": j.steps.iter().map(|s| s.event).collect::<Vec<_>>(),
+        "start_ms": j.steps.first().map(|s| s.start_ms),
+        "end_ms": j.steps.iter().filter_map(|s| s.end_ms).max(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn journey_json_lists_the_cameras() {
+        use rustnvr_core::journey::{JourneyDirection, JourneyStep, JourneyUpdate};
+        let step = |event: i64, camera: &str, start_ms: i64| JourneyStep {
+            event,
+            camera: CameraId::new(camera).expect("id"),
+            start_ms,
+            end_ms: Some(start_ms + 4_000),
+        };
+        let j = JourneyUpdate {
+            id: 7,
+            label: "person".into(),
+            steps: vec![step(7, "sonnette", 1_000), step(9, "entree", 8_000)],
+            direction: Some(JourneyDirection::Arrival),
+            ended: true,
+        };
+        let v = journey_json(&j);
+        assert_eq!(v["cameras"], serde_json::json!(["sonnette", "entree"]));
+        assert_eq!(v["direction"], "arrival");
+        assert_eq!(
+            (v["start_ms"].as_i64(), v["end_ms"].as_i64()),
+            (Some(1_000), Some(12_000))
+        );
+    }
 
     #[test]
     fn object_kinds_make_safe_topic_levels() {
@@ -1268,6 +1313,7 @@ mod tests {
                 bbox: Some([0.25, 0.25, 0.5, 0.75]),
                 zone: Some("Allée".into()),
             }],
+            journey: None,
         };
         assert_eq!(
             event_json(&e),

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs or updates RustNVR on Linux x86-64 with systemd (Debian, Ubuntu,
+# Installs or updates RustNVR on Linux x86-64 or ARM 64-bit (Raspberry Pi) with systemd (Debian, Ubuntu,
 # a Proxmox LXC…) from the archive of a release: nothing to compile.
 #
 #   install.sh                     latest release, installed or updated
@@ -24,6 +24,8 @@ ARCHIVE=""
 START=1
 ROOT=/
 PORT=8080
+FROM_REQUEST=0
+RUN_REQUEST=""
 
 usage() {
     sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
@@ -38,6 +40,8 @@ Options:
   --port N           port of the interface at the first installation (8080)
   --no-start         do not start (or restart) the service
   --root DIR         install under DIR instead of / (tests; no account, no service)
+  --from-request     install the version asked from the interface (run as root
+                     by rustnvr-update.service; see below)
 EOF
 }
 
@@ -54,12 +58,66 @@ while [ $# -gt 0 ]; do
         --port) PORT=${2:?}; shift 2 ;;
         --no-start) START=0; shift ;;
         --root) ROOT=${2:?}; START=0; shift 2 ;;
+        --from-request) FROM_REQUEST=1; shift ;;
+        --run-request) RUN_REQUEST=${2:?}; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) die "option inconnue : $1 (--help)" ;;
     esac
 done
 
-[ "$(uname -m)" = x86_64 ] || die "seul Linux x86-64 est publié (ici : $(uname -m))"
+# --- Update asked from the interface --------------------------------------------
+# RustNVR runs without root rights: it only writes the wanted version in
+# REQUEST, and rustnvr-update.path starts this script as root with
+# --from-request. Only a version tag is taken from the request: the server of
+# the releases stays the one of update.conf. The state and the output go to
+# STATE_DIR, a folder of root that RustNVR reads but cannot write.
+REQUEST=/var/lib/rustnvr/update-request
+STATE_DIR=/var/lib/rustnvr-update
+write_state() {
+    install -d -m 0755 "$STATE_DIR"
+    printf 'state=%s\nversion=%s\nat=%s\n' "$1" "${2:-}" "$(date +%s)" > "$STATE_DIR/status.new"
+    mv -f "$STATE_DIR/status.new" "$STATE_DIR/status"
+}
+if [ "$FROM_REQUEST" = 1 ]; then
+    [ -e "$REQUEST" ] || [ -L "$REQUEST" ] || exit 0
+    # A regular file only, not a link to a file of root. Anything else is
+    # removed too: rustnvr-update.path would start this again and again.
+    if [ -L "$REQUEST" ] || [ ! -f "$REQUEST" ]; then
+        rm -rf "$REQUEST"
+        write_state failed
+        echo "demande refusée : ce n'est pas un fichier ordinaire" > "$STATE_DIR/log"
+        exit 1
+    fi
+    WANTED=$(head -c 64 "$REQUEST" | tr -d '[:space:]')
+    rm -f "$REQUEST"
+    case "$WANTED" in
+        v[0-9]*.[0-9]*.[0-9]*) ;;
+        *) WANTED="" ;;
+    esac
+    if [ -z "$WANTED" ] || [ -n "$(printf '%s' "${WANTED#v}" | tr -d '0-9.')" ]; then
+        write_state failed
+        echo "demande refusée : ce n'est pas un numéro de version" > "$STATE_DIR/log"
+        exit 1
+    fi
+    # This file is replaced during the update: run from a copy.
+    install -d -m 0755 "$STATE_DIR"
+    install -m 0755 "$0" "$STATE_DIR/runner.sh"
+    exec bash "$STATE_DIR/runner.sh" --run-request "$WANTED"
+fi
+if [ -n "$RUN_REQUEST" ]; then
+    VERSION=$RUN_REQUEST
+    # Read by root and by RustNVR only (its group), not by everyone.
+    install -m 0640 /dev/null "$STATE_DIR/log"
+    getent group rustnvr >/dev/null && chgrp rustnvr "$STATE_DIR/log"
+    exec >"$STATE_DIR/log" 2>&1
+    write_state running "$VERSION"
+fi
+
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64 | aarch64) ;;
+    *) die "publié pour Linux x86-64 et ARM 64 bits seulement (ici : $ARCH ; sur un Raspberry Pi, il faut le système 64 bits)" ;;
+esac
 if [ "$ROOT" = / ] && [ "$(id -u)" -ne 0 ]; then
     die "à lancer en root (sudo $0)"
 fi
@@ -81,7 +139,14 @@ SOURCE=${SOURCE:-https://github.com}
 SOURCE=${SOURCE%/}
 REPO=${REPO:-Guiyomee/RustNVR}
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+finish() {
+    local code=$?
+    rm -rf "$WORK"
+    if [ -n "$RUN_REQUEST" ]; then
+        if [ "$code" = 0 ]; then write_state done "$VERSION"; else write_state failed "$VERSION"; fi
+    fi
+}
+trap finish EXIT
 
 # Address of the latest release, in the API of the server.
 latest_url() {
@@ -101,7 +166,7 @@ if [ -z "$ARCHIVE" ]; then
             | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
         [ -n "$VERSION" ] || die "aucune version publiée trouvée sur $SOURCE/$REPO"
     fi
-    NAME="rustnvr-${VERSION#v}-linux-x86_64.tar.gz"
+    NAME="rustnvr-${VERSION#v}-linux-$ARCH.tar.gz"
     URL="$SOURCE/$REPO/releases/download/$VERSION/$NAME"
     say "Téléchargement de $NAME"
     curl -fsSL -o "$WORK/$NAME" "$URL" || die "téléchargement impossible : $URL"
@@ -158,6 +223,16 @@ rm -rf "$SHARE/web.old"
 mv "$SHARE/web.new" "$SHARE/web"
 rm -rf "$SHARE/web.old"
 install -m 0644 "$SRC/config.example.toml" "$SHARE/config.example.toml"
+# ONNX Runtime (object recognition 2 to 4 times faster than tract), when the
+# archive has it; RustNVR finds it in /usr/local/lib/rustnvr.
+if [ -f "$SRC/lib/libonnxruntime.so" ]; then
+    install -d -m 0755 "$ROOT/usr/local/lib/rustnvr"
+    install -m 0644 "$SRC/lib/libonnxruntime.so" "$ROOT/usr/local/lib/rustnvr/libonnxruntime.so.new"
+    mv -f "$ROOT/usr/local/lib/rustnvr/libonnxruntime.so.new" "$ROOT/usr/local/lib/rustnvr/libonnxruntime.so"
+    for f in LICENSE-onnxruntime ThirdPartyNotices-onnxruntime.txt; do
+        [ -f "$SRC/$f" ] && install -m 0644 "$SRC/$f" "$SHARE/$f"
+    done
+fi
 # This script, for the next updates.
 install -m 0755 "$SRC/install.sh" "$BIN/rustnvr-update"
 # Also reachable from /usr/bin: `pct enter` / `pct exec` (Proxmox) and some
@@ -174,6 +249,10 @@ fi
 printf 'RUSTNVR_SOURCE=%s\nRUSTNVR_REPO=%s\n' "$SOURCE" "$REPO" > "$ETC/update.conf"
 install -d -m 0755 "$(dirname "$UNIT")"
 install -m 0644 "$SRC/rustnvr.service" "$UNIT"
+# Updates asked from the interface (archives from 2026.11.10 on carry them).
+for unit in rustnvr-update.path rustnvr-update.service; do
+    [ -f "$SRC/$unit" ] && install -m 0644 "$SRC/$unit" "$(dirname "$UNIT")/$unit"
+done
 # A graphics card (H.264 conversions) or a webcam (USB cameras): the service
 # must see /dev (PrivateDevices=yes hides it); the rest of the hardening
 # stays. Checked again at each update: a device added later is picked up.
@@ -247,6 +326,9 @@ LISTENING=unknown
 if [ "$START" = 1 ] && systemd_running; then
     systemctl daemon-reload
     systemctl enable --quiet rustnvr
+    if [ -f /etc/systemd/system/rustnvr-update.path ]; then
+        systemctl enable --quiet --now rustnvr-update.path
+    fi
     systemctl restart rustnvr
     say "Service démarré (journaux : journalctl -u rustnvr -f)"
     if listening; then

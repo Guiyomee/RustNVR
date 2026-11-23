@@ -121,7 +121,7 @@ fn control_error(e: OnvifError) -> ControlError {
 }
 
 /// The ONVIF service of `camera`, as configured now.
-async fn target(shared: &Shared, camera: &str) -> Result<OnvifTarget, ControlError> {
+pub(super) async fn target(shared: &Shared, camera: &str) -> Result<OnvifTarget, ControlError> {
     let state = shared.state.lock().await;
     let cam = state
         .configs

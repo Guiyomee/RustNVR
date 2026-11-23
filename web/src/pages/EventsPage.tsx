@@ -2,7 +2,7 @@ import { BarChart3, LayoutGrid, List } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { UnavailableError } from '../api/client'
 import { ActivityStats } from '../components/events/ActivityStats'
-import { EVENT_KIND_LABEL, EventCard, EventRow } from '../components/events/EventCard'
+import { EVENT_KIND_LABEL, EventCard, EventRow, JourneyCard, JourneyRow, groupJourneys, journeyPlaybackUrl, type EventItem } from '../components/events/EventCard'
 import { Button } from '../components/ui/Button'
 import { Card, PageHeader } from '../components/ui/Card'
 import { EmptyState, ErrorState, LoadingState, Unavailable } from '../components/ui/States'
@@ -67,6 +67,9 @@ export function EventsPage() {
   }
 
   const list = events.data ?? []
+  // The events of a journey together, when every camera is shown.
+  const items: EventItem[] = camera ? list.map((event) => ({ kind: 'event', event })) : groupJourneys(list)
+  const name = (id: string) => names.get(id) ?? id
   return (
     <>
       <PageHeader
@@ -155,21 +158,29 @@ export function EventsPage() {
       ) : listView ? (
         <Card>
           <ul className="divide-y divide-line">
-            {list.slice(0, limit).map((e) => (
-              <EventRow key={e.id} event={e} cameraName={names.get(e.camera) ?? e.camera} onClick={() => open(e.camera, e.start_ms)} />
-            ))}
+            {items.slice(0, limit).map((i) =>
+              i.kind === 'journey' ? (
+                <JourneyRow key={`j${i.id}`} id={i.id} events={i.events} name={name} onClick={() => navigate(journeyPlaybackUrl(i.events))} />
+              ) : (
+                <EventRow key={i.event.id} event={i.event} cameraName={name(i.event.camera)} onClick={() => open(i.event.camera, i.event.start_ms)} />
+              ),
+            )}
           </ul>
         </Card>
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-6">
-          {list.slice(0, limit).map((e) => (
-            <EventCard key={e.id} event={e} cameraName={names.get(e.camera) ?? e.camera} onClick={() => open(e.camera, e.start_ms)} />
-          ))}
+          {items.slice(0, limit).map((i) =>
+            i.kind === 'journey' ? (
+              <JourneyCard key={`j${i.id}`} id={i.id} events={i.events} name={name} onClick={() => navigate(journeyPlaybackUrl(i.events))} />
+            ) : (
+              <EventCard key={i.event.id} event={i.event} cameraName={name(i.event.camera)} onClick={() => open(i.event.camera, i.event.start_ms)} />
+            ),
+          )}
         </div>
       )}
-      {list.length > limit && (
+      {items.length > limit && (
         <div className="mt-4 flex justify-center">
-          <Button onClick={() => setLimit((l) => l + PAGE)}>{t('Afficher plus (', 'Show more (')}{list.length - limit}{t(' restants)', ' left)')}</Button>
+          <Button onClick={() => setLimit((l) => l + PAGE)}>{t('Afficher plus (', 'Show more (')}{items.length - limit}{t(' restants)', ' left)')}</Button>
         </div>
       )}
     </>

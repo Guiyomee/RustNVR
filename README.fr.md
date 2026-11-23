@@ -167,9 +167,9 @@ rend service : [un café sur Ko-fi](https://ko-fi.com/Q4Z62AA835).
 
 ## Licence
 
-Depuis le 22 novembre 2026 (cette branche, et toutes les versions à partir
-de la 2026.11.10), RustNVR est publié **avec son code source** sous la
-[licence PolyForm Noncommercial 1.0.0](LICENSE) :
+RustNVR est publié **avec son code source** sous la
+[licence PolyForm Noncommercial 1.0.0](LICENSE), depuis la version
+2026.11.10 :
 
 - **gratuit pour tout usage non commercial** : chez soi, dans un homelab,
   pour une association, l'enseignement ou la recherche ; on peut le lire, le
@@ -182,13 +182,13 @@ de la 2026.11.10), RustNVR est publié **avec son code source** sous la
   [issue](https://github.com/Guiyomee/RustNVR/issues).
 
 Les versions jusqu'à la 2026.11.09 ont été publiées sous MIT ou Apache 2.0
-([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)) et le restent ;
+([LICENSE-MIT](licenses/LICENSE-MIT), [LICENSE-APACHE](licenses/LICENSE-APACHE)) et le restent ;
 les contributions reçues sous ces licences sont incluses selon leurs termes.
 Le nom « RustNVR » et son logo ne sont couverts par aucune de ces licences.
 
 Le programme compilé contient libopus (Xiph.Org et autres, licence BSD à
-3 clauses : [LICENSE-libopus](LICENSE-libopus)), jointe aux archives de
-release.
+3 clauses : [LICENSE-libopus](LICENSE-libopus)) ; les archives de release
+contiennent aussi ONNX Runtime (Microsoft, licence MIT) avec ses mentions.
 
 En proposant une contribution, vous acceptez qu'elle soit distribuée sous la
 licence PolyForm Noncommercial 1.0.0 et que l'auteur puisse aussi la

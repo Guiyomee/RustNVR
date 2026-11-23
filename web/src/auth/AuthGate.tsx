@@ -4,7 +4,7 @@
 
 import { LogIn, ShieldCheck } from 'lucide-react'
 import { createContext, useCallback, useContext, useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { UNAUTHORIZED_EVENT, describeError } from '../api/client'
+import { ApiError, UNAUTHORIZED_EVENT, describeError } from '../api/client'
 import { getAuthStatus, login, logout, setupAdmin, type AuthStatus, type AuthUser } from '../api/endpoints'
 import { Logo } from '../components/layout/Logo'
 import { Button } from '../components/ui/Button'
@@ -48,6 +48,10 @@ function AuthForm({ setup, onDone }: { setup: boolean; onDone: () => void }) {
   const [username, setUsername] = useState(setup ? 'admin' : '')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
+  // Second step of an account with a two-step login: asked once the
+  // password is known to be right.
+  const [needCode, setNeedCode] = useState(false)
+  const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const submit = async (e: FormEvent) => {
@@ -59,9 +63,13 @@ function AuthForm({ setup, onDone }: { setup: boolean; onDone: () => void }) {
     setBusy(true)
     setError(null)
     try {
-      await (setup ? setupAdmin(username.trim(), password) : login(username.trim(), password))
+      await (setup ? setupAdmin(username.trim(), password) : login(username.trim(), password, needCode ? code.trim() : undefined))
       onDone()
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'totp_required') {
+        setNeedCode(true)
+        return
+      }
       setError(describeError(err))
     } finally {
       setBusy(false)
@@ -85,6 +93,13 @@ function AuthForm({ setup, onDone }: { setup: boolean; onDone: () => void }) {
           {t('Mot de passe', 'Password')}
           <input className={inputCls} type="password" value={password} autoComplete={setup ? 'new-password' : 'current-password'} autoFocus={setup} onChange={(e) => setPassword(e.target.value)} />
         </label>
+        {needCode && (
+          <label className="block text-xs font-medium text-muted">
+            {t('Code de vérification', 'Verification code')}
+            <input className={inputCls} value={code} inputMode="numeric" autoComplete="one-time-code" autoFocus onChange={(e) => setCode(e.target.value)} />
+            <span className="mt-1 block font-normal">{t("Le code à 6 chiffres de votre application d'authentification, ou un code de secours.", 'The 6-digit code of your authenticator app, or a recovery code.')}</span>
+          </label>
+        )}
         {setup && (
           <label className="block text-xs font-medium text-muted">
             {t('Confirmation', 'Confirmation')}
@@ -98,7 +113,7 @@ function AuthForm({ setup, onDone }: { setup: boolean; onDone: () => void }) {
           type="submit"
           className="w-full justify-center"
           icon={setup ? <ShieldCheck className="size-4" /> : <LogIn className="size-4" />}
-          disabledReason={!username.trim() || !password ? t('Identifiant et mot de passe requis.', 'Username and password required.') : busy ? t('Vérification…', 'Checking…') : null}
+          disabledReason={!username.trim() || !password ? t('Identifiant et mot de passe requis.', 'Username and password required.') : needCode && !code.trim() ? t('Code de vérification requis.', 'Verification code required.') : busy ? t('Vérification…', 'Checking…') : null}
         >
           {setup ? t('Créer et se connecter', 'Create and sign in') : t('Se connecter', 'Sign in')}
         </Button>

@@ -77,6 +77,20 @@ pub struct Detector {
     centre_threshold: u8,
 }
 
+/// Indices of the pixels of a `width`×`height` picture that no privacy mask
+/// hides.
+pub fn visible_pixels(width: usize, height: usize, settings: &MotionSettings) -> Vec<u32> {
+    (0..(width * height) as u32)
+        .filter(|&p| {
+            let (x, y) = (p as usize % width, p as usize / width);
+            !settings.masked(
+                (x as f32 + 0.5) / width as f32,
+                (y as f32 + 0.5) / height as f32,
+            )
+        })
+        .collect()
+}
+
 /// Even-odd point-in-polygon test.
 fn inside(x: f32, y: f32, poly: &[[f32; 2]]) -> bool {
     let mut inside = false;
@@ -119,16 +133,7 @@ impl Detector {
                 }
             })
             .collect();
-        // The whole picture, except what the privacy masks hide.
-        let visible: Vec<u32> = (0..(width * height) as u32)
-            .filter(|&p| {
-                let (x, y) = (p as usize % width, p as usize / width);
-                !settings.masked(
-                    (x as f32 + 0.5) / width as f32,
-                    (y as f32 + 0.5) / height as f32,
-                )
-            })
-            .collect();
+        let visible = visible_pixels(width, height, settings);
         let has_zones = !zones.is_empty();
         if !has_zones {
             zones.push(Zone {
@@ -293,6 +298,10 @@ mod tests {
             lines: Vec::new(),
             schedule: Vec::new(),
             mute_notifications: false,
+            timelapse: false,
+            camera_photo: false,
+            camera_photo_width: 1920,
+            no_picture_check: false,
         }
     }
 

@@ -2,7 +2,9 @@
 //! is made and read by the NVR ([`crate::NvrControl::backup`]); the API only
 //! carries it, base64 inside JSON for the uploads.
 
-use crate::control::{BackupPreview, BackupRestored};
+use crate::control::{
+    AutoBackupInput, AutoBackupRun, AutoBackupView, BackupPreview, BackupRestored,
+};
 use crate::routes::{ApiError, control};
 use crate::state::ApiState;
 use axum::Json;
@@ -126,4 +128,32 @@ pub(crate) async fn restore(
         .await?;
     state.set_config_restored();
     Ok(Json(restored))
+}
+
+/// `GET /backup/auto`: the automatic backups.
+pub(crate) async fn auto(
+    State(state): State<Arc<ApiState>>,
+    principal: Admin,
+) -> Result<Json<AutoBackupView>, ApiError> {
+    admin_only(&principal)?;
+    Ok(Json(control(&state)?.auto_backup().await?))
+}
+
+/// `PUT /backup/auto`: stores their settings.
+pub(crate) async fn set_auto(
+    State(state): State<Arc<ApiState>>,
+    principal: Admin,
+    Json(input): Json<AutoBackupInput>,
+) -> Result<Json<AutoBackupView>, ApiError> {
+    admin_only(&principal)?;
+    Ok(Json(control(&state)?.set_auto_backup(input).await?))
+}
+
+/// `POST /backup/auto/run`: makes one now.
+pub(crate) async fn run_auto(
+    State(state): State<Arc<ApiState>>,
+    principal: Admin,
+) -> Result<Json<AutoBackupRun>, ApiError> {
+    admin_only(&principal)?;
+    Ok(Json(control(&state)?.run_auto_backup().await?))
 }

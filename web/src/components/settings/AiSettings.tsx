@@ -28,6 +28,8 @@ interface Form {
   labels: string[]
   maxPictures: string
   interval: string
+  /** Seconds between the pictures of a long event; 0: off. */
+  watch: number
   timeout: string
   keepPictures: boolean
   /** A higher confidence at night. */
@@ -50,6 +52,7 @@ function toForm(s: Settings): Form {
     labels: s.labels,
     maxPictures: String(s.max_pictures),
     interval: String(s.interval_seconds),
+    watch: s.watch_seconds ?? 0,
     timeout: String(s.timeout_seconds),
     keepPictures: s.keep_pictures ?? false,
     night: Boolean(s.night),
@@ -66,6 +69,7 @@ function toSettings(f: Form): Settings {
     labels: f.labels,
     max_pictures: Number(f.maxPictures),
     interval_seconds: Number(f.interval),
+    watch_seconds: f.watch,
     timeout_seconds: Number(f.timeout),
     keep_pictures: f.keepPictures,
     night: f.night ? { min_score: f.nightScore, when: f.nightVision ? ('night_vision' as const) : ('hours' as const), from: f.nightFrom, to: f.nightTo } : null,
@@ -423,6 +427,13 @@ export function AiSettings() {
         {t('État : ', 'State: ')}<Status v={v} />
         {v.active && v.device && <span className="text-xs text-muted">{t('Calcul : ', 'Computing: ')}<span className="font-medium text-fg">{v.device}</span></span>}
         {v.error && <span className="text-xs text-err">{v.error}</span>}
+        {v.active && (v.failures ?? 0) > 0 && (
+          <span className="text-xs text-err">
+            {t(`${v.failures} analyse(s) en échec de suite`, `${v.failures} analysis(es) failed in a row`)}
+            {v.failure ? ` : ${v.failure}` : ''}
+            {(v.failures ?? 0) >= 3 && t(' — signalé aux webhooks « IA en panne ».', ' — reported to the « AI failing » webhooks.')}
+          </span>
+        )}
         {!v.detection_ready && <span className="text-xs text-warn">{t('La reconnaissance nécessite la détection de mouvement (FFmpeg et base de données).', 'Recognition needs motion detection (FFmpeg and database).')}</span>}
       </div>
 
@@ -541,6 +552,18 @@ export function AiSettings() {
             </span>
           </label>
 
+          <label className="block max-w-xl text-sm">
+            {t('Pendant un mouvement long', 'During a long motion')}
+            <select className={`${inputCls} sm:w-72`} value={form.watch} disabled={disabled} onChange={(e) => set('watch', Number(e.target.value))}>
+              {[...new Set([30, 60, 0, form.watch])].map((s) => (
+                <option key={s} value={s}>
+                  {s === 0 ? t('Ne plus regarder', 'Stop looking') : s === 30 ? t('Une image toutes les 30 s (conseillé)', 'One picture every 30 s (recommended)') : s % 60 === 0 ? t(`Une image toutes les ${s / 60} min`, `One picture every ${s / 60} min`) : t(`Une image toutes les ${s} s`, `One picture every ${s} s`)}
+                </option>
+              ))}
+            </select>
+            <span className="mt-1 block text-xs text-muted">{t('Pluie, vent ou phares peuvent faire durer un mouvement plusieurs minutes : l’IA continue de regarder pour reconnaître quelqu’un qui passe pendant ce temps. Environ 4 % d’un cœur par caméra concernée avec le modèle intégré, seulement tant que le mouvement dure.', 'Rain, wind or headlights can make a motion last for minutes: the AI keeps looking so as to recognize someone passing meanwhile. About 4 % of one core per camera concerned with the built-in model, only while the motion lasts.')}</span>
+          </label>
+
           <details className="text-sm">
             <summary className="cursor-pointer text-muted">{t('Réglages avancés', 'Advanced settings')}</summary>
             <div className="mt-2 grid max-w-xl gap-3 sm:grid-cols-3">
@@ -557,7 +580,7 @@ export function AiSettings() {
                 <input className={inputCls} inputMode="numeric" value={form.timeout} disabled={disabled} onChange={(e) => set('timeout', e.target.value)} />
               </label>
             </div>
-            <p className="mt-1 max-w-xl text-xs text-muted">{t("La vignette est analysée 1 s après le début du mouvement, puis une nouvelle image à chaque intervalle tant que rien n'est reconnu.", "The thumbnail is analysed 1 s after motion starts, then a new picture at each interval as long as nothing is recognized.")}</p>
+            <p className="mt-1 max-w-xl text-xs text-muted">{t("La vignette est analysée 1 s après le début du mouvement, puis une nouvelle image à chaque intervalle tant que rien n'est reconnu, jusqu'au nombre d'images par événement ; ensuite, le réglage « Pendant un mouvement long ».", "The thumbnail is analysed 1 s after motion starts, then a new picture at each interval as long as nothing is recognized, up to the pictures per event; then, the « During a long motion » setting.")}</p>
           </details>
         </>
       )}

@@ -10,6 +10,9 @@ publish.workspace = true
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "multipart", "json"] }
 sha2 = "0.11.1"
 tract-onnx = { version = "0.23.9", optional = true }
+# ONNX Runtime, loaded at start from `libonnxruntime.so` when installed
+# (nothing linked: tract stays the engine without it).
+ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, features = ["load-dynamic"] }
 zune-jpeg = { version = "0.5.15", optional = true }
 rustnvr-core.workspace = true
 jiff.workspace = true
@@ -20,13 +23,21 @@ tracing.workspace = true
 
 [features]
 # Built-in object recognition (ONNX models run in process by tract, pure Rust).
-onnx = ["dep:tract-onnx", "dep:zune-jpeg"]
+onnx = ["dep:tract-onnx", "dep:zune-jpeg", "dep:ort"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
 
 [[example]]
 name = "onnx_check"
+required-features = ["onnx"]
+
+[[example]]
+name = "model_trial"
+required-features = ["onnx"]
+
+[[example]]
+name = "ort_trial"
 required-features = ["onnx"]
 
 [lints]

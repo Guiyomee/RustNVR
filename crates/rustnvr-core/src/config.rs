@@ -997,6 +997,90 @@ struct ManagedAiFile {
 /// settings entered in the web interface; it replaces `[updates]`.
 pub const MANAGED_UPDATES_FILE: &str = "updates.ui.toml";
 
+/// Name of the file, next to the configuration file, holding the automatic
+/// backups chosen in the web interface ([`AutoBackupConfig`]). Read by the
+/// application only: it is not a section of `config.toml`.
+pub const MANAGED_BACKUP_FILE: &str = "backup.ui.toml";
+
+/// Longest wait between two automatic backups (days).
+pub const AUTO_BACKUP_MAX_DAYS: u32 = 30;
+/// Most automatic backups kept.
+pub const AUTO_BACKUP_MAX_KEEP: u32 = 52;
+
+/// Automatic backups of the configuration, encrypted like the backups of
+/// Paramètres → Sauvegarde, written to a storage destination.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoBackupConfig {
+    /// Make them.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Identifier of the storage destination written to (`local` or a
+    /// share; not a remote destination, whose directory is an outbox).
+    #[serde(default)]
+    pub destination: String,
+    /// A new backup once the last one is this many days old.
+    #[serde(default = "default_auto_backup_days")]
+    pub every_days: u32,
+    /// Backups kept (the oldest are deleted).
+    #[serde(default = "default_auto_backup_keep")]
+    pub keep: u32,
+    /// Passphrase they are encrypted with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+}
+
+fn default_auto_backup_days() -> u32 {
+    7
+}
+
+fn default_auto_backup_keep() -> u32 {
+    4
+}
+
+impl Default for AutoBackupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            destination: String::new(),
+            every_days: default_auto_backup_days(),
+            keep: default_auto_backup_keep(),
+            passphrase: None,
+        }
+    }
+}
+
+impl AutoBackupConfig {
+    /// What is wrong with these settings (French, for the interface);
+    /// `min_passphrase`: shortest passphrase accepted.
+    pub fn problems(&self, min_passphrase: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        if !(1..=AUTO_BACKUP_MAX_DAYS).contains(&self.every_days) {
+            out.push(format!("fréquence : de 1 à {AUTO_BACKUP_MAX_DAYS} jours"));
+        }
+        if !(1..=AUTO_BACKUP_MAX_KEEP).contains(&self.keep) {
+            out.push(format!(
+                "sauvegardes gardées : de 1 à {AUTO_BACKUP_MAX_KEEP}"
+            ));
+        }
+        if self.enabled {
+            if self.destination.is_empty() {
+                out.push("choisissez où écrire les sauvegardes".to_owned());
+            }
+            if self
+                .passphrase
+                .as_deref()
+                .is_none_or(|p| p.chars().count() < min_passphrase)
+            {
+                out.push(format!(
+                    "phrase secrète : {min_passphrase} caractères au moins"
+                ));
+            }
+        }
+        out
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManagedUpdatesFile {
@@ -1039,6 +1123,10 @@ pub enum WebhookEvent {
     /// The recording of a camera failed (disk full, write error…), then a
     /// segment of it was written again. Limited by cameras, not by objects.
     Recording,
+    /// Object recognition failed several times in a row (provider not
+    /// answering, model unreadable), then worked again. Not limited by
+    /// cameras nor objects.
+    Ai,
 }
 
 fn default_webhook_events() -> Vec<WebhookEvent> {
@@ -1145,6 +1233,11 @@ pub struct WebhookConfig {
     /// too, once its recording is finished (about a minute later).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub clip: bool,
+    /// Journeys between cameras: the first camera of a journey is called as
+    /// usual, the next ones are not, and one message sums the journey up at
+    /// its end (with its video when `clip`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub journeys: bool,
 }
 
 impl WebhookConfig {
@@ -1522,12 +1615,17 @@ pub struct AiConfig {
     pub labels: Vec<String>,
     /// Maximum duration of one analysis.
     pub timeout_seconds: u64,
-    /// Pictures analysed per event at most: the first one 1 s after the
-    /// start, then one every `interval_seconds` while the event lasts and
-    /// nothing is recognized.
+    /// Pictures analysed at the start of an event: the first one 1 s after
+    /// the start, then one every `interval_seconds` while the event lasts
+    /// and nothing is recognized (then `watch_seconds`).
     pub max_pictures: u32,
     /// Seconds between two analysed pictures of an event.
     pub interval_seconds: u64,
+    /// Once `max_pictures` were analysed without anything recognized, one
+    /// more picture every `watch_seconds` while the event lasts: rain, wind
+    /// or headlights can keep a motion going for minutes, and someone
+    /// passing meanwhile must still be seen. 0: no more pictures.
+    pub watch_seconds: u64,
     /// Keep every analysed picture, with what was found, in the default
     /// destination (`.captures`), to replay the recognition on them later.
     /// Deleted with the recordings (`retention_days`).
@@ -1614,6 +1712,7 @@ impl Default for AiConfig {
             timeout_seconds: 10,
             max_pictures: 5,
             interval_seconds: 3,
+            watch_seconds: 30,
             keep_pictures: false,
             night: None,
         }
@@ -1674,6 +1773,9 @@ impl AiConfig {
         }
         if !(1..=60).contains(&self.interval_seconds) {
             p.push("ai.interval_seconds must be between 1 and 60".to_owned());
+        }
+        if self.watch_seconds != 0 && !(10..=600).contains(&self.watch_seconds) {
+            p.push("ai.watch_seconds must be 0 (off) or between 10 and 600".to_owned());
         }
         if self.labels.iter().any(|l| l.trim().is_empty()) {
             p.push("ai.labels must not contain empty labels".to_owned());
@@ -2837,6 +2939,19 @@ main = { url = \"rtsp://x/b\" }
     }
 
     #[test]
+    fn the_ai_keeps_watching_long_events() {
+        assert_eq!(AiConfig::default().watch_seconds, 30);
+        for (watch, valid) in [(0, true), (10, true), (600, true), (5, false), (601, false)] {
+            let toml = format!("[ai]\nwatch_seconds = {watch}\n");
+            let result = Config::from_toml_with_env(&toml, no_env);
+            assert_eq!(result.is_ok(), valid, "{watch}");
+            if let Err(e) = result {
+                assert!(e.to_string().contains("ai.watch_seconds"), "{e}");
+            }
+        }
+    }
+
+    #[test]
     fn night_threshold_of_the_recognition() {
         let ok = Config::from_toml_with_env(
             "[ai]\nmin_score = 0.5\nnight = { min_score = 0.8 }\n",
@@ -3133,6 +3248,7 @@ mod webhook_tests {
             cooldown_minutes: 0,
             schedule: Vec::new(),
             clip: false,
+            journeys: false,
         }
     }
 

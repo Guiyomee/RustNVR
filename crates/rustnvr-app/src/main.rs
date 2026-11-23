@@ -87,8 +87,9 @@ enum Command {
         dir: PathBuf,
     },
     /// Sets a new password for an account of the web interface (created if
-    /// missing), makes it an administrator and closes its sessions: access
-    /// back when the password is lost. Prints the password when drawn.
+    /// missing), makes it an administrator, closes its sessions and turns its
+    /// two-step login off: access back when the password or the phone is
+    /// lost. Prints the password when drawn.
     ResetPassword {
         /// Configuration file (for the data directory).
         #[arg(short, long, default_value = "config.toml")]
@@ -324,6 +325,12 @@ async fn reset_password(
         db.create_user(user, &hash, "admin", now).await?;
     }
     db.delete_sessions_of(user).await?;
+    // The way back in for someone who lost the phone of the two-step login
+    // too: whoever runs this command has the server in hand anyway.
+    let had_totp = db.user_totp(user).await?.is_some();
+    if had_totp {
+        db.set_user_totp(user, None, &[]).await?;
+    }
     println!(
         "{} {user:?}: administrator, its sessions closed.",
         if existed {
@@ -332,6 +339,9 @@ async fn reset_password(
             "account created:"
         }
     );
+    if had_totp {
+        println!("two-step login turned off: turn it on again from the interface.");
+    }
     if drawn {
         println!("new password: {password}");
     }

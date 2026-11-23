@@ -447,14 +447,83 @@ pub(crate) async fn test_webhook(
 
 /// `GET /updates`: last check for new versions.
 pub(crate) async fn updates(State(state): State<Arc<ApiState>>) -> Json<crate::dto::UpdateStatus> {
-    Json(state.update_status())
+    Json(with_install(state.update_status()).await)
+}
+
+/// The status with what concerns an update asked from the interface.
+async fn with_install(mut status: crate::dto::UpdateStatus) -> crate::dto::UpdateStatus {
+    let (available, last) = tokio::task::spawn_blocking(|| {
+        (crate::self_update::available(), crate::self_update::state())
+    })
+    .await
+    .unwrap_or((false, None));
+    status.can_install = available;
+    status.install_state = last;
+    status
+}
+
+/// Body of `POST /updates/install`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InstallInput {
+    /// Version tag to install, as given by `latest`.
+    version: String,
+}
+
+/// An update started from here does not wait for another this long.
+const INSTALL_RUNNING_MS: i64 = 15 * 60_000;
+
+/// `POST /updates/install` (administrators): asks root to install a version
+/// (installation made by `install.sh` only; Docker updates its image).
+pub(crate) async fn install_update(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<InstallInput>,
+) -> Result<(axum::http::StatusCode, Json<crate::dto::UpdateStatus>), ApiError> {
+    if !crate::self_update::valid_tag(&input.version) {
+        return Err(ApiError::bad_request(format!(
+            "version attendue sous la forme v2026.11.10, pas {:?}",
+            input.version
+        )));
+    }
+    let version = input.version.clone();
+    let asked = tokio::task::spawn_blocking(move || {
+        if !crate::self_update::available() {
+            return Err(ApiError::bad_request(
+                "mise à jour depuis l'interface impossible ici : installation Docker ou faite sans install.sh",
+            ));
+        }
+        let now = unix_ms(SystemTime::now());
+        let running = crate::self_update::state().is_some_and(|s| {
+            s.state == "running" && s.at_ms.is_some_and(|at| now - at < INSTALL_RUNNING_MS)
+        });
+        if crate::self_update::pending() || running {
+            return Err(ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "conflict",
+                "une mise à jour est déjà en cours",
+            ));
+        }
+        crate::self_update::request(&version).map_err(|e| {
+            ApiError::unavailable(format!("demande de mise à jour impossible : {e}"))
+        })
+    })
+    .await
+    .map_err(|e| ApiError::unavailable(e.to_string()))?;
+    asked?;
+    tracing::info!(version = %input.version, "update asked from the interface");
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        Json(with_install(state.update_status()).await),
+    ))
 }
 
 /// `POST /updates/check`: checks the watched repository now.
 pub(crate) async fn check_updates(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<crate::dto::UpdateStatus>, ApiError> {
-    Ok(Json(control(&state)?.check_updates().await))
+    Ok(Json(
+        with_install(control(&state)?.check_updates().await).await,
+    ))
 }
 
 /// Body of `PUT /updates`.
@@ -471,7 +540,9 @@ pub(crate) async fn set_updates(
     State(state): State<Arc<ApiState>>,
     Json(input): Json<UpdatesInput>,
 ) -> Result<Json<crate::dto::UpdateStatus>, ApiError> {
-    Ok(Json(control(&state)?.set_updates(input.check).await?))
+    Ok(Json(
+        with_install(control(&state)?.set_updates(input.check).await?).await,
+    ))
 }
 
 /// Query of `GET /logs`.

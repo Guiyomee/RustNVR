@@ -42,6 +42,7 @@ done
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 command -v docker >/dev/null || die "docker introuvable"
+command -v python3 >/dev/null || die "python3 introuvable (ONNX Runtime : scripts/fetch-onnxruntime.sh)"
 docker info >/dev/null 2>&1 || die "Docker ne répond pas (Docker Desktop lancé ?)"
 
 # Paths given to `docker -v`: Windows form under Git Bash.
@@ -104,9 +105,11 @@ run -e CARGO_BUILD_JOBS -v rnvr-cargo-registry:/usr/local/cargo/registry -v rnvr
         cargo build --release --locked -p rustnvr-app 2>&1 | tail -n 1
         cargo test --release --locked -p rustnvr-storage migrations_are 2>&1 | grep "test result"
         cp /target/release/rustnvr /out/rustnvr'
+say "ONNX Runtime (bibliothèque officielle, empreinte vérifiée)"
+bash "$WORK/src/scripts/fetch-onnxruntime.sh" x86_64 "$WORK/dist/ort" >/dev/null
 say "Archive"
 run -v "$(host "$WORK/src"):/src" -v "$(host "$WORK/dist"):/out" debian:12 bash -c "
-    cd /src && RUSTNVR_BIN=/out/rustnvr bash scripts/package-release.sh $VERSION /out/archive >/dev/null
+    cd /src && RUSTNVR_BIN=/out/rustnvr RUSTNVR_ORT=/out/ort bash scripts/package-release.sh $VERSION /out/archive >/dev/null
     /out/rustnvr --version"
 ls "$WORK/dist/archive/"*.tar.gz >/dev/null || die "archive non produite"
 
@@ -117,7 +120,10 @@ for debian in 12 13; do
         "debian:$debian" bash /t/test-install.sh 2>&1 | grep -v "^debconf:" | tail -n 3
 done
 if [ -n "$PREVIOUS" ]; then
-    cp "$PREVIOUS" "$WORK/old/"
+    # With its .sha256: rustnvr-update checks it, as for a download.
+    [ -f "$PREVIOUS.sha256" ] || die "--previous : empreinte introuvable : $PREVIOUS.sha256"
+    cp "$PREVIOUS" "$PREVIOUS.sha256" "$WORK/old/"
+    (cd "$WORK/old" && sha256sum -c --quiet ./*.sha256)
 else
     say "Dernière release publiée (GitHub)"
     URL=$(curl -fsSL https://api.github.com/repos/Guiyomee/RustNVR/releases/latest \

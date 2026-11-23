@@ -12,6 +12,12 @@
 //! - A viewer may be limited to some cameras: the others do not exist for
 //!   it (404 on their routes, left out of every list), and the settings
 //!   (general, MQTT, storage destinations) are read by administrators only.
+//! - An account may add a second step to its login: a TOTP code of an
+//!   authenticator app, or one of its recovery codes. HTTP Basic with the
+//!   password is then refused for it: scripts use an API token.
+//! - API tokens (`Authorization: Bearer rnvr_…`, or as the password of HTTP
+//!   Basic) sign in as their account, possibly for reading only; they cannot
+//!   manage accounts, passwords, second steps or tokens.
 //! - Logins, failed ones too, and every request that changes something are
 //!   written to the activity log (`GET /audit`, administrators).
 //! - Five failed logins in 15 minutes from one address or for one account
@@ -54,6 +60,10 @@ const MAX_FAILURES: u32 = 5;
 const MAX_ACCOUNT_FAILURES: u32 = 20;
 const FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
 const MIN_PASSWORD: usize = 8;
+/// Start of every API token, to tell it from a password.
+pub(crate) const API_TOKEN_PREFIX: &str = "rnvr_";
+/// The last use of a token is written at most this often.
+const TOKEN_TOUCH_MS: i64 = 60_000;
 
 /// Who is making a request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -65,6 +75,11 @@ pub struct Principal {
     /// Cameras this account sees (`None`: all of them; always `None` for an
     /// administrator).
     pub cameras: Option<Vec<String>>,
+    /// Signed in with a read-only API token: nothing can be changed.
+    pub read_only: bool,
+    /// Signed in with an API token (not with the password).
+    #[serde(skip)]
+    pub token: bool,
 }
 
 impl Principal {
@@ -79,6 +94,8 @@ impl Principal {
             username,
             role,
             cameras: cameras.filter(|_| role != "admin"),
+            read_only: false,
+            token: false,
         }
     }
 
@@ -170,7 +187,7 @@ fn password_slots() -> &'static tokio::sync::Semaphore {
 }
 
 /// [`verify_password`] on a blocking thread, a few at a time.
-async fn check_password(hash: String, password: String) -> bool {
+pub(crate) async fn check_password(hash: String, password: String) -> bool {
     let Ok(_slot) = password_slots().acquire().await else {
         return false;
     };
@@ -189,7 +206,7 @@ fn verify_password(hash: &str, password: &str) -> bool {
 }
 
 /// A new session token and the hash stored in the database.
-fn new_token() -> Result<(String, String), String> {
+pub(crate) fn new_token() -> Result<(String, String), String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| e.to_string())?;
     let token = URL_SAFE_NO_PAD.encode(bytes);
@@ -197,7 +214,7 @@ fn new_token() -> Result<(String, String), String> {
     Ok((token, hash))
 }
 
-fn token_hash(token: &str) -> String {
+pub(crate) fn token_hash(token: &str) -> String {
     Sha256::digest(token.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -213,6 +230,40 @@ fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         .filter_map(|kv| kv.trim().split_once('='))
         .find(|(k, _)| *k == name)
         .map(|(_, v)| v.to_owned())
+}
+
+/// The API token of an `Authorization: Bearer` header.
+fn bearer(headers: &HeaderMap) -> Option<String> {
+    let token = headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")?
+        .trim();
+    token
+        .starts_with(API_TOKEN_PREFIX)
+        .then(|| token.to_owned())
+}
+
+/// The account an API token signs in as, if it is valid (and, given with
+/// HTTP Basic, if it belongs to the account named there).
+async fn token_principal(
+    db: &rustnvr_storage::Database,
+    token: &str,
+    basic_user: Option<&str>,
+) -> Option<Principal> {
+    let user = db.api_token_user(&token_hash(token)).await.ok()??;
+    if basic_user.is_some_and(|name| name != user.username) {
+        return None;
+    }
+    let now = unix_ms(SystemTime::now());
+    if user.last_used_ms.is_none_or(|t| now - t >= TOKEN_TOUCH_MS) {
+        let _ = db.touch_api_token(user.id, now).await;
+    }
+    let mut principal = Principal::new(Some(user.username), &user.role, user.cameras);
+    principal.read_only = user.read_only;
+    principal.token = true;
+    Some(principal)
 }
 
 fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
@@ -305,12 +356,27 @@ async fn identify(state: &ApiState, headers: &HeaderMap) -> Option<Principal> {
     {
         return Some(Principal::new(Some(username), &role, cameras));
     }
+    let has_users = state.has_users.load(std::sync::atomic::Ordering::Relaxed);
+    if let (Some(db), true) = (db, has_users)
+        && let Some(token) = bearer(headers)
+    {
+        return token_principal(db, &token, None).await;
+    }
     let (user, password) = basic_credentials(headers)?;
     if let Some(db) = db
-        && state.has_users.load(std::sync::atomic::Ordering::Relaxed)
+        && has_users
     {
+        if password.starts_with(API_TOKEN_PREFIX) {
+            return token_principal(db, &password, Some(&user)).await;
+        }
         let (hash, role) = db.user_secret(&user).await.ok()??;
         if !check_password(hash, password).await {
+            return None;
+        }
+        // The password alone is not enough for an account with a second
+        // step, and Basic cannot carry its code: a token is needed.
+        if !matches!(db.user_totp(&user).await, Ok(None)) {
+            tracing::warn!(%user, "HTTP Basic refused: this account has a two-step login, use an API token");
             return None;
         }
         // Unreadable rights: no camera rather than all of them.
@@ -403,7 +469,8 @@ fn public(path: &str) -> bool {
 /// and opening a WebRTC live view (a POST, but it changes nothing).
 fn viewer_may(method: &Method, path: &str) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
-        || matches!(path, "/api/v1/auth/logout" | "/api/v1/auth/password")
+        // Their own session, password, second step and tokens.
+        || path.starts_with("/api/v1/auth/")
         || (*method == Method::POST
             && path
                 .strip_prefix("/api/v1/cameras/")
@@ -411,6 +478,12 @@ fn viewer_may(method: &Method, path: &str) -> bool {
                     p.strip_suffix("/live/webrtc")
                         .or_else(|| p.strip_suffix("/export"))
                 })
+                .is_some_and(|id| !id.is_empty() && !id.contains('/')))
+        // Exporting a journey changes nothing either.
+        || (*method == Method::POST
+            && path
+                .strip_prefix("/api/v1/journeys/")
+                .and_then(|p| p.strip_suffix("/export"))
                 .is_some_and(|id| !id.is_empty() && !id.contains('/')))
 }
 
@@ -648,7 +721,23 @@ pub(crate) async fn require_auth(
     };
     let method = req.method().clone();
     let username = principal.username.clone();
-    let response = if !principal.admin() && !viewer_may(&method, &path) {
+    let response = if principal.token
+        && (path.starts_with("/api/v1/auth/") || path.starts_with("/api/v1/users"))
+    {
+        ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "un jeton d'API ne peut pas gérer les comptes, les mots de passe ni les jetons",
+        )
+        .into_response()
+    } else if principal.read_only && !viewer_may(&method, &path) {
+        ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "jeton d'API en lecture seule",
+        )
+        .into_response()
+    } else if !principal.admin() && !viewer_may(&method, &path) {
         ApiError::new(
             StatusCode::FORBIDDEN,
             "forbidden",
@@ -751,6 +840,10 @@ pub(crate) async fn status(
 pub(crate) struct LoginInput {
     username: String,
     password: String,
+    /// Code of the authenticator app, or a recovery code, for an account
+    /// with a two-step login.
+    #[serde(default)]
+    code: Option<String>,
 }
 
 async fn open_session(
@@ -832,9 +925,57 @@ pub(crate) async fn login(
             "identifiant ou mot de passe incorrect",
         ));
     };
+    if let Some(secret) = db
+        .user_totp(&input.username)
+        .await
+        .map_err(|e| ApiError::unavailable(e.to_string()))?
+    {
+        let Some(code) = input.code.as_deref().filter(|c| !c.trim().is_empty()) else {
+            // The password was right: the interface asks for the code.
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "totp_required",
+                "code de vérification requis",
+            ));
+        };
+        if !second_step(db, &input.username, &secret, code).await? {
+            state.login_guard.failed(&keys);
+            tracing::warn!(user = %input.username, %client, "failed login (code)");
+            state
+                .audit(Some(&input.username), &client, "login_failed", 401)
+                .await;
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "bad_code",
+                "code incorrect ou déjà utilisé",
+            ));
+        }
+    }
     state.login_guard.succeeded(&keys);
     tracing::info!(user = %input.username, %client, "login");
     open_session(&state, &input.username, &role, &headers, &client).await
+}
+
+/// Checks the second step of a login: a code of the authenticator app (each
+/// one works once), or a recovery code (each one works once).
+pub(crate) async fn second_step(
+    db: &rustnvr_storage::Database,
+    username: &str,
+    secret: &str,
+    code: &str,
+) -> Result<bool, ApiError> {
+    let unavailable = |e: rustnvr_storage::DbError| ApiError::unavailable(e.to_string());
+    let now = unix_ms(SystemTime::now()) / 1000;
+    if let Some(step) = crate::totp::matching_step(secret, code, now) {
+        return db.use_totp_step(username, step).await.map_err(unavailable);
+    }
+    let recovery = crate::totp::normalize_recovery(code);
+    if recovery.len() != 8 {
+        return Ok(false);
+    }
+    db.use_recovery_code(username, &token_hash(&recovery))
+        .await
+        .map_err(unavailable)
 }
 
 /// `POST /auth/logout`.
@@ -986,6 +1127,8 @@ pub(crate) struct UserDto {
     created_ms: i64,
     /// Cameras a viewer sees (`null`: all of them).
     cameras: Option<Vec<String>>,
+    /// The two-step login is on.
+    totp: bool,
 }
 
 /// `GET /users` (admin).
@@ -1016,6 +1159,7 @@ pub(crate) async fn users(
                 username: u.username,
                 created_ms: u.created_ms,
                 cameras: u.cameras,
+                totp: u.totp,
             })
             .collect(),
     ))
@@ -1509,6 +1653,9 @@ mod tests {
         );
         assert!(cross_origin(&h));
         assert!(viewer_may(&Method::GET, "/api/v1/cameras"));
+        assert!(viewer_may(&Method::POST, "/api/v1/journeys/41/export"));
+        assert!(!viewer_may(&Method::POST, "/api/v1/journeys/41/x/export"));
+        assert!(!viewer_may(&Method::PUT, "/api/v1/journeys/settings"));
         assert!(!viewer_may(&Method::PUT, "/api/v1/cameras/a"));
         assert!(viewer_may(&Method::POST, "/api/v1/auth/logout"));
         assert!(viewer_may(

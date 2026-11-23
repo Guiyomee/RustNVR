@@ -43,6 +43,42 @@ pub(crate) async fn reboot(
     let message = crate::routes::control(&state)?.reboot_camera(id).await?;
     Ok(axum::Json(RebootDto { message }))
 }
+
+/// `GET /cameras/{id}/photo` query: `width` among
+/// [`rustnvr_core::detection::CAMERA_PHOTO_WIDTHS`] (the camera's setting
+/// when absent).
+#[derive(Deserialize)]
+pub(crate) struct PhotoQuery {
+    #[serde(default)]
+    width: Option<u32>,
+}
+
+/// `GET /cameras/{id}/photo`: the photo the camera gives through ONVIF
+/// (« Essayer » of the detection settings), never cached.
+pub(crate) async fn photo(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<PhotoQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse as _;
+    if let Some(w) = q.width
+        && !rustnvr_core::detection::CAMERA_PHOTO_WIDTHS.contains(&w)
+    {
+        return Err(crate::control::ControlError::Invalid(
+            "width : 1280, 1920 ou 0 (taille d'origine)".into(),
+        )
+        .into());
+    }
+    let jpeg = control(&state)?.camera_photo(id, q.width).await?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "image/jpeg"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        jpeg,
+    )
+        .into_response())
+}
 use std::sync::Arc;
 
 /// `GET /cameras/{id}/ptz`.

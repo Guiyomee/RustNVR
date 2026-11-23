@@ -1,7 +1,8 @@
-import { KeyRound, Trash, UserPlus, Video } from 'lucide-react'
+import { KeyRound, ShieldOff, Trash, UserPlus, Video } from 'lucide-react'
 import { useState } from 'react'
 import { describeError } from '../../api/client'
-import { changePassword, createUser, deleteUser, getUsers, updateUser, type UserAccount } from '../../api/endpoints'
+import { changePassword, createUser, deleteUser, getUsers, removeUserTotp, updateUser, type UserAccount } from '../../api/endpoints'
+import { OwnTokens, OwnTwoStep } from './AccountSecurity'
 import { useAuth } from '../../auth/AuthGate'
 import { useIsDemo, useLive } from '../../data/DataContext'
 import { useAsync } from '../../hooks/useAsync'
@@ -115,6 +116,7 @@ function Accounts({ me }: { me: string | null }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [toDelete, setToDelete] = useState<UserAccount | null>(null)
+  const [toUnsecure, setToUnsecure] = useState<UserAccount | null>(null)
   const [reset, setReset] = useState<{ user: string; password: string } | null>(null)
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true)
@@ -140,6 +142,7 @@ function Accounts({ me }: { me: string | null }) {
           <li key={u.username} className="flex flex-wrap items-center gap-3 px-3 py-2 text-sm">
             <span className="min-w-32 font-medium">{u.username}</span>
             {u.username === me && <Badge tone="info">{t('Vous', 'You')}</Badge>}
+            {u.totp && <Badge tone="ok">{t('Double authentification', 'Two-step login')}</Badge>}
             <select
               className="h-8 rounded border border-line bg-bg-2 px-2 text-sm"
               value={u.role}
@@ -157,6 +160,7 @@ function Accounts({ me }: { me: string | null }) {
               </Button>
             )}
             <span className="ml-auto flex gap-1">
+              {u.totp && <IconButton label={t('Retirer la double authentification (téléphone perdu)', 'Remove the two-step login (lost phone)')} icon={<ShieldOff className="size-4" />} onClick={() => setToUnsecure(u)} />}
               <IconButton label={t('Nouveau mot de passe', 'New password')} icon={<KeyRound className="size-4" />} onClick={() => setReset({ user: u.username, password: '' })} />
               <IconButton label={t('Supprimer', 'Delete')} icon={<Trash className="size-4" />} disabledReason={u.username === me ? t('Vous ne pouvez pas supprimer votre propre compte.', 'You cannot delete your own account.') : null} onClick={() => setToDelete(u)} />
             </span>
@@ -236,6 +240,17 @@ function Accounts({ me }: { me: string | null }) {
           if (toDelete) void run(() => deleteUser(toDelete.username)).then(() => setToDelete(null))
         }}
       />
+      <ConfirmDialog
+        open={toUnsecure !== null}
+        title={t('Retirer la double authentification ?', 'Remove the two-step login?')}
+        danger
+        confirmLabel={t('Retirer', 'Remove')}
+        message={toUnsecure && <>{t('Le compte ', 'The account ')}<strong className="text-fg">{toUnsecure.username}</strong>{t(" se connectera avec son seul mot de passe, et pourra l'activer de nouveau. À faire seulement pour quelqu'un qui a perdu son téléphone et ses codes de secours.", ' will sign in with its password alone, and can turn it on again. Only for someone who lost the phone and the recovery codes.')}</>}
+        onCancel={() => setToUnsecure(null)}
+        onConfirm={() => {
+          if (toUnsecure) void run(() => removeUserTotp(toUnsecure.username)).then(() => setToUnsecure(null))
+        }}
+      />
     </div>
   )
 }
@@ -260,7 +275,13 @@ export function UsersSettings() {
   }
   return (
     <div className="space-y-6 px-5 py-4">
-      {user?.username && <OwnPassword />}
+      {user?.username && (
+        <>
+          <OwnPassword />
+          <OwnTwoStep />
+          <OwnTokens />
+        </>
+      )}
       {user?.role === 'admin' ? <Accounts me={user.username} /> : <p className="text-sm text-muted">{t('Seuls les administrateurs gèrent les comptes.', 'Only administrators manage accounts.')}</p>}
     </div>
   )

@@ -33,8 +33,12 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   rendu administrateur).
 - Sauvegarde et restauration de la configuration (Paramètres → Sauvegarde) :
   un fichier chiffré par une phrase secrète (caméras et leurs mots de passe,
-  stockage, MQTT, IA, webhooks, zones et lignes), restauré avec un aperçu,
-  fichier par fichier.
+  stockage, MQTT, IA, webhooks, zones et lignes, mur, flèches des trajets),
+  restauré avec un aperçu,
+  fichier par fichier. Sauvegarde automatique (chaque jour, semaine…) dans
+  le dossier `.rustnvr-backups` du NAS ou du disque local, les dernières
+  gardées ; jamais dans le point de montage d'un NAS absent (testé sur un
+  dossier temporaire, ⚠ pas encore sur le NAS).
 - Ajout, modification et suppression de caméras depuis l'interface Web, sans
   redémarrage, avec test de connexion et aperçu en direct. Elles sont stockées
   dans `cameras.ui.toml` (à côté de `config.toml`, lisible par son seul
@@ -47,7 +51,7 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   droite / haut / bas / zoom » (un court mouvement par appui) dans Home
   Assistant (⚠ boutons pas encore essayés dans un vrai Home Assistant). Il
   suffit de régler le port ONVIF de la caméra (essayé sur deux caméras
-  motorisées ; une EZVIZ n'applique pas le pivotement gauche / droite en ONVIF).
+  motorisées, dont une EZVIZ, gauche / droite compris depuis le 21/11).
 - Webcams USB (V4L2) sans programme en plus : choisies dans la liste des
   webcams du serveur, encodées en H.264 par FFmpeg (sur la carte graphique si
   elle sert aux conversions) ou copiées quand elles envoient du H.264 ;
@@ -104,7 +108,9 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   Coût mesuré : 2,4 % d'un cœur pour FFmpeg sur un sous-flux H.265 768×432.
 - IA optionnelle, désactivée par défaut et sans modèle fourni : l'image de
   chaque événement est analysée par un modèle YOLOX exécuté par RustNVR
-  (31 ms par image, sans autre programme) ou envoyée à un serveur DeepStack /
+  (31 ms par image, sans autre programme ; avec ONNX Runtime, livré dans
+  l'archive Debian / Proxmox, 2 à 4 fois plus vite que tract : testé sur la
+  VM et un Raspberry Pi 4, ⚠ pas encore sur le LXC) ou envoyée à un serveur DeepStack /
   CodeProject.AI (objets reconnus dans l'API, MQTT et l'interface) ; un seuil
   plus exigeant la nuit est possible, à heures fixes ou dès que la caméra
   passe en vision nocturne ([AI.md](AI.md)).
@@ -123,6 +129,15 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   de série, dans « Informations techniques » et sur l'appareil Home
   Assistant) — testés de bout en bout contre une caméra ONVIF simulée ; ⚠ pas
   encore sur une vraie caméra.
+- Photo pleine résolution de la caméra (ONVIF `GetSnapshotUri`, au choix par
+  caméra) pour l'image des événements, l'IA et les notifications, avec repli
+  sur l'image du sous-flux ; la photo de chaque profil est essayée et la
+  plus grande gardée ; taille au choix (1280, 1920 px ou taille d'origine) ; bouton « Essayer » — tests (adresse de la
+  photo, plus grande photo, HTTP Digest de la RFC 2617 et Basic, refus, réponse qui n'est pas
+  un JPEG, réduction à 1920 px et masques avec FFmpeg) ; essayé sur une
+  EZVIZ H8c, qui ne donne que 768×432 en ONVIF (limite de la caméra), et
+  sur une sonnette Reolink PoE : 1920×1440 (port HTTP à ouvrir) ; ⚠ Tapo et
+  Imou pas encore.
 - Pause d'une caméra (page de la caméra, liste des caméras, interrupteur
   « Caméra active » de Home Assistant) : ni connexion, ni enregistrement, ni
   détection jusqu'à la reprise ou au redémarrage de RustNVR (jamais
@@ -146,7 +161,9 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   un vrai webhook ni dans Home Assistant).
 - Notifications (Paramètres → Webhooks) : webhook JSON, Discord, ntfy et
   Telegram, pour les mouvements, objets reconnus, passages de ligne et les
-  pannes (stockage, caméra hors ligne, erreur d'enregistrement) ; messages
+  pannes (stockage, caméra hors ligne, image figée ou masquée, erreur
+  d'enregistrement, IA en panne après 3 échecs de suite ; ⚠ l'image figée ou
+  masquée et l'IA en panne pas encore essayées sur de vraies caméras) ; messages
   personnalisés, au plus une notification toutes les X minutes par caméra,
   programmation horaire (les pannes passent toujours) et, pour Discord, ntfy
   et Telegram, une courte vidéo de l'événement en second message (H.264,
@@ -165,11 +182,28 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   ligne, agrandissement), le même sur tous les écrans et dans Home
   Assistant ; une adresse avec ses propres réglages reste possible (⚠ pas
   encore essayé dans un navigateur).
+- Trajets entre caméras (Paramètres → Trajets) : des flèches « de → vers »
+  avec un délai maximal ; les événements où l'IA reconnaît la même sorte
+  d'objet sur des caméras reliées forment un trajet, une seule carte dans
+  Événements, relu caméras côte à côte dans Lecture ; au choix de chaque
+  notification, un seul message par trajet avec sa vidéo (caméras à la
+  suite, bandeau « caméra · heure », son des caméras qui en ont) ; export en un seul MP4 ; MQTT
+  `<p>/journey` (tests du
+  regroupement, des notifications et une vraie conversion FFmpeg de la
+  vidéo ; ⚠ pas encore avec de vraies caméras, un vrai téléphone ni dans un
+  navigateur).
+- Mise à jour en un clic pour une installation faite par `install.sh`
+  (Debian, Proxmox) : un service root séparé télécharge, vérifie et installe
+  la version demandée ; sous Docker, les commandes à lancer (⚠ unité
+  systemd pas encore essayée sur un vrai LXC).
 - Page d'accueil au choix par navigateur (Paramètres → Général : vue
   d'ensemble, mur d'écrans, événements, images ou lecture ; ⚠ pas encore
   essayée dans un navigateur).
 - API REST `/api/v1` et WebSocket temps réel
-  ([API_CONTRACT.md](../API_CONTRACT.md)) ; comptes administrateur / lecteur
+  ([API_CONTRACT.md](../API_CONTRACT.md)) ; double authentification (code
+  TOTP d'une application, codes de secours) et jetons d'API par appareil, en
+  lecture seule ou complets (⚠ interface pas encore essayée dans un
+  navigateur) ; comptes administrateur / lecteur
   avec page de connexion (mots de passe Argon2, sessions par cookie, blocage
   après 5 essais manqués), HTTP Basic pour les scripts. Un lecteur peut être
   limité à certaines caméras (les autres n'existent pas pour lui) et n'a ni
@@ -192,7 +226,10 @@ Horodatage UTC du début du segment. Les fichiers sont décodés sans erreur par
 FFmpeg (vérifié avec `ffprobe -count_frames`) et exportables sans réencodage :
 `ffmpeg -i segment.mp4 -c copy export.mp4`. Depuis l'interface, le bouton
 « Exporter » de la page Lecture fait un seul MP4 d'une période choisie (copié
-tel quel, ou converti en H.264 pour un lecteur sans H.265). La lecture dans le
+tel quel, ou converti en H.264 pour un lecteur sans H.265). Par caméra, un
+time-lapse quotidien au choix (une image par minute, 720p, gardé 30 jours dans
+`.timelapse/`) se regarde dans l'onglet Enregistrements — testé par les tests
+unitaires seulement, ⚠ pas encore sur une vraie journée. La lecture dans le
 navigateur est vérifiée dans Edge pour le H.264 (page Lecture) ; Edge sur la
 machine de test ne décode pas le H.265.
 

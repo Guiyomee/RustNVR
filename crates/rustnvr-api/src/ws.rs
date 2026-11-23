@@ -130,7 +130,7 @@ async fn client(state: Arc<ApiState>, mut socket: WebSocket, mut who: Option<Pri
             },
             event = events.recv() => match event {
                 // Nothing about a camera this account does not see.
-                Ok(NvrEvent::StreamState { camera, .. } | NvrEvent::RecorderError { camera, .. } | NvrEvent::MotionSettingsChanged { camera, .. } | NvrEvent::Crossing { camera, .. }) if !sees(who.as_ref(), camera.as_str()) => true,
+                Ok(NvrEvent::StreamState { camera, .. } | NvrEvent::RecorderError { camera, .. } | NvrEvent::MotionSettingsChanged { camera, .. } | NvrEvent::PictureState { camera, .. } | NvrEvent::Crossing { camera, .. }) if !sees(who.as_ref(), camera.as_str()) => true,
                 Ok(NvrEvent::SegmentFinished(info)) if !sees(who.as_ref(), info.camera.as_str()) => true,
                 Ok(NvrEvent::Detection(event)) if !sees(who.as_ref(), event.camera.as_str()) => true,
                 Ok(NvrEvent::StreamState { camera, .. }) => match state.camera(camera.as_str()) {
@@ -157,7 +157,7 @@ async fn client(state: Arc<ApiState>, mut socket: WebSocket, mut who: Option<Pri
                             None => true,
                         }
                 }
-                Ok(NvrEvent::MotionSettingsChanged { camera, .. }) => match state.camera(camera.as_str()) {
+                Ok(NvrEvent::MotionSettingsChanged { camera, .. } | NvrEvent::PictureState { camera, .. }) => match state.camera(camera.as_str()) {
                     Some(c) => send(&mut socket, &WsMessage::Camera { camera: Box::new(state.camera_dto(&c)) }).await,
                     None => true,
                 },
@@ -171,6 +171,22 @@ async fn client(state: Arc<ApiState>, mut socket: WebSocket, mut who: Option<Pri
                         object,
                     };
                     send(&mut socket, &WsMessage::Crossing { crossing }).await
+                }
+                Ok(NvrEvent::Journey(j)) => {
+                    let steps: Vec<_> = j.steps.iter().filter(|s| sees(who.as_ref(), s.camera.as_str())).collect();
+                    if steps.is_empty() {
+                        true
+                    } else {
+                        let journey = crate::dto::JourneyWsDto {
+                            id: j.id.to_string(),
+                            label: j.label.clone(),
+                            direction: j.direction,
+                            cameras: steps.iter().map(|s| s.camera.to_string()).collect(),
+                            events: steps.iter().map(|s| s.event.to_string()).collect(),
+                            ended: j.ended,
+                        };
+                        send(&mut socket, &WsMessage::Journey { journey }).await
+                    }
                 }
                 // The state of the destinations comes with `system`; the presence counts with `GET /crossings`.
                 Ok(NvrEvent::Snapshot { .. } | NvrEvent::ObjectSnapshot { .. } | NvrEvent::StorageState { .. } | NvrEvent::Presence { .. }) => true,

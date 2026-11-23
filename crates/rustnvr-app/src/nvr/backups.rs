@@ -37,10 +37,24 @@ pub(super) async fn make(shared: &Shared, passphrase: String) -> Result<Vec<u8>,
             .collect(),
         None => BTreeMap::new(),
     };
+    // The settings kept in the database for every device.
+    let (wall, journeys) = match &shared.database {
+        Some(db) => (
+            db.wall_settings()
+                .await
+                .map_err(|e| ControlError::Internal(format!("réglages du mur : {e}")))?,
+            db.journey_settings()
+                .await
+                .map_err(|e| ControlError::Internal(format!("trajets : {e}")))?,
+        ),
+        None => (None, None),
+    };
     let now = jiff::Timestamp::now().as_millisecond();
     let sealed = tokio::task::spawn_blocking(move || {
-        let b = backup::collect(&config, motion, now)
+        let mut b = backup::collect(&config, motion, now)
             .map_err(|e| ControlError::Internal(format!("lecture de la configuration : {e}")))?;
+        b.wall = wall;
+        b.journeys = journeys;
         let files = b.files.len();
         let cameras = b.motion.len();
         backup::seal(&b, &passphrase)
@@ -81,6 +95,8 @@ fn preview_dto(p: backup::Preview) -> BackupPreview {
             .map(|(id, name)| BackupCamera { id, name })
             .collect(),
         motion: p.motion,
+        wall: p.wall,
+        journeys: p.journeys,
         problems: p.problems,
     }
 }
@@ -105,8 +121,9 @@ pub(super) async fn inspect(
     .map_err(blocking_failed)?
 }
 
-/// Writes back the files `files` of the backup `data`, and its detection
-/// settings when `motion`; used from the next start.
+/// Writes back the files `files` of the backup `data`, and when `motion`
+/// what it keeps of the database (detection settings, video wall,
+/// journeys); used from the next start.
 pub(super) async fn restore(
     shared: &Shared,
     data: Vec<u8>,
@@ -126,11 +143,38 @@ pub(super) async fn restore(
         let b = opened(&data, &passphrase)?;
         let written =
             backup::restore(&config, &b, &files, &models).map_err(ControlError::Invalid)?;
-        Ok::<_, ControlError>((written, b.motion))
+        Ok::<_, ControlError>((written, b))
     })
     .await
     .map_err(blocking_failed)??;
+    let backup::Backup {
+        motion: settings,
+        wall,
+        journeys,
+        ..
+    } = settings;
     let mut restored = 0;
+    let mut wall_restored = false;
+    let mut journeys_restored = 0;
+    if motion && let Some(db) = &shared.database {
+        if let Some(json) = wall.filter(|j| serde_json::from_str::<serde_json::Value>(j).is_ok()) {
+            db.set_wall_settings(&json)
+                .await
+                .map_err(|e| ControlError::Internal(format!("réglages du mur : {e}")))?;
+            wall_restored = true;
+        }
+        if let Some(json) = journeys {
+            match serde_json::from_str::<rustnvr_core::journey::JourneySettings>(&json) {
+                Ok(s) => {
+                    db.set_journey_settings(&json)
+                        .await
+                        .map_err(|e| ControlError::Internal(format!("trajets : {e}")))?;
+                    journeys_restored = s.links.len();
+                }
+                Err(e) => warn!(error = %e, "journeys of the backup are invalid: skipped"),
+            }
+        }
+    }
     if motion && let Some(db) = &shared.database {
         for (camera, s) in settings {
             let Ok(id) = CameraId::new(&camera) else {
@@ -149,11 +193,15 @@ pub(super) async fn restore(
     warn!(
         files = ?written,
         detection_settings = restored,
+        wall = wall_restored,
+        journey_links = journeys_restored,
         "configuration backup restored: restart RustNVR to use it"
     );
     Ok(BackupRestored {
         files: written,
         motion: restored,
+        wall: wall_restored,
+        journeys: journeys_restored,
         restart_needed: true,
     })
 }

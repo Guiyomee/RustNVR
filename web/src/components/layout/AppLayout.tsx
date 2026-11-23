@@ -1,5 +1,5 @@
-import { CircleArrowUp, CirclePause, FlaskConical, RefreshCw, ShieldAlert, X } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { CircleArrowUp, CircleCheck, CirclePause, FlaskConical, RefreshCw, ShieldAlert, X } from 'lucide-react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { describeError } from '../../api/client'
 import { setDetectionPaused } from '../../api/endpoints'
 import { useReadOnly } from '../../auth/AuthGate'
@@ -89,6 +89,64 @@ function RestartBanner() {
   )
 }
 
+const SEEN_VERSION_KEY = 'rustnvr.version.seen'
+
+/** Reads the browser's storage; nothing when it is not there (private window). */
+function stored(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function store(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    // Without storage the banner shows at each visit: no harm.
+  }
+}
+
+/**
+ * RustNVR was updated since this browser last saw it (by the button of
+ * « About », by hand or by Docker): once per new version, until closed.
+ */
+function UpdatedBanner() {
+  const { source } = useData()
+  const version = useLive((s) => s.system?.version ?? null)
+  const [seen, setSeen] = useState(() => stored(SEEN_VERSION_KEY))
+  const [noted, setNoted] = useState<string | null>(null)
+  useEffect(() => {
+    if (!version) return
+    // First visit from this browser: nothing to tell.
+    if (seen === null) {
+      store(SEEN_VERSION_KEY, version)
+      setSeen(version)
+    } else if (seen !== version && noted !== version) {
+      setNoted(version)
+      source.store.notify('info', t(`RustNVR mis à jour : ${seen} → ${version}`, `RustNVR updated: ${seen} → ${version}`))
+    }
+  }, [version, seen, noted, source])
+  if (!version || seen === null || seen === version) return null
+  const close = () => {
+    store(SEEN_VERSION_KEY, version)
+    setSeen(version)
+  }
+  return (
+    <div role="status" className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-b border-ok/40 bg-ok/10 px-4 py-1.5 text-center text-xs text-ok">
+      <CircleCheck className="size-4 shrink-0" aria-hidden />
+      {t(`RustNVR a été mis à jour : ${seen} → ${version}.`, `RustNVR was updated: ${seen} → ${version}.`)}
+      <Link to="/about" className="font-medium underline" onClick={close}>
+        {t('Voir les nouveautés', "See what's new")}
+      </Link>
+      <button type="button" aria-label={t('Fermer', 'Close')} title={t('Fermer', 'Close')} className="rounded p-0.5 hover:bg-ok/20" onClick={close}>
+        <X className="size-3.5" aria-hidden />
+      </button>
+    </div>
+  )
+}
+
 const DISMISSED_UPDATE_KEY = 'rustnvr.update.dismissed'
 
 /** A newer version is published: once per version, until closed. */
@@ -132,6 +190,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
         ) : (
           <>
             <RestartBanner />
+            <UpdatedBanner />
             <UpdateBanner />
             <PausedBanner />
             <NoAuthBanner />

@@ -46,6 +46,11 @@ export function apiSend<T>(method: 'POST' | 'PUT' | 'DELETE', path: string, body
   return apiRequest<T>(method, path, body, timeoutMs)
 }
 
+/** GET answered by a file (a picture…); errors are JSON as usual. */
+export function apiGetFile(path: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Blob> {
+  return apiRequest<Blob>('GET', path, undefined, timeoutMs, undefined, true)
+}
+
 /** POST with a JSON body, answered by a file (errors are JSON as usual). */
 export function apiSendForFile(path: string, body: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Blob> {
   return apiRequest<Blob>('POST', path, body, timeoutMs, undefined, true)

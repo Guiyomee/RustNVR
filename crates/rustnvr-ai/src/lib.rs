@@ -8,14 +8,16 @@
 pub mod models;
 #[cfg(feature = "onnx")]
 pub mod onnx;
+#[cfg(feature = "onnx")]
+mod ort_engine;
 
 use rustnvr_core::config::{AiConfig, AiNight, AiProviderConfig};
 use rustnvr_core::{DetectedObject, Secret};
 use serde::Deserialize;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// A boxed future, for providers used as trait objects.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -47,6 +49,37 @@ pub trait ObjectDetector: Send + Sync {
     }
 }
 
+/// How the analyses of an [`Analyzer`] went lately.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AiHealth {
+    /// Analyses that failed in a row (0 after a success).
+    pub failures: u32,
+    /// Error of the last failure, while they fail.
+    pub error: Option<String>,
+    /// When the first of these failures happened.
+    pub failing_since: Option<Instant>,
+    /// When an analysis last succeeded.
+    pub last_ok: Option<Instant>,
+}
+
+impl AiHealth {
+    fn record<T>(&mut self, result: &Result<T, AiError>, now: Instant) {
+        match result {
+            Ok(_) => {
+                *self = AiHealth {
+                    last_ok: Some(now),
+                    ..AiHealth::default()
+                };
+            }
+            Err(e) => {
+                self.failures = self.failures.saturating_add(1);
+                self.error = Some(e.to_string());
+                self.failing_since.get_or_insert(now);
+            }
+        }
+    }
+}
+
 /// A provider with the filters of the configuration.
 #[derive(Clone)]
 pub struct Analyzer {
@@ -58,6 +91,10 @@ pub struct Analyzer {
     timeout: Duration,
     max_pictures: u32,
     interval: Duration,
+    /// Then one picture every so often while the event lasts.
+    watch: Option<Duration>,
+    /// Shared by the clones of this analyzer.
+    health: Arc<Mutex<AiHealth>>,
 }
 
 impl std::fmt::Debug for Analyzer {
@@ -102,6 +139,9 @@ impl Analyzer {
                 tracing::info!(
                     model = %model.display(),
                     input = detector.input_size(),
+                    engine = detector.engine(),
+                    threads = detector.threads(),
+                    library = detector.library().map(|p| p.display().to_string()),
                     ms = started.elapsed().as_millis() as u64,
                     "object recognition model loaded"
                 );
@@ -119,6 +159,7 @@ impl Analyzer {
             max_pictures: config.max_pictures.max(1),
             night: config.night.clone(),
             interval: Duration::from_secs(config.interval_seconds.max(1)),
+            watch: (config.watch_seconds > 0).then(|| Duration::from_secs(config.watch_seconds)),
             ..Self::new(
                 detector,
                 config.min_score,
@@ -143,12 +184,29 @@ impl Analyzer {
             timeout,
             max_pictures: 1,
             interval: Duration::from_secs(3),
+            watch: None,
+            health: Arc::default(),
         }
+    }
+
+    /// How its analyses of events and crossings went lately (the tests of
+    /// the settings do not count).
+    pub fn health(&self) -> AiHealth {
+        self.health
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Pictures to analyse per event at most, and the delay between them.
     pub fn schedule(&self) -> (u32, Duration) {
         (self.max_pictures, self.interval)
+    }
+
+    /// After those pictures, the delay between two pictures while the event
+    /// lasts and nothing is recognized; `None`: no more pictures.
+    pub fn watch(&self) -> Option<Duration> {
+        self.watch
     }
 
     /// Provider name.
@@ -169,7 +227,12 @@ impl Analyzer {
         jpeg: &[u8],
         night_vision: Option<bool>,
     ) -> Result<Vec<DetectedObject>, AiError> {
-        Ok(self.filter(self.detect_all(jpeg).await?, night_vision))
+        let found = self.detect_all(jpeg).await;
+        self.health
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(&found, Instant::now());
+        Ok(self.filter(found?, night_vision))
     }
 
     /// Everything the provider finds in `jpeg`, before the filters (to try
@@ -461,6 +524,55 @@ mod tests {
         }
     }
 
+    /// Fails while its switch is on.
+    struct Flaky(std::sync::atomic::AtomicBool);
+    impl ObjectDetector for Flaky {
+        fn name(&self) -> &str {
+            "flaky"
+        }
+        fn detect<'a>(
+            &'a self,
+            _jpeg: &'a [u8],
+        ) -> BoxFuture<'a, Result<Vec<DetectedObject>, AiError>> {
+            let fail = self.0.load(std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async move {
+                if fail {
+                    Err(AiError::Unreachable("connection refused".into()))
+                } else {
+                    Ok(Vec::new())
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn failures_in_a_row_are_counted_until_a_success() {
+        let flaky = Arc::new(Flaky(true.into()));
+        let analyzer = Analyzer::new(flaky.clone(), 0.5, Vec::new(), Duration::from_secs(5));
+        assert_eq!(analyzer.health(), AiHealth::default());
+        let copy = analyzer.clone();
+        for _ in 0..3 {
+            assert!(copy.analyze(&jpeg(), None).await.is_err());
+        }
+        // Shared by the clones.
+        let h = analyzer.health();
+        assert_eq!(h.failures, 3);
+        assert_eq!(
+            h.error.as_deref(),
+            Some("provider unreachable: connection refused")
+        );
+        assert!(h.failing_since.is_some() && h.last_ok.is_none());
+        flaky.0.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(analyzer.analyze(&jpeg(), None).await.is_ok());
+        let h = analyzer.health();
+        assert_eq!((h.failures, h.error, h.failing_since), (0, None, None));
+        assert!(h.last_ok.is_some());
+        // The tests of the settings do not count.
+        flaky.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(analyzer.detect_all(&jpeg()).await.is_err());
+        assert_eq!(analyzer.health().failures, 0);
+    }
+
     #[test]
     fn a_higher_confidence_is_needed_at_night() {
         let mut analyzer = Analyzer::new(
@@ -589,6 +701,7 @@ mod tests {
             timeout_seconds: 5,
             max_pictures: 4,
             interval_seconds: 2,
+            watch_seconds: 60,
             keep_pictures: false,
             night: None,
         };
@@ -598,6 +711,7 @@ mod tests {
         assert_eq!(analyzer.provider(), "deepstack_http");
         assert_eq!(analyzer.device(), None, "unknown before the first answer");
         assert_eq!(analyzer.schedule(), (4, Duration::from_secs(2)));
+        assert_eq!(analyzer.watch(), Some(Duration::from_secs(60)));
         let found = analyzer.analyze(&jpeg(), None).await.expect("analyze");
         assert_eq!(
             found.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(),

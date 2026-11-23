@@ -232,6 +232,16 @@ pub trait NvrControl: Send + Sync {
     ) -> BoxFuture<'_, WebhookTestResult>;
     /// Checks the watched repository for a newer version now.
     fn check_updates(&self) -> BoxFuture<'_, crate::dto::UpdateStatus>;
+    /// Makes the time-lapse of `camera` for the local `day` (`YYYY-MM-DD`)
+    /// now, in the background (an existing one is replaced).
+    fn make_timelapse(
+        &self,
+        camera: String,
+        day: String,
+    ) -> BoxFuture<'_, Result<(), ControlError>>;
+    /// Stops the time-lapse of `camera` for `day` if it is waiting or being
+    /// made; whether one was.
+    fn stop_timelapse(&self, camera: String, day: String) -> BoxFuture<'_, bool>;
     /// Turns the check for new versions on or off (`updates.ui.toml`), then
     /// checks.
     fn set_updates(
@@ -294,6 +304,15 @@ pub trait NvrControl: Send + Sync {
         files: Vec<String>,
         motion: bool,
     ) -> BoxFuture<'_, Result<BackupRestored, ControlError>>;
+    /// The automatic backups: settings, folder, files.
+    fn auto_backup(&self) -> BoxFuture<'_, Result<AutoBackupView, ControlError>>;
+    /// Stores the settings of the automatic backups.
+    fn set_auto_backup(
+        &self,
+        input: AutoBackupInput,
+    ) -> BoxFuture<'_, Result<AutoBackupView, ControlError>>;
+    /// Makes an automatic backup now (with the stored settings, even off).
+    fn run_auto_backup(&self) -> BoxFuture<'_, Result<AutoBackupRun, ControlError>>;
     /// The presets of a motorised camera (ONVIF PTZ); fails when the camera
     /// has no ONVIF service configured or announces no PTZ.
     fn ptz_presets(&self, camera: String) -> BoxFuture<'_, Result<Vec<PtzPreset>, ControlError>>;
@@ -307,6 +326,14 @@ pub trait NvrControl: Send + Sync {
     /// Restarts a camera through ONVIF (its port must be set); the message
     /// the camera gives.
     fn reboot_camera(&self, camera: String) -> BoxFuture<'_, Result<String, ControlError>>;
+    /// The photo the camera gives through ONVIF (`GetSnapshotUri`), privacy
+    /// masks applied, as events use it with `camera_photo`: a JPEG, at most
+    /// `width` wide (0: the camera's size; `None`: the camera's setting).
+    fn camera_photo(
+        &self,
+        camera: String,
+        width: Option<u32>,
+    ) -> BoxFuture<'_, Result<Vec<u8>, ControlError>>;
     /// Moves a motorised camera, or changes its presets.
     fn ptz_command(
         &self,
@@ -383,6 +410,11 @@ pub struct AiView {
     pub device: Option<String>,
     /// Why the configured provider is not running.
     pub error: Option<String>,
+    /// Analyses of events that failed in a row while it runs (0 after a
+    /// success); from 3, the « IA » notifications report it.
+    pub failures: u32,
+    /// Error of the last of these failures.
+    pub failure: Option<String>,
     /// The built-in recognition is compiled in.
     pub onnx_available: bool,
     /// Motion detection can run (database and FFmpeg): recognition needs it.
@@ -668,6 +700,10 @@ pub struct BackupPreview {
     pub cameras: Vec<BackupCamera>,
     /// Cameras whose detection settings (zones, lines, masks) are in it.
     pub motion: Vec<String>,
+    /// Whether the settings of the video wall are in it.
+    pub wall: bool,
+    /// Arrows between cameras (journeys) in it.
+    pub journeys: usize,
     /// Why the restored configuration would not load (empty when it would).
     pub problems: Vec<String>,
 }
@@ -679,8 +715,78 @@ pub struct BackupRestored {
     pub files: Vec<String>,
     /// Cameras whose detection settings were restored.
     pub motion: usize,
+    /// Whether the settings of the video wall were restored.
+    pub wall: bool,
+    /// Arrows between cameras restored.
+    pub journeys: usize,
     /// Always true: the server uses them from its next start.
     pub restart_needed: bool,
+}
+
+/// Automatic backups of the configuration (`GET /api/v1/backup/auto`).
+#[derive(Clone, Debug, Serialize)]
+pub struct AutoBackupView {
+    /// They are made.
+    pub enabled: bool,
+    /// Storage destination written to (`local` or a share), empty if none.
+    pub destination: String,
+    /// A new one once the last one is this many days old.
+    pub every_days: u32,
+    /// Backups kept (the oldest are deleted).
+    pub keep: u32,
+    /// A passphrase is stored (it is never shown).
+    pub has_passphrase: bool,
+    /// Folder they are written to.
+    pub folder: Option<String>,
+    /// Why that folder cannot be used now.
+    pub folder_problem: Option<String>,
+    /// Backups in that folder, newest first.
+    pub backups: Vec<AutoBackupFile>,
+    /// Last attempt since the server started.
+    pub last: Option<AutoBackupRun>,
+    /// When the next one is due (milliseconds since the Unix epoch), while
+    /// enabled.
+    pub next_ms: Option<i64>,
+}
+
+/// One automatic backup.
+#[derive(Clone, Debug, Serialize)]
+pub struct AutoBackupFile {
+    /// File name (`rustnvr-config-20261121-033000.rnvrbak`).
+    pub name: String,
+    /// Size in bytes.
+    pub bytes: u64,
+    /// When it was written (milliseconds since the Unix epoch).
+    pub created_ms: i64,
+}
+
+/// One attempt at an automatic backup.
+#[derive(Clone, Debug, Serialize)]
+pub struct AutoBackupRun {
+    /// When (milliseconds since the Unix epoch).
+    pub at_ms: i64,
+    /// File written, when it worked.
+    pub file: Option<String>,
+    /// Why it failed.
+    pub error: Option<String>,
+}
+
+/// `PUT /api/v1/backup/auto` body.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoBackupInput {
+    /// Make them.
+    pub enabled: bool,
+    /// Storage destination written to.
+    #[serde(default)]
+    pub destination: String,
+    /// Days between two backups (1 to 30).
+    pub every_days: u32,
+    /// Backups kept (1 to 52).
+    pub keep: u32,
+    /// New passphrase; absent or empty: the stored one is kept.
+    #[serde(default)]
+    pub passphrase: Option<String>,
 }
 
 /// Kept pictures of one camera on one day (`GET /api/v1/ai/captures`).

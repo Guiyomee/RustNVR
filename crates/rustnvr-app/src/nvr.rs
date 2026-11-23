@@ -2,14 +2,18 @@
 //! web interface; cameras, storage destinations, detection and MQTT settings
 //! can be changed at run time through the API.
 
+mod autobackup;
 mod backups;
 mod clips;
 mod detection;
 mod index;
+mod journeys;
 mod night;
+mod photo;
 mod ptz;
 mod replay;
 mod restream;
+mod timelapse;
 mod updates;
 mod usb;
 mod webhooks;
@@ -573,6 +577,8 @@ struct Shared {
     managed_webhooks_file: Option<PathBuf>,
     /// The configuration file (backups).
     config_file: Option<PathBuf>,
+    /// Automatic backups of the configuration.
+    auto_backup: autobackup::AutoBackups,
     mqtt: tokio::sync::Mutex<MqttRuntime>,
     /// General settings in effect (`[recording]`, `[motion]`, live view,
     /// low-space threshold), editable from the interface.
@@ -881,6 +887,7 @@ impl Nvr {
             webhooks: std::sync::RwLock::new(config.webhooks.clone()),
             managed_webhooks_file: config.managed_webhooks_file.clone(),
             config_file: config.config_file.clone(),
+            auto_backup: autobackup::AutoBackups::load(config.config_file.as_deref()),
             general: std::sync::Mutex::new(detection::GeneralSettings::from_config(config)),
             managed_settings_file: config.managed_settings_file.clone(),
             low_space: std::sync::Mutex::new(Vec::new()),
@@ -921,6 +928,9 @@ impl Nvr {
                 cancel.child_token(),
             )),
             tokio::spawn(run_alive(shared.data_dir.clone(), cancel.child_token())),
+            tokio::spawn(timelapse::run(shared.clone(), cancel.child_token())),
+            tokio::spawn(journeys::run(shared.clone(), cancel.child_token())),
+            tokio::spawn(autobackup::run(shared.clone(), cancel.child_token())),
         ];
         if let Some(db) = &database {
             background.push(tokio::spawn(index::run_indexer(
@@ -1901,6 +1911,54 @@ impl NvrControl for Controller {
         Box::pin(async move { updates::check(&self.0).await })
     }
 
+    fn make_timelapse(
+        &self,
+        camera: String,
+        day: String,
+    ) -> BoxFuture<'_, Result<(), ControlError>> {
+        Box::pin(async move {
+            let date: jiff::civil::Date = day
+                .parse()
+                .map_err(|_| ControlError::Invalid(format!("jour invalide : {day:?}")))?;
+            if !self.0.ffmpeg_ok {
+                return Err(ControlError::Invalid(
+                    "FFmpeg n'a pas pu être lancé sur le serveur (voir live.ffmpeg)".to_owned(),
+                ));
+            }
+            let id = {
+                let state = self.0.state.lock().await;
+                state
+                    .configs
+                    .iter()
+                    .find(|c| c.id.as_str() == camera)
+                    .map(|c| c.id.clone())
+            }
+            .ok_or_else(|| ControlError::NotFound(format!("aucune caméra {camera:?}")))?;
+            let shared = self.0.clone();
+            // Listed as waiting at once: the interface shows it from its
+            // next refresh.
+            timelapse::report(
+                &shared,
+                &id,
+                &date.to_string(),
+                Some(rustnvr_api::timelapse::Job::Waiting),
+            );
+            // In the background: a day of recordings takes a while.
+            tokio::spawn(async move {
+                if let Err(e) = timelapse::make(&shared, &id, date).await
+                    && e != timelapse::STOPPED
+                {
+                    warn!(camera = %id, day = %date, error = %e, "time-lapse not made");
+                }
+            });
+            Ok(())
+        })
+    }
+
+    fn stop_timelapse(&self, camera: String, day: String) -> BoxFuture<'_, bool> {
+        Box::pin(async move { timelapse::stop(&camera, &day) })
+    }
+
     fn set_updates(
         &self,
         check: bool,
@@ -1990,6 +2048,27 @@ impl NvrControl for Controller {
         Box::pin(async move { backups::restore(&self.0, data, passphrase, files, motion).await })
     }
 
+    fn auto_backup(&self) -> BoxFuture<'_, Result<rustnvr_api::AutoBackupView, ControlError>> {
+        Box::pin(async move { Ok(autobackup::view(&self.0).await) })
+    }
+
+    fn set_auto_backup(
+        &self,
+        input: rustnvr_api::AutoBackupInput,
+    ) -> BoxFuture<'_, Result<rustnvr_api::AutoBackupView, ControlError>> {
+        Box::pin(async move { autobackup::set(&self.0, input).await })
+    }
+
+    fn run_auto_backup(&self) -> BoxFuture<'_, Result<rustnvr_api::AutoBackupRun, ControlError>> {
+        Box::pin(async move {
+            let run = autobackup::run_now(&self.0).await;
+            match &run.error {
+                Some(e) => Err(ControlError::Invalid(e.clone())),
+                None => Ok(run),
+            }
+        })
+    }
+
     fn ptz_presets(
         &self,
         camera: String,
@@ -2007,6 +2086,35 @@ impl NvrControl for Controller {
 
     fn reboot_camera(&self, camera: String) -> BoxFuture<'_, Result<String, ControlError>> {
         Box::pin(async move { ptz::reboot(&self.0, &camera).await })
+    }
+
+    fn camera_photo(
+        &self,
+        camera: String,
+        width: Option<u32>,
+    ) -> BoxFuture<'_, Result<Vec<u8>, ControlError>> {
+        Box::pin(async move {
+            let id = {
+                let state = self.0.state.lock().await;
+                state
+                    .configs
+                    .iter()
+                    .find(|c| c.id.as_str() == camera)
+                    .map(|c| c.id.clone())
+            }
+            .ok_or_else(|| ControlError::NotFound(format!("caméra inconnue : {camera}")))?;
+            let settings = detection::camera_settings(&self.0, &id).await;
+            let masks = settings.mask_rects();
+            let width = width.unwrap_or(settings.camera_photo_width);
+            // Looked up again: the button tries the camera as it is now.
+            photo::forget(&id);
+            let started = std::time::Instant::now();
+            let jpeg = photo::take(&self.0, &id, &masks, width)
+                .await
+                .map_err(ControlError::Invalid)?;
+            info!(camera = %id, bytes = jpeg.len(), ms = started.elapsed().as_millis() as u64, "camera photo tried");
+            Ok(jpeg.to_vec())
+        })
     }
 
     fn ptz_command(
@@ -2090,6 +2198,11 @@ async fn start_web(
             Ok(Some(json)) => state.set_wall_json(&json),
             Ok(None) => {}
             Err(e) => warn!(error = %e, "video wall settings not read"),
+        }
+        match db.journey_settings().await {
+            Ok(Some(json)) => state.set_journeys_json(&json),
+            Ok(None) => {}
+            Err(e) => warn!(error = %e, "journey settings not read"),
         }
     }
     state.set_ffmpeg_available(shared.ffmpeg_ok);
@@ -2223,11 +2336,13 @@ async fn log_events(mut rx: tokio::sync::broadcast::Receiver<NvrEvent>, cancel: 
                 NvrEvent::StreamState { .. }
                 | NvrEvent::CamerasChanged
                 | NvrEvent::Detection(_)
+                | NvrEvent::Journey(_)
                 | NvrEvent::Snapshot { .. }
                 | NvrEvent::ObjectSnapshot { .. }
                 | NvrEvent::Crossing { .. }
                 | NvrEvent::StorageState { .. }
                 | NvrEvent::Presence { .. }
+                | NvrEvent::PictureState { .. }
                 | NvrEvent::MotionSettingsChanged { .. },
             ) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

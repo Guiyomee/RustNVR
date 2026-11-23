@@ -810,3 +810,252 @@ async fn long_connections_follow_the_camera_rights() {
     assert_eq!(get(jardin, &admin).await, 200);
     nvr.shutdown().await;
 }
+
+fn unix_now() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+}
+
+fn basic(user: &str, password: &str) -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+    format!("Authorization: Basic {b64}\r\n")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_step_login_and_api_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[storage]\nrecordings_dir = \"{}\"\n[metrics]\nlog_interval_seconds = 0\n[web]\nlisten = \"127.0.0.1:0\"\nstatic_dir = \"/nonexistent-rustnvr-web\"\n",
+            dir.path().join("rec").display()
+        ),
+    )
+    .unwrap();
+    let config = Config::load_with_env(&config_path, |_| None).unwrap();
+    let nvr = Nvr::start(&config, event_bus(64)).await.unwrap();
+    let addr = nvr.web_addr().unwrap();
+    let login = |code: Option<&str>| {
+        let body = match code {
+            Some(c) => format!(r#"{{"username":"admin","password":"tres-secret-1","code":"{c}"}}"#),
+            None => r#"{"username":"admin","password":"tres-secret-1"}"#.to_owned(),
+        };
+        async move { http(addr, "POST", "/api/v1/auth/login", Some(&body), "").await }
+    };
+    let r = http(
+        addr,
+        "POST",
+        "/api/v1/auth/setup",
+        Some(r#"{"username":"admin","password":"tres-secret-1"}"#),
+        "",
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let admin = session_cookie(&r);
+
+    // Turning it on: a secret and its QR code, active once a code confirms it.
+    let r = http(addr, "GET", "/api/v1/auth/totp", None, &admin).await;
+    assert_eq!(r.body["enabled"].as_bool(), Some(false));
+    let r = http(addr, "POST", "/api/v1/auth/totp/setup", None, &admin).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let secret = r.body["secret"].as_str().unwrap().to_owned();
+    assert!(r.body["qr_svg"].as_str().unwrap().contains("<svg"));
+    assert!(
+        r.body["uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("otpauth://totp/RustNVR:admin?")
+    );
+    let r = http(
+        addr,
+        "POST",
+        "/api/v1/auth/totp/enable",
+        Some(r#"{"code":"000000"}"#),
+        &admin,
+    )
+    .await;
+    assert_eq!(r.status, 400, "a wrong first code");
+    let now = unix_now();
+    let code = rustnvr_api::totp::code_at(&secret, now).unwrap();
+    let r = http(
+        addr,
+        "POST",
+        "/api/v1/auth/totp/enable",
+        Some(&format!(r#"{{"code":"{code}"}}"#)),
+        &admin,
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let recovery: Vec<String> = r.body["recovery_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(recovery.len(), 10);
+    let r = http(addr, "GET", "/api/v1/users", None, &admin).await;
+    assert_eq!(r.body[0]["totp"].as_bool(), Some(true));
+
+    // Login: the password alone asks for the code; a code works once.
+    assert_eq!(
+        login(None).await.body["error"]["code"].as_str(),
+        Some("totp_required")
+    );
+    let next = rustnvr_api::totp::code_at(&secret, now + 30).unwrap();
+    let r = login(Some(&next)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = login(Some(&next)).await;
+    assert_eq!(
+        (r.status, r.body["error"]["code"].as_str()),
+        (401, Some("bad_code"))
+    );
+    // A recovery code, also once (typed with spaces and capitals).
+    let typed = recovery[0].to_uppercase().replace('-', " - ");
+    assert_eq!(login(Some(&typed)).await.status, 200);
+    assert_eq!(login(Some(&recovery[0])).await.status, 401);
+    let r = http(addr, "GET", "/api/v1/auth/totp", None, &admin).await;
+    assert_eq!(r.body["recovery_codes_left"].as_i64(), Some(9));
+    // HTTP Basic with the password is refused for this account.
+    let r = http(
+        addr,
+        "GET",
+        "/api/v1/cameras",
+        None,
+        &basic("admin", "tres-secret-1"),
+    )
+    .await;
+    assert_eq!(r.status, 401);
+
+    // API tokens: shown once, Bearer or as the Basic password.
+    let r = http(
+        addr,
+        "POST",
+        "/api/v1/auth/tokens",
+        Some(r#"{"name":"Tablette","read_only":true}"#),
+        &admin,
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let reading = r.body["token"].as_str().unwrap().to_owned();
+    assert!(reading.starts_with("rnvr_"));
+    let bearer = format!("Authorization: Bearer {reading}\r\n");
+    assert_eq!(
+        http(addr, "GET", "/api/v1/cameras", None, &bearer)
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        http(
+            addr,
+            "GET",
+            "/api/v1/cameras",
+            None,
+            &basic("admin", &reading)
+        )
+        .await
+        .status,
+        200
+    );
+    assert_eq!(
+        http(
+            addr,
+            "GET",
+            "/api/v1/cameras",
+            None,
+            &basic("autre", &reading)
+        )
+        .await
+        .status,
+        401,
+        "a token signs in as its own account only"
+    );
+    // Read only: nothing changes; no token manages accounts or tokens.
+    let wall = r#"{"cameras":[],"columns":2,"focus":true}"#;
+    assert_eq!(
+        http(addr, "PUT", "/api/v1/wall", Some(wall), &bearer)
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        http(addr, "GET", "/api/v1/auth/tokens", None, &bearer)
+            .await
+            .status,
+        403
+    );
+    let r = http(
+        addr,
+        "POST",
+        "/api/v1/auth/tokens",
+        Some(r#"{"name":"Script"}"#),
+        &admin,
+    )
+    .await;
+    let full = format!(
+        "Authorization: Bearer {}\r\n",
+        r.body["token"].as_str().unwrap()
+    );
+    assert_eq!(
+        http(addr, "PUT", "/api/v1/wall", Some(wall), &full)
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        http(addr, "GET", "/api/v1/users", None, &full).await.status,
+        403
+    );
+    // Listed without their secret, with their last use; revoked.
+    let r = http(addr, "GET", "/api/v1/auth/tokens", None, &admin).await;
+    let list = r.body.as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().all(|t| t.get("token").is_none()));
+    let tablet = list.iter().find(|t| t["name"] == "Tablette").unwrap();
+    assert!(tablet["last_used_ms"].as_i64().is_some());
+    let id = tablet["id"].as_i64().unwrap();
+    let r = http(
+        addr,
+        "DELETE",
+        &format!("/api/v1/auth/tokens/{id}"),
+        None,
+        &admin,
+    )
+    .await;
+    assert_eq!(r.status, 204);
+    assert_eq!(
+        http(addr, "GET", "/api/v1/cameras", None, &bearer)
+            .await
+            .status,
+        401
+    );
+
+    // Off again, with the password.
+    let r = http(
+        addr,
+        "POST",
+        "/api/v1/auth/totp/disable",
+        Some(r#"{"password":"mauvais-mot"}"#),
+        &admin,
+    )
+    .await;
+    assert_eq!(r.status, 403);
+    let r = http(
+        addr,
+        "POST",
+        "/api/v1/auth/totp/disable",
+        Some(r#"{"password":"tres-secret-1"}"#),
+        &admin,
+    )
+    .await;
+    assert_eq!(r.status, 204);
+    assert_eq!(login(None).await.status, 200);
+    nvr.shutdown().await;
+}

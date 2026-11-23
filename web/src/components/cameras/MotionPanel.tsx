@@ -1,8 +1,9 @@
-import { RefreshCw, Save } from 'lucide-react'
-import { useState } from 'react'
+import { Camera as CameraIcon, RefreshCw, Save } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { describeError } from '../../api/client'
 import { useReadOnly } from '../../auth/AuthGate'
-import { getAi, getMotion, setMotion, snapshotUrl } from '../../api/endpoints'
+import { getAi, getCameraPhoto, getMotion, setMotion, snapshotUrl } from '../../api/endpoints'
+import { formatBytes } from '../../lib/format'
 import { useCapability, useData, useIsDemo } from '../../data/DataContext'
 import { useAsync } from '../../hooks/useAsync'
 import { OBJECT_GROUPS, objectLabel } from '../../lib/objects'
@@ -32,6 +33,8 @@ export function MotionStatus({ camera }: { camera: Camera }) {
   if (m.off_schedule) return <Badge>{t('Hors programmation', 'Outside its schedule')}</Badge>
   if (m.error) return <Badge tone="err">{t('Détection en erreur', 'Detection error')}</Badge>
   if (!m.running) return <Badge tone="warn">{t('Détection en attente du flux', 'Detection waiting for the stream')}</Badge>
+  if (m.picture === 'frozen') return <Badge tone="err">{t('Image figée', 'Picture frozen')}</Badge>
+  if (m.picture === 'covered') return <Badge tone="err">{t('Image masquée ou noire', 'Picture covered or black')}</Badge>
   return m.active ? <Badge tone="warn">{t('Mouvement en cours', 'Motion now')}</Badge> : <Badge tone="ok">{t('Détection active', 'Detection on')}</Badge>
 }
 
@@ -72,6 +75,78 @@ function CameraObjects({ offered, value, onChange, disabled }: { offered: string
         ))}
       </div>
       <p className="mt-1 text-xs text-muted">{value.length === 0 ? t('Aucun coché : tous les objets des réglages de l’IA.', 'None ticked: all the objects of the AI settings.') : t('Seuls ces objets comptent pour cette caméra (événements, capteur « Personne »).', 'Only these objects count for this camera (events, « Person » sensor).')}</p>
+    </div>
+  )
+}
+
+/** « Photo pleine résolution de la caméra » and its « Essayer » button. */
+function CameraPhotoOption({ camera, checked, width, reason, onChange, onWidth }: { camera: Camera; checked: boolean; width: number; reason: string | null; onChange: (on: boolean) => void; onWidth: (width: number) => void }) {
+  const [trying, setTrying] = useState(false)
+  const [tried, setTried] = useState<{ url: string; bytes: number; ms: number; size: string } | null>(null)
+  const [failed, setFailed] = useState<string | null>(null)
+  useEffect(() => () => { if (tried) URL.revokeObjectURL(tried.url) }, [tried])
+  const noOnvif = camera.ptz !== true
+    ? t('Réglez d’abord le port ONVIF de la caméra (Modifier la caméra → ONVIF).', 'Set the camera’s ONVIF port first (Edit the camera → ONVIF).')
+    : null
+  const tryIt = async () => {
+    setTrying(true)
+    setFailed(null)
+    const started = performance.now()
+    try {
+      const blob = await getCameraPhoto(camera.id, width)
+      setTried({ url: URL.createObjectURL(blob), bytes: blob.size, ms: Math.round(performance.now() - started), size: '' })
+    } catch (e) {
+      setTried(null)
+      setFailed(describeError(e))
+    } finally {
+      setTrying(false)
+    }
+  }
+  return (
+    <div className="space-y-2">
+      <label className="flex items-start gap-2 text-sm">
+        <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={checked} disabled={reason !== null || (noOnvif !== null && !checked)} onChange={(e) => onChange(e.target.checked)} />
+        <span>
+          {t('Photo pleine résolution de la caméra (ONVIF)', 'Full-resolution photo from the camera (ONVIF)')}
+          <span className="block text-xs text-muted">
+            {t('L’image des événements (vignette, IA, notifications, images gardées) est demandée à la caméra elle-même, en pleine définition (à la taille choisie ci-dessous), au lieu d’une image du flux de détection. Si la caméra ne la donne pas en 3 s, l’image habituelle est prise et le journal dit pourquoi. Coût : une requête à la caméra par image.', 'Event pictures (thumbnail, AI, notifications, kept pictures) are asked from the camera itself, in full definition (at the size chosen below), instead of a picture of the detection stream. If the camera does not give it within 3 s, the usual picture is taken and the log says why. Cost: one request to the camera per picture.')}
+            {noOnvif && <span className="block">{noOnvif}</span>}
+          </span>
+        </span>
+      </label>
+      <div className="ml-6 flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-1.5 text-xs text-muted">
+          {t('Taille', 'Size')}
+          <select
+            className="h-8 rounded border border-line bg-card px-2 text-xs text-fg"
+            value={width}
+            disabled={reason !== null}
+            title={reason ?? t('Plus grand : plus de détails (utile pour un visage ou une plaque), mais des images plus lourdes. L’IA n’y gagne rien : elle analyse en 640 px.', 'Larger: more detail (useful for a face or a plate), but heavier pictures. AI gains nothing: it analyses at 640 px.')}
+            onChange={(e) => onWidth(Number(e.target.value))}
+          >
+            <option value={1280}>{t('1280 px (léger)', '1280 px (light)')}</option>
+            <option value={1920}>{t('1920 px (conseillé)', '1920 px (advised)')}</option>
+            <option value={0}>{t('Taille d’origine de la caméra', 'The camera’s own size')}</option>
+          </select>
+        </label>
+        <Button size="sm" icon={<CameraIcon className="size-4" />} disabledReason={reason ?? noOnvif ?? (trying ? t('Demande en cours…', 'Asking…') : null)} onClick={() => void tryIt()}>
+          {t('Essayer', 'Try')}
+        </Button>
+        {tried && <span className="text-xs text-muted">{[tried.size, formatBytes(tried.bytes), `${tried.ms} ms`].filter(Boolean).join(' · ')}</span>}
+        {failed && <span className="text-xs text-err">{failed}</span>}
+      </div>
+      {tried && (
+        <img
+          src={tried.url}
+          alt={t(`Photo de ${camera.name}`, `Photo of ${camera.name}`)}
+          className="ml-6 max-h-64 rounded border border-line"
+          onLoad={(e) => {
+            const img = e.currentTarget
+            const size = `${img.naturalWidth}×${img.naturalHeight}`
+            setTried((old) => (old && old.size !== size ? { ...old, size } : old))
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -148,6 +223,25 @@ export function MotionPanel({ camera }: { camera: Camera }) {
               </span>
             </span>
           </label>
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={s.timelapse === true} disabled={reason !== null} onChange={(e) => edit({ timelapse: e.target.checked })} />
+            <span>
+              {t('Time-lapse quotidien', 'Daily time-lapse')}
+              <span className="block text-xs text-muted">
+                {t('Chaque nuit, une vidéo d\'environ 48 s de la veille (une image par minute d\'enregistrement, masques appliqués, 720p), gardée 30 jours à côté des enregistrements. Coût : une conversion FFmpeg à basse priorité, une caméra à la fois. Ne dépend pas de la détection de mouvement.', 'Every night, a video of about 48 s of the day before (one picture per minute of recording, masks applied, 720p), kept 30 days next to the recordings. Cost: one FFmpeg conversion at low priority, one camera at a time. Does not depend on motion detection.')}
+              </span>
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={!s.no_picture_check} disabled={reason !== null} onChange={(e) => edit({ no_picture_check: !e.target.checked })} />
+            <span>
+              {t('Signaler une image figée ou masquée', 'Report a frozen or covered picture')}
+              <span className="block text-xs text-muted">
+                {t('Pendant la détection : la même image pendant 5 min (caméra bloquée qui envoie encore son flux), ou une image devenue d’un coup uniforme pendant 1 min (objectif couvert, caméra masquée, lumière éteinte). Notifié comme « Caméra hors ligne » (Paramètres → Webhooks). À décocher pour une pièce sombre où l’on éteint la lumière.', 'While detecting: the same picture for 5 min (a stuck camera still sending its stream), or a picture turned uniform at once for 1 min (lens covered, camera masked, light switched off). Notified like « Camera offline » (Settings → Webhooks). Untick it for a dark room where the light is switched off.')}
+              </span>
+            </span>
+          </label>
+          <CameraPhotoOption camera={camera} checked={s.camera_photo === true} width={s.camera_photo_width ?? 1920} reason={reason} onChange={(camera_photo) => edit({ camera_photo })} onWidth={(camera_photo_width) => edit({ camera_photo_width })} />
           <div className="flex flex-wrap items-center gap-2">
             <MotionStatus camera={camera} />
             {camera.motion.error && <span className="text-xs text-err">{camera.motion.error}</span>}

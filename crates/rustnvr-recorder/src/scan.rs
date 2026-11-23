@@ -234,6 +234,52 @@ fn parse_traf(traf: &[u8], sequence: u32) -> Option<MoofInfo> {
     })
 }
 
+/// Whether the segment file at `path` has an audio track. Reads only its
+/// `ftyp` and `moov` (not the fragments); `false` when it cannot be read.
+pub fn has_audio(path: &std::path::Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(file_len) = file.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    let mut r = io::BufReader::new(file);
+    let mut pos = 0u64;
+    while let Ok(Some(h)) = read_header(&mut r, file_len - pos) {
+        if pos + h.size > file_len {
+            return false;
+        }
+        let body_len = h.size - h.header_len;
+        if &h.fourcc == b"moov" {
+            let Ok(len) = usize::try_from(body_len) else {
+                return false;
+            };
+            if len > 16 << 20 {
+                return false;
+            }
+            let mut body = vec![0; len];
+            if r.read_exact(&mut body).is_err() {
+                return false;
+            }
+            return children(&body).any(|(f, trak)| {
+                &f == b"trak"
+                    && find_box(trak, &[b"mdia", b"hdlr"]).and_then(|h| h.get(8..12))
+                        == Some(&b"soun"[..])
+            });
+        }
+        let Ok(skip) = i64::try_from(body_len) else {
+            return false;
+        };
+        // `ftyp`, then `moov` for the recorder's files; other files may put
+        // `free` or `mdat` first.
+        if r.seek_relative(skip).is_err() {
+            return false;
+        }
+        pos += h.size;
+    }
+    false
+}
+
 /// Scans a segment file. Stops at the first incomplete or inconsistent box;
 /// everything before [`ScanReport::valid_len`] is a well-formed file.
 pub fn scan<R: Read + Seek>(r: &mut R) -> io::Result<ScanReport> {

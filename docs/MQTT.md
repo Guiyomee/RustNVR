@@ -100,6 +100,7 @@ retenus vides).
 | `<p>/<caméra>/snapshot` | JPEG du dernier événement | oui |
 | `<p>/<caméra>/<objet>/snapshot` | JPEG de la dernière image où un objet de ce type (`person`, `car`, `dog`…) a été reconnu, cadres bleus de ces objets dessinés ; publié avant le passage de `person` à `ON` | oui |
 | `<p>/<caméra>/crossing` | JSON de chaque passage d'une ligne : `line`, `direction` (`forward` / `backward`), `at_ms`, `today`, `object` (objet vu sur la ligne, lignes limitées à des objets ; sinon `null`) | non |
+| `<p>/journey` | JSON de chaque trajet entre caméras terminé (Paramètres → Trajets) : `id`, `label`, `direction` (`arrival` / `departure` / `null`), `cameras` (dans l'ordre), `events`, `start_ms`, `end_ms` | non |
 | `<p>/<caméra>/line/<ligne>/today` | passages de la ligne depuis minuit | oui |
 | `<p>/<caméra>/line/<ligne>/present` | qui est à l'intérieur (lignes qui comptent les présences : entrées − sorties depuis minuit ou la remise à zéro) ; entité « Présents · ligne » | oui |
 | `<p>/<caméra>/line/<ligne>/presence/reset` | n'importe quel message (commande) : remet le compte à zéro ; bouton « Remettre à zéro · ligne » | — |

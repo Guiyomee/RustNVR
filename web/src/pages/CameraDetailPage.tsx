@@ -8,6 +8,7 @@ import { PauseButton } from '../components/cameras/PauseButton'
 import { RebootButton } from '../components/cameras/RebootButton'
 import { PtzPanel } from '../components/cameras/PtzPanel'
 import { RecordingBadge } from '../components/cameras/RecordingBadge'
+import { TimelapseCard } from '../components/cameras/TimelapseCard'
 import { Button } from '../components/ui/Button'
 import { Badge, Card, CardHeader, InfoList } from '../components/ui/Card'
 import { EmptyState, ErrorState, LoadingState } from '../components/ui/States'
@@ -320,7 +321,12 @@ export function CameraDetailPage({ id }: { id: string }) {
             </div>
           </div>
         )}
-        {tab === 'recordings' && <RecordingsTab camera={camera} />}
+        {tab === 'recordings' && (
+          <div className="space-y-4">
+            <RecordingsTab camera={camera} />
+            <TimelapseCard camera={camera} />
+          </div>
+        )}
         {tab === 'detection' && (
           <Card>
             <CardHeader title={t('Détection de mouvement', 'Motion detection')} subtitle={t("Différence d'images en niveaux de gris, zones en coordonnées relatives à l'image", "Greyscale picture difference, zones in picture-relative coordinates")} />

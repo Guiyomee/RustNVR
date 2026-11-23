@@ -40,8 +40,9 @@ export function PlaybackPage() {
 
   const initialT = Number(query.get('t')) || null
   const [selected, setSelected] = useState<string[]>(() => {
+    // Several cameras (a journey): `camera=a,b,c`.
     const c = query.get('camera')
-    return c ? [c] : []
+    return c ? [...new Set(c.split(',').filter(Boolean))] : []
   })
   const [day, setDay] = useState(() => startOfDay(initialT ?? Date.now()))
   const [position, setPosition] = useState<number | null>(initialT)

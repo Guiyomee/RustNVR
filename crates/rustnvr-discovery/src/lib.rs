@@ -5,13 +5,15 @@
 //! - [`scan`]: RTSP port scan of a network (cameras without ONVIF, or when
 //!   multicast does not reach RustNVR);
 //! - [`onvif`]: with the camera's user name and password, its maker, model
-//!   and the RTSP address of each of its streams;
+//!   and the RTSP address of each of its streams, and its photo address
+//!   (`GetSnapshotUri`, fetched with HTTP Digest or Basic);
 //! - [`paths`]: usual RTSP paths of common makers, for cameras without ONVIF;
 //! - [`ptz`]: moving a motorised camera and its presets (ONVIF PTZ).
 //!
 //! Nothing here is stored: the interface prefills the camera form (PTZ apart,
 //! which acts on the camera).
 
+mod http_auth;
 pub mod onvif;
 pub mod paths;
 pub mod ptz;

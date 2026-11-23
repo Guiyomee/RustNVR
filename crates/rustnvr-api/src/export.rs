@@ -363,6 +363,259 @@ pub(crate) async fn prepare(
     }))
 }
 
+/// Longest journey export, and longest part of it per camera.
+const JOURNEY_MAX_MS: i64 = 10 * 60 * 1000;
+const JOURNEY_PART_MAX_MS: i64 = 5 * 60 * 1000;
+/// A journey export starts this long before it, and ends this long after.
+const JOURNEY_MARGIN_MS: i64 = 2_000;
+/// Size of a journey export (every camera brought to it).
+const JOURNEY_SIZE: (u32, u32) = (1280, 720);
+
+/// One camera of a journey export, ready to convert.
+struct JourneyInput {
+    files: Vec<PathBuf>,
+    offset_ms: i64,
+    length_ms: i64,
+    masks: String,
+    banner: String,
+}
+
+/// `POST /journeys/{id}/export`: one MP4 of a journey between cameras, its
+/// cameras one after the other with a banner « camera · time » (H.264).
+/// Accounts limited to some cameras cannot export journeys.
+pub(crate) async fn prepare_journey(
+    State(state): State<Arc<ApiState>>,
+    principal: Option<axum::Extension<crate::auth::Principal>>,
+    Path(id): Path<String>,
+) -> Result<Json<ExportDto>, ApiError> {
+    if crate::auth::scope(principal.as_ref()).is_some() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "forbidden",
+            "l'export d'un trajet est réservé aux comptes qui voient toutes les caméras",
+        ));
+    }
+    if !state.ffmpeg_ok() {
+        return Err(ApiError::unavailable(
+            "l'export nécessite FFmpeg, qui n'a pas pu être lancé (voir live.ffmpeg)",
+        ));
+    }
+    let journey: i64 = id
+        .parse()
+        .map_err(|_| ApiError::bad_request("invalid journey identifier"))?;
+    let db = state
+        .database
+        .get()
+        .ok_or_else(|| ApiError::unavailable("events are not available on this server"))?;
+    let events = db
+        .journey_events(journey)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if events.len() < 2 {
+        return Err(ApiError::not_found(format!("no journey {id}")));
+    }
+    if events.iter().any(|e| e.end_ms.is_none()) {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "conflict",
+            "trajet en cours : réessayez à sa fin",
+        ));
+    }
+    let times: Vec<(i64, Option<i64>)> = events.iter().map(|e| (e.start_ms, e.end_ms)).collect();
+    let periods = crate::journeys::video_periods(
+        &times,
+        JOURNEY_MARGIN_MS,
+        JOURNEY_MARGIN_MS,
+        JOURNEY_PART_MAX_MS,
+        JOURNEY_MAX_MS,
+    );
+    let roots: Vec<(String, PathBuf)> = state
+        .destinations()
+        .into_iter()
+        .map(|d| (d.id, d.root))
+        .collect();
+    let mut inputs = Vec::new();
+    for (i, from, to) in periods {
+        let camera = events[i].camera.as_str().to_owned();
+        let Json(list) = camera_recordings(
+            State(state.clone()),
+            Path(camera.clone()),
+            Query(RangeQuery { from, to }),
+        )
+        .await?;
+        let segments = chain(list);
+        let Some(first) = segments.first() else {
+            continue;
+        };
+        let files: Vec<PathBuf> = segments
+            .iter()
+            .filter_map(|r| {
+                let rest = r.url.strip_prefix("/api/v1/recordings/")?;
+                let (dest, path) = rest.split_once('/')?;
+                Some(roots.iter().find(|(d, _)| d == dest)?.1.join(path))
+            })
+            .collect();
+        if files.is_empty() {
+            continue;
+        }
+        let config = state.camera(&camera);
+        let name = config
+            .as_ref()
+            .and_then(|c| c.name.clone())
+            .unwrap_or_else(|| camera.clone());
+        let masks = config.map(|c| c.privacy_masks).unwrap_or_default();
+        inputs.push(JourneyInput {
+            offset_ms: (from - first.start_ms).max(0),
+            length_ms: to - from.max(first.start_ms),
+            files,
+            masks: rustnvr_motion::mask_filters(&masks),
+            banner: format!("{name} · {}", crate::journeys::clock(from)),
+        });
+    }
+    if inputs.is_empty() {
+        return Err(ApiError::not_found("aucun enregistrement pour ce trajet"));
+    }
+    let duration_ms: i64 = inputs.iter().map(|i| i.length_ms).sum();
+    let start = events[0].start_ms - JOURNEY_MARGIN_MS;
+
+    let _permit = ONE_AT_A_TIME
+        .acquire()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let dir = state.export_dir();
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| ApiError::internal(format!("cannot create {}: {e}", dir.display())))?;
+    prune(&dir).await;
+    let stamp = jiff::Timestamp::from_millisecond(start)
+        .map(|t| {
+            t.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%Y%m%d-%H%M%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| start.to_string());
+    let seconds = (duration_ms + 500) / 1000;
+    let name = format!("trajet_{stamp}_{seconds}s.mp4");
+    let work_name = format!(
+        "{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let file = format!("{work_name}{NAME_MARK}{name}");
+    let out_path = dir.join(&file);
+    // Lists and banners in a folder of their own (FFmpeg reads the banners
+    // from its current folder).
+    let work = dir.join(format!(".{work_name}"));
+    tokio::fs::create_dir_all(&work)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let started = std::time::Instant::now();
+    let ffmpeg = state.live_settings().ffmpeg;
+    let mut result = convert_journey(&ffmpeg, &work, &inputs, &out_path, true).await;
+    if result.is_err() {
+        // Without the banners if FFmpeg has no font to write them.
+        result = convert_journey(&ffmpeg, &work, &inputs, &out_path, false).await;
+    }
+    let _ = tokio::fs::remove_dir_all(&work).await;
+    if let Err(e) = result {
+        let _ = tokio::fs::remove_file(&out_path).await;
+        tracing::warn!(journey, error = %e, "journey export failed");
+        return Err(ApiError::internal(format!("export impossible : {e}")));
+    }
+    let bytes = tokio::fs::metadata(&out_path)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .len();
+    tracing::info!(
+        journey,
+        cameras = inputs.len(),
+        seconds,
+        bytes,
+        ms = started.elapsed().as_millis() as u64,
+        "journey exported"
+    );
+    let later = out_path.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(KEEP_EXPORT).await;
+        let _ = tokio::fs::remove_file(later).await;
+    });
+    Ok(Json(ExportDto {
+        url: format!("/api/v1/exports/{file}"),
+        name,
+        bytes,
+        duration_ms,
+        start_ms: start,
+        h264: true,
+    }))
+}
+
+async fn convert_journey(
+    ffmpeg: &str,
+    work: &std::path::Path,
+    inputs: &[JourneyInput],
+    out: &std::path::Path,
+    banners: bool,
+) -> Result<(), String> {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.current_dir(work)
+        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"]);
+    for (i, input) in inputs.iter().enumerate() {
+        let list: String = std::iter::once("ffconcat version 1.0\n".to_owned())
+            .chain(input.files.iter().map(|f| format!("file {}\n", quote(f))))
+            .collect();
+        let list_path = work.join(format!("l{i}.txt"));
+        tokio::fs::write(&list_path, list)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::fs::write(work.join(format!("t{i}.txt")), &input.banner)
+            .await
+            .map_err(|e| e.to_string())?;
+        cmd.args(["-f", "concat", "-safe", "0", "-i"])
+            .arg(&list_path);
+    }
+    // The concat demuxer takes its streams from the first file of a list.
+    let firsts: Vec<Option<PathBuf>> = inputs.iter().map(|i| i.files.first().cloned()).collect();
+    let audio = tokio::task::spawn_blocking(move || {
+        firsts
+            .iter()
+            .map(|f| f.as_deref().is_some_and(rustnvr_recorder::scan::has_audio))
+            .collect::<Vec<bool>>()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let parts: Vec<(&str, i64, i64, bool)> = inputs
+        .iter()
+        .zip(&audio)
+        .map(|(i, a)| (i.masks.as_str(), i.offset_ms, i.length_ms, *a))
+        .collect();
+    cmd.args([
+        "-filter_complex",
+        &crate::journeys::video_graph(&parts, JOURNEY_SIZE, 25, banners),
+    ])
+    .args(["-map", "[out]"]);
+    if audio.contains(&true) {
+        cmd.args(["-map", "[aout]", "-c:a", "aac", "-b:a", "64k"]);
+    } else {
+        cmd.arg("-an");
+    }
+    cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"])
+        .args(["-movflags", "+faststart", "-f", "mp4"])
+        .arg(out)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(EXPORT_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| "export trop long, abandonné".to_owned())?
+        .map_err(|e| format!("FFmpeg n'a pas pu être lancé : {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    Err(crate::hwaccel::failure_reason(&detail).unwrap_or_else(|| "échec de FFmpeg".to_owned()))
+}
+
 /// `GET /exports/{file}`: downloads a prepared extract.
 pub(crate) async fn download(
     State(state): State<Arc<ApiState>>,
@@ -405,6 +658,63 @@ mod tests {
             duration_ms: (end - start).unsigned_abs(),
             bytes: 1,
             url: format!("/api/v1/recordings/{dest}/a/2026-11-03/{start}.mp4"),
+        }
+    }
+
+    /// Two cameras of different sizes made by FFmpeg (skipped without it),
+    /// exported as one 1280×720 video with their banners.
+    #[tokio::test]
+    async fn exports_a_journey_as_one_video() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut inputs = Vec::new();
+        for (i, size) in ["1920x1080", "640x480"].iter().enumerate() {
+            let path = dir.path().join(format!("cam{i}.mp4"));
+            let made = std::process::Command::new("ffmpeg")
+                .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
+                .args(["-i", &format!("testsrc=size={size}:rate=10"), "-t", "4"])
+                .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .arg(&path)
+                .status();
+            if !made.is_ok_and(|s| s.success()) {
+                eprintln!("FFmpeg with libx264 missing: skipped");
+                return;
+            }
+            inputs.push(JourneyInput {
+                files: vec![path],
+                offset_ms: 1_000,
+                length_ms: 2_500,
+                masks: String::new(),
+                banner: format!("Caméra {i} · 12:00:0{i}"),
+            });
+        }
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).expect("work");
+        let out = dir.path().join("trajet.mp4");
+        convert_journey("ffmpeg", &work, &inputs, &out, true)
+            .await
+            .expect("journey export with banners");
+        let probe = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0"])
+            .args([
+                "-show_entries",
+                "stream=codec_name,width,height:format=duration",
+            ])
+            .args(["-of", "default=noprint_wrappers=1"])
+            .arg(&out)
+            .output();
+        if let Some(probe) = probe.ok().filter(|p| p.status.success()) {
+            let text = String::from_utf8_lossy(&probe.stdout);
+            assert!(text.contains("codec_name=h264"), "{text}");
+            assert!(
+                text.contains("width=1280") && text.contains("height=720"),
+                "{text}"
+            );
+            let duration: f64 = text
+                .lines()
+                .find_map(|l| l.strip_prefix("duration="))
+                .and_then(|d| d.parse().ok())
+                .expect("duration");
+            assert!((4.5..=5.5).contains(&duration), "{duration}");
         }
     }
 

@@ -42,6 +42,8 @@ pub struct CapabilitiesDto {
     pub protect: bool,
     /// Bookmarks on the timeline (`/bookmarks`): needs the database.
     pub bookmarks: bool,
+    /// Journeys between cameras (`/journeys`): needs the database.
+    pub journeys: bool,
     /// Retention / quotas.
     pub retention: bool,
     /// Changing settings through the API.
@@ -211,6 +213,24 @@ pub struct UpdateStatus {
     /// How this RustNVR runs, for the installation instructions:
     /// `docker`, `systemd` or `other`.
     pub install: String,
+    /// An update can be asked from the interface (installation made by
+    /// `install.sh`, with its `rustnvr-update.path` unit).
+    pub can_install: bool,
+    /// The last update asked from the interface, if any.
+    pub install_state: Option<InstallState>,
+}
+
+/// An update asked from the interface (`POST /updates/install`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct InstallState {
+    /// `requested` (waiting for root), `running`, `done` or `failed`.
+    pub state: String,
+    /// Version asked.
+    pub version: Option<String>,
+    /// When the state was written (milliseconds since the Unix epoch).
+    pub at_ms: Option<i64>,
+    /// End of the output of a failed update.
+    pub message: Option<String>,
 }
 
 /// Connection status of a camera, summarized for display.
@@ -362,6 +382,9 @@ pub struct MotionDto {
     pub active: bool,
     /// Last decoder failure.
     pub error: Option<String>,
+    /// What is wrong with the picture while the stream flows: `frozen` (the
+    /// same picture for 5 min) or `covered` (uniform at once for 1 min).
+    pub picture: Option<&'static str>,
 }
 
 /// A detection event (`GET /api/v1/events`).
@@ -385,6 +408,8 @@ pub struct EventDto {
     pub thumbnail_url: Option<String>,
     /// Objects recognized in the thumbnail by the optional AI provider.
     pub objects: Vec<rustnvr_core::DetectedObject>,
+    /// Journey between cameras it belongs to (`GET /journeys/{id}`).
+    pub journey: Option<String>,
 }
 
 impl From<&rustnvr_core::DetectionEvent> for EventDto {
@@ -408,6 +433,7 @@ impl From<&rustnvr_core::DetectionEvent> for EventDto {
                 format!("/api/v1/events/{}/thumbnail{suffix}", e.id)
             }),
             objects: e.objects.clone(),
+            journey: e.journey.map(|j| j.to_string()),
         }
     }
 }
@@ -633,6 +659,11 @@ pub enum WsMessage {
         /// Error.
         message: String,
     },
+    /// A journey between cameras grew or ended.
+    Journey {
+        /// The journey.
+        journey: JourneyWsDto,
+    },
     /// A line was crossed.
     Crossing {
         /// The crossing.
@@ -647,6 +678,25 @@ pub struct StorageProblemDto {
     pub name: String,
     /// What is wrong (French).
     pub problem: String,
+}
+
+/// A journey between cameras (WebSocket `journey`); its events come with
+/// `GET /journeys/{id}`.
+#[derive(Clone, Debug, Serialize)]
+pub struct JourneyWsDto {
+    /// Identifier: that of the event that started it (usually its first;
+    /// an event the AI recognized later may come before it).
+    pub id: String,
+    /// Kind of object followed.
+    pub label: String,
+    /// `arrival`, `departure` or `null`.
+    pub direction: Option<rustnvr_core::journey::JourneyDirection>,
+    /// Cameras in order (those the account sees).
+    pub cameras: Vec<String>,
+    /// Their events, in the same order.
+    pub events: Vec<String>,
+    /// No camera can join it any more.
+    pub ended: bool,
 }
 
 /// A crossing of a line (WebSocket `crossing`).

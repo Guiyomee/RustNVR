@@ -9,6 +9,7 @@ pub mod camera;
 pub mod config;
 pub mod detection;
 pub mod events;
+pub mod journey;
 pub mod media;
 pub mod rtsp;
 pub mod schedule;
@@ -20,7 +21,7 @@ pub use detection::{
     CrossingDirection, CrossingLine, DetectedObject, DetectionEvent, EventKind, MotionSettings,
     MotionZone, PrivacyMask, presence,
 };
-pub use events::{EventBus, NvrEvent, SegmentInfo, StreamState};
+pub use events::{EventBus, NvrEvent, PictureProblem, SegmentInfo, StreamState};
 pub use media::{
     AudioParams, AudioSample, FrameAudio, StreamItem, VideoCodec, VideoFrame, VideoParams,
 };

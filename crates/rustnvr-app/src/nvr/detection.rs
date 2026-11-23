@@ -176,6 +176,11 @@ pub(super) async fn run_events(
                         // A picture may be analysed first: off this loop.
                         tokio::spawn(crossing(shared.clone(), db.clone(), camera, line, forward, at_ms));
                     }
+                    // A failure: whatever the schedule.
+                    // (The WebSocket sends the camera again with it.)
+                    MotionUpdate::Picture { camera, problem } => {
+                        let _ = shared.engine.events.send(NvrEvent::PictureState { camera, problem });
+                    }
                 }
             }
             Some(Manual { camera, seconds, reply }) = manual.recv() => {
@@ -396,6 +401,26 @@ pub(super) fn at_line(o: &DetectedObject, line: &rustnvr_core::CrossingLine) -> 
         .any(|p| distance_to_segment(p, line.a, line.b) <= AT_LINE)
 }
 
+/// The picture of an event of `camera` now, privacy masks applied: the
+/// photo the camera gives when its settings ask for it (`camera_photo`),
+/// else (or when that fails) the current picture of `tap`.
+async fn event_picture(
+    shared: &Shared,
+    camera: &CameraId,
+    settings: &MotionSettings,
+    tap: &LiveTap,
+) -> Result<Bytes, String> {
+    let masks = settings.mask_rects();
+    if settings.camera_photo {
+        let photo = super::photo::take(shared, camera, &masks, settings.camera_photo_width).await;
+        super::photo::report(camera, &photo);
+        if photo.is_ok() {
+            return photo;
+        }
+    }
+    snapshot_jpeg(&shared.ffmpeg, tap, THUMBNAIL_WIDTH, &masks).await
+}
+
 /// Latest picture of `camera` (privacy masks applied), if it is running.
 async fn camera_picture(
     shared: &Shared,
@@ -406,14 +431,7 @@ async fn camera_picture(
         let state = shared.state.lock().await;
         state.running.get(camera).map(|rt| rt.detection_tap())
     }?;
-    match snapshot_jpeg(
-        &shared.ffmpeg,
-        &tap,
-        THUMBNAIL_WIDTH,
-        &settings.mask_rects(),
-    )
-    .await
-    {
+    match event_picture(shared, camera, settings, &tap).await {
         Ok(jpeg) => Some(jpeg),
         Err(e) => {
             debug!(%camera, error = %e, "no picture of the crossing");
@@ -731,8 +749,8 @@ async fn take_thumbnail(
             .map(|rt| rt.detection_tap())
     };
     let Some(tap) = tap else { return };
-    let masks = camera_settings(&shared, &event.camera).await.mask_rects();
-    match snapshot_jpeg(&shared.ffmpeg, &tap, THUMBNAIL_WIDTH, &masks).await {
+    let settings = camera_settings(&shared, &event.camera).await;
+    match event_picture(&shared, &event.camera, &settings, &tap).await {
         Ok(jpeg) => {
             if let Err(e) = db.set_thumbnail(&event, &jpeg).await {
                 warn!(camera = %event.camera, error = %e, "cannot store event thumbnail");
@@ -759,8 +777,10 @@ async fn take_thumbnail(
 /// Recognizes objects in the pictures of `event`: the thumbnail first, then
 /// a new picture every few seconds while the event lasts and nothing is
 /// recognized (a person entering the picture after the start of the motion),
-/// up to the configured number of pictures. The picture where objects are
-/// found becomes the thumbnail of the event.
+/// up to the configured number of pictures; then, if set, one picture every
+/// `watch` while the event still lasts (rain or wind can keep a motion going
+/// for minutes, and someone passing meanwhile must still be seen). The
+/// picture where objects are found becomes the thumbnail of the event.
 async fn recognize(
     shared: &Shared,
     ai: &rustnvr_ai::Analyzer,
@@ -771,10 +791,13 @@ async fn recognize(
     done: &mpsc::Sender<EventUpdate>,
 ) {
     let (max_pictures, interval) = ai.schedule();
+    let watch = ai.watch();
     // Objects chosen for this camera (empty: all those of the settings).
     let wanted = camera_settings(shared, &event.camera).await;
     let mut jpeg = thumbnail;
-    for picture in 1..=max_pictures {
+    let mut picture: u32 = 0;
+    loop {
+        picture += 1;
         let night = night_vision(shared, &event.camera).await;
         let started = std::time::Instant::now();
         let found = match ai.analyze(&jpeg, night).await {
@@ -832,23 +855,38 @@ async fn recognize(
             return;
         }
         debug!(camera = %event.camera, id = event.id, picture, ms, "nothing recognized");
-        if picture == max_pictures {
+        let Some(wait) = next_picture(picture, max_pictures, interval, watch) else {
             return;
-        }
-        tokio::time::sleep(interval).await;
+        };
+        tokio::time::sleep(wait).await;
         // Stop with the event.
         match db.event(event.id).await {
             Ok(Some(e)) if e.end_ms.is_none() => {}
             _ => return,
         }
-        jpeg = match snapshot_jpeg(&shared.ffmpeg, tap, THUMBNAIL_WIDTH, &wanted.mask_rects()).await
-        {
+        jpeg = match event_picture(shared, &event.camera, &wanted, tap).await {
             Ok(j) => j,
             Err(e) => {
                 debug!(camera = %event.camera, error = %e, "no picture to analyse");
                 return;
             }
         };
+    }
+}
+
+/// The delay before the picture after `picture` (1 for the first) when
+/// nothing was recognized: `interval` up to `max_pictures`, then `watch`;
+/// `None` to stop.
+fn next_picture(
+    picture: u32,
+    max_pictures: u32,
+    interval: Duration,
+    watch: Option<Duration>,
+) -> Option<Duration> {
+    if picture < max_pictures {
+        Some(interval)
+    } else {
+        watch
     }
 }
 
@@ -913,10 +951,13 @@ pub(super) async fn set_motion(
         .await
         .map_err(|e| ControlError::Internal(e.to_string()))?;
     let enabled = settings.enabled;
-    // Muting the notifications alone leaves the detection running.
+    // Muting the notifications, the time-lapse or the camera photo alone
+    // leave the detection running.
     let restart = state.motion.get(&id).is_none_or(|old| {
         let mut same = old.clone();
         same.mute_notifications = settings.mute_notifications;
+        same.timelapse = settings.timelapse;
+        same.camera_photo = settings.camera_photo;
         same != settings
     });
     state.motion.insert(id.clone(), settings);
@@ -1726,11 +1767,14 @@ pub(super) fn ai_view(shared: &Arc<Shared>) -> AiView {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    let health = shared.ai().map(|a| a.health()).unwrap_or_default();
     AiView {
         settings,
         active: shared.ai().map(|a| a.provider().to_owned()),
         device: shared.ai().and_then(|a| a.device()),
         error,
+        failures: health.failures,
+        failure: health.error,
         onnx_available: cfg!(feature = "onnx"),
         detection_ready: shared.database.is_some() && shared.ffmpeg_ok,
         managed: shared.managed_ai_file.as_ref().is_some_and(|p| p.is_file()),
@@ -1935,6 +1979,19 @@ pub(super) async fn ai_test(
 mod tests {
     use super::*;
     use rustnvr_core::{CrossingDirection, CrossingLine};
+
+    #[test]
+    fn keeps_looking_while_a_long_event_lasts() {
+        let (i, w) = (Duration::from_secs(3), Duration::from_secs(30));
+        // The first pictures every 3 s, then every 30 s for as long as needed.
+        assert_eq!(next_picture(1, 5, i, Some(w)), Some(i));
+        assert_eq!(next_picture(4, 5, i, Some(w)), Some(i));
+        assert_eq!(next_picture(5, 5, i, Some(w)), Some(w));
+        assert_eq!(next_picture(40, 5, i, Some(w)), Some(w));
+        // Without watching: 5 pictures and no more.
+        assert_eq!(next_picture(4, 5, i, None), Some(i));
+        assert_eq!(next_picture(5, 5, i, None), None);
+    }
 
     #[test]
     fn finds_the_object_at_the_line() {

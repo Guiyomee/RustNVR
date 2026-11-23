@@ -3,6 +3,7 @@
 //! `UsernameToken` authentication (password digest, dated with the camera's
 //! own clock so that a camera on the wrong time still accepts it).
 
+use crate::http_auth;
 use crate::xml::{self, Element, escape};
 use base64::Engine as _;
 use rustnvr_core::Secret;
@@ -342,6 +343,203 @@ impl Client {
         });
         Ok(out)
     }
+
+    /// Addresses of the photos the camera gives (`GetSnapshotUri`), one per
+    /// video profile that has one (the same address once), largest
+    /// announced profile first. Some cameras announce no size, or give the
+    /// same small photo whatever the profile: [`Client::largest_photo`]
+    /// tries them all. They may hold credentials: never logged.
+    pub async fn snapshot_urls(&self, media_url: &str) -> Result<Vec<String>, OnvifError> {
+        let body = self.call(media_url, "<trt:GetProfiles/>", true).await?;
+        let mut profiles = Vec::new();
+        body.find_all("Profiles", &mut profiles);
+        let mut tokens: Vec<(u64, &str)> = profiles
+            .iter()
+            .filter_map(|p| {
+                let size = |n: &str| {
+                    p.find("VideoEncoderConfiguration")
+                        .and_then(|e| e.find("Resolution"))
+                        .and_then(|r| r.text_at(&[n]))
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                Some((size("Width") * size("Height"), p.attr("token")?))
+            })
+            .collect();
+        tokens.sort_by_key(|(area, _)| std::cmp::Reverse(*area));
+        let mut last = OnvifError::NotImplemented;
+        let mut urls: Vec<String> = Vec::new();
+        for (_, token) in tokens {
+            let request = format!(
+                "<trt:GetSnapshotUri><trt:ProfileToken>{}</trt:ProfileToken></trt:GetSnapshotUri>",
+                escape(token)
+            );
+            match self.call(media_url, &request, true).await {
+                Ok(b) => {
+                    if let Some(uri) = b
+                        .find("MediaUri")
+                        .and_then(|m| m.text_at(&["Uri"]))
+                        .map(str::trim)
+                        .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+                        && !urls.iter().any(|u| u == uri)
+                    {
+                        urls.push(uri.to_owned());
+                    }
+                }
+                Err(OnvifError::Unauthorized) => return Err(OnvifError::Unauthorized),
+                Err(e) => last = e,
+            }
+        }
+        if !urls.is_empty() {
+            return Ok(urls);
+        }
+        Err(match last {
+            OnvifError::NotImplemented => OnvifError::Other(
+                "la caméra ne donne pas de photo en ONVIF (GetSnapshotUri)".to_owned(),
+            ),
+            e => e,
+        })
+    }
+
+    /// The largest photo among those of `urls` (from
+    /// [`Client::snapshot_urls`]): its address, the photo and its size. A
+    /// refused password stops at once; otherwise the last failure is given
+    /// when no photo came.
+    pub async fn largest_photo(
+        &self,
+        urls: &[String],
+    ) -> Result<(String, Vec<u8>, (u16, u16)), OnvifError> {
+        let mut best: Option<(String, Vec<u8>, (u16, u16))> = None;
+        let mut last = OnvifError::Other("la caméra ne donne pas de photo en ONVIF".into());
+        for url in urls {
+            match self.photo(url).await {
+                Ok(jpeg) => {
+                    let size = jpeg_size(&jpeg).unwrap_or((0, 0));
+                    let area = |s: (u16, u16)| u32::from(s.0) * u32::from(s.1);
+                    if best.as_ref().is_none_or(|(_, _, b)| area(size) > area(*b)) {
+                        best = Some((url.clone(), jpeg, size));
+                    }
+                }
+                Err(OnvifError::Unauthorized) => return Err(OnvifError::Unauthorized),
+                Err(e) => last = e,
+            }
+        }
+        best.ok_or(last)
+    }
+
+    /// Downloads the photo at `url` (from [`Client::snapshot_urls`]), with
+    /// HTTP Digest or Basic when the camera asks for it; a JPEG, at most
+    /// [`MAX_PHOTO`] bytes.
+    pub async fn photo(&self, url: &str) -> Result<Vec<u8>, OnvifError> {
+        let send = |authorization: Option<String>| {
+            let mut request = self.http.get(url);
+            if let Some(a) = authorization {
+                request = request.header("Authorization", a);
+            }
+            async move {
+                request.send().await.map_err(|e| {
+                    if e.is_timeout() {
+                        OnvifError::Other("la caméra met trop de temps à donner la photo".into())
+                    } else if e.is_connect() {
+                        // ONVIF answered (it gave this address): the photo
+                        // is served elsewhere, often on a port the camera
+                        // keeps closed (HTTP off on recent Reolink).
+                        let port = reqwest::Url::parse(url)
+                            .ok()
+                            .and_then(|u| u.port_or_known_default())
+                            .map_or_else(String::new, |p| format!(" (port {p})"));
+                        OnvifError::Other(format!(
+                            "la caméra refuse la connexion à l'adresse de sa photo{port} : son port HTTP est sans doute coupé (Reolink : Réseau → Avancé → Réglage des ports → HTTP)"
+                        ))
+                    } else {
+                        OnvifError::Other(e.without_url().to_string())
+                    }
+                })
+            }
+        };
+        let mut response = send(None).await?;
+        if response.status().as_u16() == 401
+            && let Some((user, password)) = &self.credentials
+        {
+            let challenges: Vec<String> = response
+                .headers()
+                .get_all("WWW-Authenticate")
+                .iter()
+                .filter_map(|v| v.to_str().ok().map(str::to_owned))
+                .collect();
+            let path = url
+                .split_once("://")
+                .and_then(|(_, rest)| rest.find('/').map(|i| &rest[i..]))
+                .unwrap_or("/");
+            let authorization = match challenges.iter().find_map(|c| http_auth::parse_digest(c)) {
+                Some(challenge) => {
+                    let mut nonce = [0u8; 8];
+                    let _ = getrandom::fill(&mut nonce);
+                    let cnonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+                    http_auth::digest_header(&challenge, user, password.expose(), path, &cnonce)
+                }
+                None => http_auth::basic_header(user, password.expose()),
+            };
+            response = send(Some(authorization)).await?;
+        }
+        let status = response.status();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return Err(OnvifError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(OnvifError::Other(format!("photo : réponse HTTP {status}")));
+        }
+        if response
+            .content_length()
+            .is_some_and(|n| n > MAX_PHOTO as u64)
+        {
+            return Err(OnvifError::Other("photo trop grande".into()));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| OnvifError::Other(e.without_url().to_string()))?;
+        if bytes.len() > MAX_PHOTO {
+            return Err(OnvifError::Other("photo trop grande".into()));
+        }
+        if !bytes.starts_with(&[0xff, 0xd8]) {
+            return Err(OnvifError::Other(
+                "la caméra n'a pas renvoyé une image JPEG".into(),
+            ));
+        }
+        Ok(bytes.to_vec())
+    }
+}
+
+/// Largest photo accepted from a camera (a 4K JPEG is 1 to 3 MB).
+pub const MAX_PHOTO: usize = 16 * 1024 * 1024;
+
+/// Width and height of a JPEG, from its start-of-frame marker.
+pub fn jpeg_size(jpeg: &[u8]) -> Option<(u16, u16)> {
+    let mut i = 2;
+    while i + 9 < jpeg.len() {
+        if jpeg[i] != 0xff {
+            return None;
+        }
+        let marker = jpeg[i + 1];
+        // Fill bytes and markers without length.
+        if marker == 0xff {
+            i += 1;
+            continue;
+        }
+        if (0xd0..=0xd9).contains(&marker) || marker == 0x01 {
+            i += 2;
+            continue;
+        }
+        let len = usize::from(u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]));
+        if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+            let h = u16::from_be_bytes([jpeg[i + 5], jpeg[i + 6]]);
+            let w = u16::from_be_bytes([jpeg[i + 7], jpeg[i + 8]]);
+            return Some((w, h));
+        }
+        i += 2 + len;
+    }
+    None
 }
 
 /// Everything about a camera: finds its device service (`device_url`, or
@@ -488,6 +686,182 @@ mod tests {
             }
         });
         format!("http://{addr}/onvif/device_service")
+    }
+
+    /// Reads one HTTP request (headers, then the announced body).
+    async fn read_request(s: &mut tokio::net::TcpStream) -> Option<String> {
+        let mut req = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = s.read(&mut buf).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            req.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&req);
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text[..end]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if req.len() >= end + 4 + len {
+                    return Some(text.into_owned());
+                }
+            }
+        }
+    }
+
+    /// A camera giving its photo: two profiles (the small one first), a
+    /// photo address for the large one, behind HTTP Digest (`/digest.jpg`)
+    /// or Basic (`/basic.jpg`); `/page` answers HTML.
+    async fn photo_camera() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Some(text) = read_request(&mut s).await else {
+                        return;
+                    };
+                    let line = text.lines().next().unwrap_or_default().to_owned();
+                    let auth = text
+                        .lines()
+                        .find_map(|l| {
+                            // Header names come in lower case from reqwest.
+                            l.split_once(':')
+                                .filter(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                                .map(|(_, v)| v.trim().to_owned())
+                        })
+                        .unwrap_or_default();
+                    let reply = |status: &str, kind: &str, extra: &str, body: &[u8]| {
+                        let mut r = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes();
+                        r.extend_from_slice(body);
+                        r
+                    };
+                    // Start of frame: 1920×1080 (digest), 640×360 (basic).
+                    let jpeg: &[u8] = &[
+                        0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0x04, 0x38, 0x07, 0x80, 1, 0, 0, 0, 0xff,
+                        0xd9,
+                    ];
+                    let small: &[u8] = &[
+                        0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0x01, 0x68, 0x02, 0x80, 1, 0, 0, 0, 0xff,
+                        0xd9,
+                    ];
+                    let answer = if line.starts_with("POST") {
+                        let body = if text.contains("GetProfiles") {
+                            soap(
+                                "<trt:GetProfilesResponse><trt:Profiles token=\"sub\"><tt:VideoEncoderConfiguration><tt:Resolution><tt:Width>640</tt:Width><tt:Height>360</tt:Height></tt:Resolution></tt:VideoEncoderConfiguration></trt:Profiles><trt:Profiles token=\"main\"><tt:VideoEncoderConfiguration><tt:Resolution><tt:Width>2560</tt:Width><tt:Height>1440</tt:Height></tt:Resolution></tt:VideoEncoderConfiguration></trt:Profiles></trt:GetProfilesResponse>",
+                            )
+                        } else if text.contains(">main<") {
+                            soap(&format!(
+                                "<trt:GetSnapshotUriResponse><trt:MediaUri><tt:Uri>http://{addr}/digest.jpg?ch=1</tt:Uri></trt:MediaUri></trt:GetSnapshotUriResponse>"
+                            ))
+                        } else {
+                            soap(&format!(
+                                "<trt:GetSnapshotUriResponse><trt:MediaUri><tt:Uri>http://{addr}/basic.jpg</tt:Uri></trt:MediaUri></trt:GetSnapshotUriResponse>"
+                            ))
+                        };
+                        reply("200 OK", "application/soap+xml", "", body.as_bytes())
+                    } else if line.starts_with("GET /digest.jpg?ch=1 ") {
+                        if let Some(cnonce) = auth
+                            .split("cnonce=\"")
+                            .nth(1)
+                            .and_then(|r| r.split('"').next())
+                        {
+                            let challenge = http_auth::parse_digest(
+                                r#"Digest realm="cam", qop="auth", nonce="n1", opaque="o1""#,
+                            )
+                            .expect("challenge");
+                            let expected = http_auth::digest_header(
+                                &challenge,
+                                "admin",
+                                "pw",
+                                "/digest.jpg?ch=1",
+                                cnonce,
+                            );
+                            if auth == expected {
+                                reply("200 OK", "image/jpeg", "", jpeg)
+                            } else {
+                                reply("401 Unauthorized", "text/plain", "", b"")
+                            }
+                        } else {
+                            reply(
+                                "401 Unauthorized",
+                                "text/plain",
+                                "WWW-Authenticate: Digest realm=\"cam\", qop=\"auth\", nonce=\"n1\", opaque=\"o1\"\r\n",
+                                b"",
+                            )
+                        }
+                    } else if line.starts_with("GET /basic.jpg ") {
+                        if auth == "Basic YWRtaW46cHc=" {
+                            reply("200 OK", "image/jpeg", "", small)
+                        } else {
+                            reply(
+                                "401 Unauthorized",
+                                "text/plain",
+                                "WWW-Authenticate: Basic realm=\"cam\"\r\n",
+                                b"",
+                            )
+                        }
+                    } else {
+                        reply("200 OK", "text/html", "", b"<html></html>")
+                    };
+                    let _ = s.write_all(&answer).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn gets_the_photo_of_the_camera() {
+        let base = photo_camera().await;
+        let creds = Some(("admin".to_owned(), Secret::new("pw".to_owned())));
+        let client = Client::new(creds, Duration::from_secs(5)).expect("client");
+        let urls = client
+            .snapshot_urls(&format!("{base}/onvif/media"))
+            .await
+            .expect("addresses");
+        let url = format!("{base}/digest.jpg?ch=1");
+        assert_eq!(
+            urls,
+            [url.clone(), format!("{base}/basic.jpg")],
+            "largest profile first"
+        );
+        let jpeg = client.photo(&url).await.expect("digest");
+        assert_eq!(jpeg_size(&jpeg), Some((1920, 1080)));
+        // Tried in the other order, the largest photo still wins.
+        let reversed: Vec<String> = urls.iter().rev().cloned().collect();
+        let (best, _, size) = client.largest_photo(&reversed).await.expect("photo");
+        assert_eq!((best.as_str(), size), (url.as_str(), (1920, 1080)));
+        assert!(client.photo(&format!("{base}/basic.jpg")).await.is_ok());
+        assert!(matches!(
+            client.photo(&format!("{base}/page")).await,
+            Err(OnvifError::Other(_))
+        ));
+        // A closed port: said as such, with the port (not « no ONVIF »).
+        match client.photo("http://127.0.0.1:9/snap.jpg").await {
+            Err(OnvifError::Other(m)) => assert!(m.contains("(port 9)"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        let wrong = Client::new(
+            Some(("admin".to_owned(), Secret::new("bad".to_owned()))),
+            Duration::from_secs(5),
+        )
+        .expect("client");
+        assert_eq!(wrong.photo(&url).await, Err(OnvifError::Unauthorized));
+        assert_eq!(
+            wrong.photo(&format!("{base}/basic.jpg")).await,
+            Err(OnvifError::Unauthorized)
+        );
     }
 
     #[tokio::test]

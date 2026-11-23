@@ -84,6 +84,27 @@ pub struct SegmentInfo {
     pub height: u32,
 }
 
+/// What can be wrong with the picture of a camera that still sends its
+/// stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PictureProblem {
+    /// The same picture for minutes: the camera's encoder is stuck.
+    Frozen,
+    /// The picture became uniform at once (black, white, one colour): lens
+    /// covered, camera masked or light switched off.
+    Covered,
+}
+
+impl PictureProblem {
+    /// Name in the API and the webhooks (`frozen`, `covered`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PictureProblem::Frozen => "frozen",
+            PictureProblem::Covered => "covered",
+        }
+    }
+}
+
 /// Notifications published on the [`EventBus`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum NvrEvent {
@@ -111,6 +132,8 @@ pub enum NvrEvent {
     },
     /// A detection event started, changed (thumbnail, zones) or ended.
     Detection(DetectionEvent),
+    /// A journey between cameras grew or ended.
+    Journey(crate::journey::JourneyUpdate),
     /// A picture taken when an event started (JPEG), for integrations.
     Snapshot {
         /// Camera.
@@ -164,6 +187,14 @@ pub enum NvrEvent {
         name: String,
         /// What is wrong (French); `None`: usable again.
         problem: Option<String>,
+    },
+    /// The picture of a camera whose stream still flows went wrong (frozen,
+    /// covered), or is right again; seen by its motion detection.
+    PictureState {
+        /// Camera.
+        camera: CameraId,
+        /// What is wrong; `None`: right again.
+        problem: Option<PictureProblem>,
     },
     /// Motion detection was switched on or off for a camera.
     MotionSettingsChanged {

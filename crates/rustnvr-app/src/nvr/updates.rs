@@ -1,7 +1,9 @@
 //! Check for new versions: the latest release published on the watched
 //! repository (`[updates] repository`, or `updates.ui.toml`) is compared with
-//! the running version. Nothing is downloaded nor installed: the interface
-//! shows the release notes and how to update (Docker or systemd).
+//! the running version. Nothing is downloaded here: the interface shows the
+//! release notes and how to update (Docker or systemd); an installation made
+//! by `install.sh` can also be updated from the interface, by root (see
+//! `rustnvr_api::self_update`).
 
 use super::Shared;
 use rustnvr_api::ControlError;

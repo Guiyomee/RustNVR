@@ -1,8 +1,9 @@
 //! Webhooks: an HTTP POST with the event as JSON (and its picture) to the
 //! configured addresses, on motion, recognized objects and end of an event,
 //! on crossings of lines, when a recording destination fails or recovers,
-//! when a camera goes offline or comes back, and when the recording of a
-//! camera fails or works again.
+//! when a camera goes offline or comes back, when its picture freezes or is
+//! covered, when the recording of a camera fails or works again, and when
+//! object recognition fails several times in a row.
 //! Discord webhooks, which refuse that JSON, get a Discord message instead
 //! (an embed, the picture attached); ntfy topics a notification (the
 //! picture attached), Telegram bots a message to their chat (a photo with
@@ -18,7 +19,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use rustnvr_api::{ControlError, WebhookTestResult};
 use rustnvr_core::config::{MANAGED_WEBHOOKS_FILE, WebhookConfig, WebhookEvent, WebhookKind};
-use rustnvr_core::{CameraId, DetectionEvent, NvrEvent, StreamRole, StreamState};
+use rustnvr_core::{CameraId, DetectionEvent, NvrEvent, PictureProblem, StreamRole, StreamState};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Calls waiting to be sent to one webhook, at most (more are dropped, with
 /// a warning).
@@ -70,6 +71,38 @@ enum Body {
         mp4: Bytes,
         delivery: Delivery,
     },
+}
+
+impl Body {
+    /// What a call carries, for the log: its kind and its title (the
+    /// title of the message, or the `type` of RustNVR's JSON; never the
+    /// address).
+    fn summary(&self) -> (&'static str, String) {
+        fn title(payload: &Value) -> String {
+            let text = payload["embeds"][0]["title"]
+                .as_str()
+                .or_else(|| payload["content"].as_str())
+                .unwrap_or_default();
+            text.lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(80)
+                .collect()
+        }
+        match self {
+            Body::Json(v) => ("json", v["type"].as_str().unwrap_or_default().to_owned()),
+            Body::Message { payload, jpeg, .. } => (
+                if jpeg.is_some() {
+                    "message with picture"
+                } else {
+                    "message"
+                },
+                title(payload),
+            ),
+            Body::Clip { payload, .. } => ("video", title(payload)),
+        }
+    }
 }
 
 /// How a message is delivered, as chosen for its kind of call.
@@ -554,12 +587,15 @@ async fn send_calls(mut rx: mpsc::Receiver<Call>, cancel: CancellationToken) {
             }
             result = post(&client, &call.hook, &call.body).await;
         }
+        // Every call is logged, sent or not: whether a notification went
+        // out can be read in the log afterwards.
+        let (what, title) = call.body.summary();
         match result {
             Ok(status) => {
-                debug!(webhook = %call.hook.name, host = call.hook.host(), status, "webhook called")
+                info!(webhook = %call.hook.name, host = call.hook.host(), status, what, title, "webhook sent")
             }
             Err(e) => {
-                warn!(webhook = %call.hook.name, host = call.hook.host(), error = %e.message, "webhook call failed")
+                warn!(webhook = %call.hook.name, host = call.hook.host(), what, title, error = %e.message, "webhook call failed")
             }
         }
     }
@@ -611,6 +647,7 @@ fn kind_name(kind: WebhookEvent) -> &'static str {
         WebhookEvent::Storage => "storage",
         WebhookEvent::Camera => "camera",
         WebhookEvent::Recording => "recording",
+        WebhookEvent::Ai => "ai",
     }
 }
 
@@ -1341,6 +1378,187 @@ fn recording_discord(change: &RecordingChange, camera_name: &str, at_ms: i64) ->
     }
 }
 
+/// How a frozen or covered picture is said.
+fn picture_texts(problem: Option<PictureProblem>) -> (&'static str, &'static str) {
+    match problem {
+        Some(PictureProblem::Frozen) => (
+            "figée",
+            "L'image ne change plus depuis 5 min, alors que la caméra envoie toujours son flux. Redémarrez-la si cela dure.",
+        ),
+        Some(PictureProblem::Covered) => (
+            "masquée",
+            "L'image est devenue d'un coup uniforme (noire, blanche ou d'une seule couleur) depuis 1 min : objectif couvert, caméra masquée ou lumière éteinte.",
+        ),
+        None => ("rétablie", "L'image est de nouveau normale."),
+    }
+}
+
+/// JSON sent when the picture of a camera goes wrong or is right again.
+fn picture_body(
+    camera: &CameraId,
+    camera_name: &str,
+    problem: Option<PictureProblem>,
+    at_ms: i64,
+) -> Value {
+    json!({
+        "type": "picture",
+        "camera": camera.as_str(),
+        "camera_name": camera_name,
+        "picture": {
+            "ok": problem.is_none(),
+            "problem": problem.map(PictureProblem::as_str),
+            "at_ms": at_ms,
+        },
+        "rustnvr": rustnvr_core::release_version(),
+    })
+}
+
+/// Variables of the picture of a camera going wrong or right again (those
+/// of « camera offline », for the same custom message).
+fn picture_vars(camera_name: &str, problem: Option<PictureProblem>, at_ms: i64) -> Vars {
+    let (etat, text) = picture_texts(problem);
+    let mut vars = vec![
+        ("camera", camera_name.to_owned()),
+        ("etat", etat.to_owned()),
+        (
+            "erreur",
+            if problem.is_some() { text } else { "" }.to_owned(),
+        ),
+        ("duree", String::new()),
+    ];
+    vars.extend(when_vars(at_ms));
+    vars
+}
+
+/// Discord message when the picture of a camera goes wrong or is right again.
+fn picture_discord(camera_name: &str, problem: Option<PictureProblem>, at_ms: i64) -> Value {
+    let (etat, text) = picture_texts(problem);
+    let title = match problem {
+        Some(PictureProblem::Frozen) => format!("Image figée · {camera_name}"),
+        Some(PictureProblem::Covered) => format!("Image masquée · {camera_name}"),
+        None => format!("Image {etat} · {camera_name}"),
+    };
+    let colour = if problem.is_some() {
+        0xEF_44_44
+    } else {
+        0x22_C5_5E
+    };
+    discord_message(title, colour, text.to_owned(), at_ms, false)
+}
+
+/// Object recognition is reported failing after this many failures in a row.
+const AI_FAILURES: u32 = 3;
+
+/// Object recognition failed [`AI_FAILURES`] times in a row, or works again
+/// after that was reported.
+#[derive(Debug, PartialEq)]
+enum AiChange {
+    Failed { error: String, failures: u32 },
+    Back { failed_for: Duration },
+}
+
+/// Follows the health of object recognition (looked at every few seconds).
+#[derive(Default)]
+struct AiWatch {
+    /// Since when it fails, once reported.
+    reported: Option<Instant>,
+}
+
+impl AiWatch {
+    /// `health`: that of the recognition in effect, `None` when it is off.
+    fn check(&mut self, health: Option<&rustnvr_ai::AiHealth>, now: Instant) -> Option<AiChange> {
+        let Some(h) = health else {
+            // Switched off: nothing more to say.
+            self.reported = None;
+            return None;
+        };
+        match self.reported {
+            None if h.failures >= AI_FAILURES => {
+                self.reported = Some(h.failing_since.unwrap_or(now));
+                Some(AiChange::Failed {
+                    error: h.error.clone().unwrap_or_default(),
+                    failures: h.failures,
+                })
+            }
+            Some(since) if h.failures == 0 && h.last_ok.is_some() => {
+                self.reported = None;
+                Some(AiChange::Back {
+                    failed_for: now.saturating_duration_since(since),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+fn millis(d: Duration) -> i64 {
+    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// JSON sent when object recognition fails or works again.
+fn ai_body(change: &AiChange, at_ms: i64) -> Value {
+    let (ok, error, failures, failed_for) = match change {
+        AiChange::Failed { error, failures } => (false, Some(error.as_str()), *failures, None),
+        AiChange::Back { failed_for } => (true, None, 0, Some(millis(*failed_for))),
+    };
+    json!({
+        "type": "ai",
+        "ai": {
+            "ok": ok,
+            "at_ms": at_ms,
+            "error": error,
+            "failures": failures,
+            "failed_ms": failed_for,
+        },
+        "rustnvr": rustnvr_core::release_version(),
+    })
+}
+
+/// Variables of object recognition failing or working again.
+fn ai_vars(change: &AiChange, at_ms: i64) -> Vars {
+    let mut vars = match change {
+        AiChange::Failed { error, failures } => vec![
+            ("etat", "en panne".to_owned()),
+            ("erreur", error.clone()),
+            ("echecs", failures.to_string()),
+            ("duree", String::new()),
+        ],
+        AiChange::Back { failed_for } => vec![
+            ("etat", "rétablie".to_owned()),
+            ("erreur", String::new()),
+            ("echecs", String::new()),
+            ("duree", duration_text(millis(*failed_for))),
+        ],
+    };
+    vars.extend(when_vars(at_ms));
+    vars
+}
+
+/// Discord message when object recognition fails or works again.
+fn ai_discord(change: &AiChange, at_ms: i64) -> Value {
+    match change {
+        AiChange::Failed { error, failures } => discord_message(
+            "IA en panne".to_owned(),
+            0xEF_44_44,
+            format!(
+                "La reconnaissance d'objets a échoué {failures} fois de suite : {error}\nLes mouvements sont toujours enregistrés, mais plus aucun objet n'est reconnu."
+            ),
+            at_ms,
+            false,
+        ),
+        AiChange::Back { failed_for } => discord_message(
+            "IA rétablie".to_owned(),
+            0x22_C5_5E,
+            format!(
+                "La reconnaissance d'objets fonctionne de nouveau, après {} en panne.",
+                duration_text(millis(*failed_for))
+            ),
+            at_ms,
+            false,
+        ),
+    }
+}
+
 /// JSON sent when a camera goes offline or comes back.
 fn camera_body(change: &CameraChange, camera_name: &str, at_ms: i64) -> Value {
     let (online, down_for, error) = match change {
@@ -1424,10 +1642,14 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
     let mut sent: HashMap<i64, Sent> = HashMap::new();
     let mut availability = Availability::default();
     let mut failures = Failures::default();
+    let mut ai_watch = AiWatch::default();
     let mut cooldowns = Cooldowns::default();
     let mut ticker = tokio::time::interval(AVAILABILITY_CHECK);
     // Clips are made off the loop (they wait for the recordings), then queued.
     let (clip_tx, mut clips) = mpsc::channel::<(WebhookConfig, Body)>(16);
+    // Journeys between cameras, followed here too: an event is known to
+    // join one as soon as its objects are, before it is called.
+    let mut trips = Trips::default();
     loop {
         let event = tokio::select! {
             _ = cancel.cancelled() => return,
@@ -1442,6 +1664,7 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                     | NvrEvent::StorageState { .. }
                     | NvrEvent::RecorderError { .. }
                     | NvrEvent::SegmentFinished(_)
+                    | NvrEvent::PictureState { .. }
                     | NvrEvent::StreamState { role: StreamRole::Main, .. })) => Some(e),
                 Ok(_) => continue,
                 Err(RecvError::Lagged(n)) => {
@@ -1467,6 +1690,27 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
             Some(NvrEvent::SegmentFinished(s)) => failures.segment(&s.camera, now),
             _ => None,
         };
+        let ai = match &event {
+            None => ai_watch.check(shared.ai().map(|a| a.health()).as_ref(), now),
+            Some(_) => None,
+        };
+        match &ai {
+            Some(AiChange::Failed { error, failures }) => {
+                warn!(failures, %error, "object recognition keeps failing");
+            }
+            Some(AiChange::Back { .. }) => info!("object recognition works again"),
+            None => {}
+        }
+        let arrows = super::journeys::settings(&shared);
+        let now_ms = jiff::Timestamp::now().as_millisecond();
+        let (ended_trips, held_clips) = match &event {
+            None => (trips.close(&arrows, now_ms), trips.due(now)),
+            Some(NvrEvent::Detection(e)) => {
+                trips.event(e, &arrows, now_ms);
+                (Vec::new(), Vec::new())
+            }
+            Some(_) => (Vec::new(), Vec::new()),
+        };
         let hooks = shared
             .webhooks
             .read()
@@ -1476,6 +1720,19 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
         queues.keep(&hooks);
         if hooks.iter().all(|h| !h.enabled) {
             continue;
+        }
+        // Clips held for a journey that did not come: sent now.
+        for held in held_clips {
+            tokio::spawn(send_clip(
+                shared.clone(),
+                held.event,
+                held.camera_name,
+                held.hooks,
+                clip_tx.clone(),
+            ));
+        }
+        for trip in ended_trips {
+            send_journey(&shared, &hooks, trip, &mut queues, &clip_tx).await;
         }
         for change in changes {
             let camera = change.camera();
@@ -1514,6 +1771,26 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                     )
                 } else {
                     Body::Json(recording_body(&change, &name, at_ms))
+                };
+                queues.push(hook, body);
+            }
+        }
+        if let Some(change) = ai {
+            let at_ms = jiff::Timestamp::now().as_millisecond();
+            for hook in hooks
+                .iter()
+                .filter(|h| h.enabled && h.events.contains(&WebhookEvent::Ai))
+            {
+                let body = if gets_messages(hook) {
+                    message(
+                        hook,
+                        WebhookEvent::Ai,
+                        ai_discord(&change, at_ms),
+                        None,
+                        &ai_vars(&change, at_ms),
+                    )
+                } else {
+                    Body::Json(ai_body(&change, at_ms))
                 };
                 queues.push(hook, body);
             }
@@ -1559,6 +1836,25 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                         )
                     } else {
                         Body::Json(crossing_body(&call, jpeg.map(|b| &b[..])))
+                    };
+                    queues.push(hook, body);
+                }
+                continue;
+            }
+            NvrEvent::PictureState { camera, problem } => {
+                let name = camera_name(&shared, &camera).await;
+                let at_ms = jiff::Timestamp::now().as_millisecond();
+                for hook in hooks.iter().filter(|h| wants_camera(h, camera.as_str())) {
+                    let body = if gets_messages(hook) {
+                        message(
+                            hook,
+                            WebhookEvent::Camera,
+                            picture_discord(&name, problem, at_ms),
+                            None,
+                            &picture_vars(&name, problem, at_ms),
+                        )
+                    } else {
+                        Body::Json(picture_body(&camera, &name, problem, at_ms))
                     };
                     queues.push(hook, body);
                 }
@@ -1615,12 +1911,16 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
             continue;
         }
         let camera_name = camera_name(&shared, &event.camera).await;
+        // The next cameras of a journey: silent for the webhooks grouping
+        // journeys (one message at its end).
+        let follower = trips.follower(event.id);
+        let calls = |h: &WebhookConfig| !(h.journeys && follower);
         if event.end_ms.is_some() {
-            let wanting: Vec<WebhookConfig> = hooks
+            let (held, wanting): (Vec<WebhookConfig>, Vec<WebhookConfig>) = hooks
                 .iter()
-                .filter(|h| wants_clip(h, &event) && cooldowns.event(h, &event, now))
+                .filter(|h| calls(h) && wants_clip(h, &event) && cooldowns.event(h, &event, now))
                 .cloned()
-                .collect();
+                .partition(|h| h.journeys && arrows.involves(event.camera.as_str()));
             if !wanting.is_empty() {
                 tokio::spawn(send_clip(
                     shared.clone(),
@@ -1630,11 +1930,23 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                     clip_tx.clone(),
                 ));
             }
+            // A journey may start here: its video, rather than this one.
+            if !held.is_empty() {
+                let wait = arrows.longest_from(event.camera.as_str());
+                trips.hold(Held {
+                    due: now
+                        + Duration::from_millis(u64::try_from(wait).unwrap_or(0))
+                        + HELD_MARGIN,
+                    event: event.clone(),
+                    camera_name: camera_name.clone(),
+                    hooks: held,
+                });
+            }
         }
         for kind in kinds {
             let targets: Vec<&WebhookConfig> = hooks
                 .iter()
-                .filter(|h| wanted(h, kind, &event) && cooldowns.event(h, &event, now))
+                .filter(|h| calls(h) && wanted(h, kind, &event) && cooldowns.event(h, &event, now))
                 .collect();
             if targets.is_empty() {
                 continue;
@@ -1651,6 +1963,271 @@ pub(super) async fn run(shared: Arc<Shared>, cancel: CancellationToken) {
                     request(hook, kind_name(kind), &event, &camera_name, jpeg),
                 );
             }
+        }
+    }
+}
+
+/// The clip of the first camera of a possible journey is held this long
+/// after the delay of its arrows (time for the AI on the next camera).
+const HELD_MARGIN: Duration = Duration::from_secs(15);
+
+/// A clip held until its event is known to start no journey.
+struct Held {
+    due: Instant,
+    event: DetectionEvent,
+    camera_name: String,
+    hooks: Vec<WebhookConfig>,
+}
+
+/// Journeys between cameras, as the webhooks see them.
+#[derive(Default)]
+struct Trips {
+    linker: super::journeys::Linker,
+    /// Events of a journey of two cameras or more.
+    members: std::collections::HashSet<i64>,
+    /// Those after its first camera.
+    followers: std::collections::HashSet<i64>,
+    held: Vec<Held>,
+}
+
+impl Trips {
+    fn event(
+        &mut self,
+        e: &DetectionEvent,
+        arrows: &rustnvr_core::journey::JourneySettings,
+        now_ms: i64,
+    ) {
+        if self.members.len() > FOLLOWED * 4 {
+            self.members.clear();
+            self.followers.clear();
+        }
+        for action in self.linker.event(e, arrows, now_ms) {
+            if let super::journeys::Action::Store { events, journey } = action {
+                for id in events {
+                    self.members.insert(id);
+                    if id != journey {
+                        self.followers.insert(id);
+                    }
+                }
+            }
+        }
+    }
+
+    fn close(
+        &mut self,
+        arrows: &rustnvr_core::journey::JourneySettings,
+        now_ms: i64,
+    ) -> Vec<rustnvr_core::journey::JourneyUpdate> {
+        self.linker.close(arrows, now_ms)
+    }
+
+    /// Whether event `id` came after the first camera of a journey.
+    fn follower(&self, id: i64) -> bool {
+        self.followers.contains(&id)
+    }
+
+    fn hold(&mut self, held: Held) {
+        if self.held.len() < FOLLOWED {
+            self.held.push(held);
+        }
+    }
+
+    /// The held clips whose event started no journey, once due; those of a
+    /// journey are dropped (its video replaces them).
+    fn due(&mut self, now: Instant) -> Vec<Held> {
+        let (due, kept): (Vec<Held>, Vec<Held>) = self.held.drain(..).partition(|h| now >= h.due);
+        self.held = kept;
+        due.into_iter()
+            .filter(|h| !self.members.contains(&h.event.id))
+            .collect()
+    }
+}
+
+/// Whether `hook` sums up the journey `trip` at its end. `audible`: the
+/// cameras of the journey whose notifications are not muted; a muted camera
+/// does not silence the others (its own step stays in the message).
+fn wants_journey(
+    hook: &WebhookConfig,
+    trip: &rustnvr_core::journey::JourneyUpdate,
+    audible: &[&str],
+) -> bool {
+    let Some(first) = trip.steps.first() else {
+        return false;
+    };
+    hook.enabled
+        && hook.journeys
+        && hook.events.contains(&WebhookEvent::Objects)
+        && in_schedule(hook, first.start_ms)
+        && audible
+            .iter()
+            .any(|a| hook.cameras.is_empty() || hook.cameras.iter().any(|c| c == a))
+        && (hook.objects.is_empty() || hook.objects.contains(&trip.label))
+}
+
+/// How long a journey lasted, when it is known.
+fn trip_duration(trip: &rustnvr_core::journey::JourneyUpdate) -> Option<i64> {
+    let first = trip.steps.first()?;
+    let end = trip.steps.iter().filter_map(|s| s.end_ms).max()?;
+    Some(end - first.start_ms)
+}
+
+/// The message of a journey (a Discord message, rendered for ntfy and
+/// Telegram).
+fn journey_discord(trip: &rustnvr_core::journey::JourneyUpdate, names: &[String]) -> Value {
+    let start = trip.steps.first().map_or(0, |s| s.start_ms);
+    let heure = when_vars(start)
+        .into_iter()
+        .find(|(n, _)| *n == "heure")
+        .map(|(_, v)| v)
+        .unwrap_or_default();
+    let mut details = vec![heure];
+    match trip.direction {
+        Some(rustnvr_core::journey::JourneyDirection::Arrival) => {
+            details.push("arrivée".to_owned())
+        }
+        Some(rustnvr_core::journey::JourneyDirection::Departure) => {
+            details.push("départ".to_owned())
+        }
+        None => {}
+    }
+    if let Some(ms) = trip_duration(trip) {
+        details.push(duration_text(ms));
+    }
+    json!({
+        "username": "RustNVR",
+        "embeds": [{
+            "title": format!("🚶 Trajet · {}", object_name(&trip.label)),
+            "description": format!("{}\n{}", names.join(" → "), details.join(" · ")),
+            "color": 0x3B_82_F6,
+        }],
+    })
+}
+
+/// RustNVR's JSON of a journey.
+fn journey_body(trip: &rustnvr_core::journey::JourneyUpdate, names: &[String]) -> Value {
+    json!({
+        "type": "journey",
+        "journey": {
+            "id": trip.id,
+            "label": trip.label,
+            "direction": trip.direction,
+            "start_ms": trip.steps.first().map(|s| s.start_ms),
+            "end_ms": trip.steps.iter().filter_map(|s| s.end_ms).max(),
+            "cameras": trip.steps.iter().zip(names).map(|(s, name)| json!({
+                "camera": s.camera.as_str(),
+                "camera_name": name,
+                "event": s.event,
+                "start_ms": s.start_ms,
+                "end_ms": s.end_ms,
+            })).collect::<Vec<_>>(),
+        },
+        "rustnvr": rustnvr_core::release_version(),
+    })
+}
+
+/// Sums up an ended journey for the webhooks that group journeys: its
+/// message, with its video for those with `clip`.
+async fn send_journey(
+    shared: &Arc<Shared>,
+    hooks: &[WebhookConfig],
+    trip: rustnvr_core::journey::JourneyUpdate,
+    queues: &mut Queues,
+    clip_tx: &mpsc::Sender<(WebhookConfig, Body)>,
+) {
+    let mut audible = Vec::new();
+    for s in &trip.steps {
+        if !muted(shared, &s.camera).await {
+            audible.push(s.camera.as_str());
+        }
+    }
+    let targets: Vec<&WebhookConfig> = hooks
+        .iter()
+        .filter(|h| wants_journey(h, &trip, &audible))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let mut names = Vec::new();
+    for s in &trip.steps {
+        names.push(camera_name(shared, &s.camera).await);
+    }
+    let payload = journey_discord(&trip, &names);
+    let mut with_video = Vec::new();
+    for hook in targets {
+        let delivery = delivery_of(hook);
+        if !gets_messages(hook) {
+            queues.push(hook, Body::Json(journey_body(&trip, &names)));
+        } else if hook.clip {
+            with_video.push(hook.clone());
+        } else {
+            queues.push(
+                hook,
+                Body::Message {
+                    payload: payload.clone(),
+                    jpeg: None,
+                    delivery,
+                },
+            );
+        }
+    }
+    if !with_video.is_empty() {
+        tokio::spawn(send_journey_clip(
+            shared.clone(),
+            trip,
+            names,
+            payload,
+            with_video,
+            clip_tx.clone(),
+        ));
+    }
+}
+
+/// How the messages about objects are delivered for `hook` (the journeys
+/// follow them).
+fn delivery_of(hook: &WebhookConfig) -> Delivery {
+    let chosen = hook.messages.get(&WebhookEvent::Objects);
+    Delivery {
+        priority: chosen.and_then(|m| m.priority),
+        silent: chosen.is_some_and(|m| m.silent),
+    }
+}
+
+/// Makes the video of a journey (once its recordings are finished) and
+/// hands it to the webhooks with its message; the message alone if the
+/// video cannot be made.
+async fn send_journey_clip(
+    shared: Arc<Shared>,
+    trip: rustnvr_core::journey::JourneyUpdate,
+    names: Vec<String>,
+    payload: Value,
+    hooks: Vec<WebhookConfig>,
+    out: mpsc::Sender<(WebhookConfig, Body)>,
+) {
+    let steps: Vec<_> = trip.steps.iter().cloned().zip(names).collect();
+    let parts = super::clips::journey_parts(&steps);
+    let mp4 = match super::clips::journey_clip(&shared, trip.id, &parts).await {
+        Ok(mp4) => Some(mp4),
+        Err(e) => {
+            warn!(journey = trip.id, error = %e, "journey video not made");
+            None
+        }
+    };
+    for hook in hooks {
+        let delivery = delivery_of(&hook);
+        let body = match &mp4 {
+            Some(mp4) => Body::Clip {
+                payload: payload.clone(),
+                mp4: mp4.clone(),
+                delivery,
+            },
+            None => Body::Message {
+                payload: payload.clone(),
+                jpeg: None,
+                delivery,
+            },
+        };
+        if out.send((hook, body)).await.is_err() {
+            return;
         }
     }
 }
@@ -1744,6 +2321,7 @@ pub(super) async fn test(hook: &WebhookConfig) -> WebhookTestResult {
         zones: Vec::new(),
         has_thumbnail: false,
         objects: Vec::new(),
+        journey: None,
     };
     let started = Instant::now();
     let result = post(
@@ -1835,6 +2413,7 @@ mod tests {
             cooldown_minutes: 0,
             schedule: Vec::new(),
             clip: false,
+            journeys: false,
         }
     }
 
@@ -1857,7 +2436,115 @@ mod tests {
                     zone: None,
                 })
                 .collect(),
+            journey: None,
         }
+    }
+
+    #[test]
+    fn calls_are_summed_up_for_the_log() {
+        let json = Body::Json(json!({ "type": "picture", "camera": "garage" }));
+        assert_eq!(json.summary(), ("json", "picture".to_owned()));
+        let message = Body::Message {
+            payload: json!({ "embeds": [{ "title": "Personne · Salon\nsecond" }] }),
+            jpeg: Some(Bytes::from_static(b"jpeg")),
+            delivery: Delivery::default(),
+        };
+        assert_eq!(
+            message.summary(),
+            ("message with picture", "Personne · Salon".to_owned())
+        );
+        let clip = Body::Clip {
+            payload: json!({ "content": "Vidéo de 21:34" }),
+            mp4: Bytes::from_static(b"mp4"),
+            delivery: Delivery::default(),
+        };
+        assert_eq!(clip.summary(), ("video", "Vidéo de 21:34".to_owned()));
+    }
+
+    #[test]
+    fn journeys_are_summed_up_once() {
+        use rustnvr_core::journey::{JourneyLink, JourneySettings};
+        let arrows = JourneySettings {
+            links: vec![JourneyLink {
+                from: "sonnette".into(),
+                to: "entree".into(),
+                max_delay_s: 30,
+                both_ways: true,
+            }],
+        };
+        let at = |id: i64, camera: &str, start_ms: i64| DetectionEvent {
+            id,
+            start_ms,
+            end_ms: Some(start_ms + 3_000),
+            ..event(camera, &["person"])
+        };
+        let mut trips = Trips::default();
+        let now = Instant::now();
+        let held = |e: DetectionEvent| Held {
+            due: now,
+            event: e,
+            camera_name: "Sonnette".into(),
+            hooks: vec![hook()],
+        };
+        // Someone at the door, then at the entrance: the entrance is silent,
+        // the clip of the door gives way to the journey video.
+        trips.event(&at(1, "sonnette", 1_000), &arrows, 2_000);
+        trips.hold(held(at(1, "sonnette", 1_000)));
+        trips.event(&at(2, "entree", 9_000), &arrows, 10_000);
+        assert!(!trips.follower(1) && trips.follower(2));
+        assert!(trips.due(now).is_empty());
+        // Someone at the door who goes away: its clip goes, once due.
+        trips.event(&at(3, "sonnette", 100_000), &arrows, 101_000);
+        trips.hold(Held {
+            due: now + Duration::from_secs(60),
+            ..held(at(3, "sonnette", 100_000))
+        });
+        assert!(trips.due(now).is_empty(), "not yet");
+        let due = trips.due(now + Duration::from_secs(61));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].event.id, 3);
+
+        // The journey ends: one message.
+        let ended = trips.close(&arrows, 200_000);
+        assert_eq!(ended.len(), 1);
+        let trip = &ended[0];
+        let grouping = WebhookConfig {
+            journeys: true,
+            ..hook()
+        };
+        let both = ["sonnette", "entree"];
+        assert!(wants_journey(&grouping, trip, &both));
+        assert!(!wants_journey(&hook(), trip, &both), "only when chosen");
+        let only_cars = WebhookConfig {
+            objects: vec!["car".into()],
+            ..grouping.clone()
+        };
+        assert!(!wants_journey(&only_cars, trip, &both));
+        // The door muted (someone at home): the entrance still tells, even
+        // though the journey started at the door.
+        assert!(wants_journey(&grouping, trip, &["entree"]));
+        let door_only = WebhookConfig {
+            cameras: vec!["sonnette".into()],
+            ..grouping.clone()
+        };
+        assert!(!wants_journey(&door_only, trip, &["entree"]));
+        assert!(!wants_journey(&grouping, trip, &[]), "all muted");
+        let names = vec!["Sonnette".to_owned(), "Entrée".to_owned()];
+        let message = journey_discord(trip, &names);
+        let text = message["embeds"][0]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.starts_with("Sonnette → Entrée\n"), "{text}");
+        assert!(text.contains("arrivée"), "{text}");
+        assert!(
+            message["embeds"][0]["title"]
+                .as_str()
+                .is_some_and(|t| t.contains("Personne")),
+            "{message}"
+        );
+        let json = journey_body(trip, &names);
+        assert_eq!(json["type"], "journey");
+        assert_eq!(json["journey"]["cameras"][1]["camera_name"], "Entrée");
     }
 
     #[test]
@@ -1996,6 +2683,91 @@ mod tests {
         assert_eq!(b["camera_name"], "Jardin");
         assert_eq!(b["event"]["objects"][0]["label"], "person");
         assert_eq!(b["image"], "data:image/jpeg;base64,/9g=");
+    }
+
+    #[test]
+    fn object_recognition_is_reported_after_three_failures_then_back() {
+        let start = Instant::now();
+        let at = |s: u64| start + Duration::from_secs(s);
+        let failing = |failures| rustnvr_ai::AiHealth {
+            failures,
+            error: Some("provider unreachable: connection refused".into()),
+            failing_since: Some(at(10)),
+            last_ok: Some(start),
+        };
+        let mut w = AiWatch::default();
+        assert_eq!(w.check(Some(&failing(2)), at(20)), None);
+        assert_eq!(
+            w.check(Some(&failing(3)), at(30)),
+            Some(AiChange::Failed {
+                error: "provider unreachable: connection refused".into(),
+                failures: 3,
+            })
+        );
+        assert_eq!(w.check(Some(&failing(9)), at(60)), None, "reported once");
+        // Replaced by new settings, not tried yet: not back.
+        let fresh = rustnvr_ai::AiHealth::default();
+        assert_eq!(w.check(Some(&fresh), at(70)), None);
+        let ok = rustnvr_ai::AiHealth {
+            last_ok: Some(at(130)),
+            ..Default::default()
+        };
+        let back = w.check(Some(&ok), at(130));
+        assert_eq!(
+            back,
+            Some(AiChange::Back {
+                failed_for: Duration::from_secs(120)
+            })
+        );
+        assert_eq!(w.check(Some(&ok), at(140)), None);
+        // Switched off while failing: nothing.
+        w.check(Some(&failing(3)), at(200));
+        assert_eq!(w.check(None, at(210)), None);
+        assert_eq!(w.check(Some(&ok), at(220)), None);
+
+        let failed = AiChange::Failed {
+            error: "no answer within 5s".into(),
+            failures: 3,
+        };
+        let d = ai_discord(&failed, 1);
+        assert_eq!(d["embeds"][0]["title"], "IA en panne");
+        assert!(
+            d["embeds"][0]["description"]
+                .as_str()
+                .is_some_and(|s| s.contains("3 fois de suite : no answer within 5s"))
+        );
+        let j = ai_body(&failed, 1);
+        assert_eq!(
+            (j["type"].as_str(), j["ai"]["ok"].as_bool()),
+            (Some("ai"), Some(false))
+        );
+        let back = back.expect("back");
+        let v: HashMap<_, _> = ai_vars(&back, 0).into_iter().collect();
+        assert_eq!(v["etat"], "rétablie");
+        assert_eq!(v["duree"], "2 min 00 s");
+        assert_eq!(ai_body(&back, 1)["ai"]["failed_ms"], 120_000);
+    }
+
+    #[test]
+    fn frozen_and_covered_pictures_are_camera_calls() {
+        let cam = CameraId::new("garage").expect("id");
+        let d = picture_discord("Garage", Some(PictureProblem::Frozen), 1);
+        assert_eq!(d["embeds"][0]["title"], "Image figée · Garage");
+        let d = picture_discord("Garage", Some(PictureProblem::Covered), 1);
+        assert_eq!(d["embeds"][0]["title"], "Image masquée · Garage");
+        let d = picture_discord("Garage", None, 1);
+        assert_eq!(d["embeds"][0]["title"], "Image rétablie · Garage");
+        let j = picture_body(&cam, "Garage", Some(PictureProblem::Covered), 5);
+        assert_eq!(j["type"], "picture");
+        assert_eq!(j["picture"]["problem"], "covered");
+        assert_eq!(j["picture"]["ok"], false);
+        assert_eq!(picture_body(&cam, "Garage", None, 5)["picture"]["ok"], true);
+        // The custom message of « camera » calls reads right.
+        let v = picture_vars("Garage", Some(PictureProblem::Frozen), 0);
+        assert_eq!(
+            render("Caméra {etat} · {camera}", &v),
+            "Caméra figée · Garage"
+        );
     }
 
     #[test]

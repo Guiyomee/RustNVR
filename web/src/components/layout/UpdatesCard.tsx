@@ -1,7 +1,7 @@
-import { ExternalLink, RefreshCw } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Download, ExternalLink, RefreshCw } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { describeError } from '../../api/client'
-import { checkUpdates, getUpdates, setUpdates } from '../../api/endpoints'
+import { checkUpdates, getUpdates, installUpdate, setUpdates } from '../../api/endpoints'
 import { useReadOnly } from '../../auth/AuthGate'
 import { useIsDemo } from '../../data/DataContext'
 import { useAsync } from '../../hooks/useAsync'
@@ -9,6 +9,7 @@ import { formatDateTime } from '../../lib/format'
 import type { UpdateStatus } from '../../types/api'
 import { Button } from '../ui/Button'
 import { Badge, Card, CardHeader } from '../ui/Card'
+import { ConfirmDialog } from '../ui/Modal'
 import { Switch } from '../ui/Switch'
 import { ErrorState, LoadingState } from '../ui/States'
 import { t } from '../../lib/i18n'
@@ -40,6 +41,43 @@ function Status({ u }: { u: UpdateStatus }) {
   return <Badge tone="ok">{t('À jour', 'Up to date')}</Badge>
 }
 
+/** How often the state of an update is read while it runs. */
+const WATCH_MS = 4000
+
+/** An update asked from the interface: under way, done or failed. */
+function InstallProgress({ u, finished }: { u: UpdateStatus; finished: boolean }) {
+  const s = u.install_state
+  if (finished) {
+    return <p className="rounded-md border border-ok/40 bg-ok/10 p-3 text-ok">{t(`Mise à jour vers ${u.current} terminée : la page se recharge…`, `Update to ${u.current} finished: the page reloads…`)}</p>
+  }
+  if (!s) return null
+  if (s.state === 'requested' || s.state === 'running') {
+    return (
+      <p className="flex items-center gap-2 rounded-md border border-accent/40 bg-accent/10 p-3">
+        <RefreshCw className="size-4 animate-spin" aria-hidden />
+        {t(`Mise à jour vers ${s.version ?? '?'} en cours : RustNVR va redémarrer (une minute environ). Cette page se rechargera toute seule.`, `Update to ${s.version ?? '?'} under way: RustNVR will restart (about a minute). This page will reload by itself.`)}
+      </p>
+    )
+  }
+  if (s.state === 'failed') {
+    return (
+      <div className="space-y-1 rounded-md border border-err/40 bg-err/10 p-3">
+        <p className="text-err">
+          {t('La dernière mise à jour a échoué', 'The last update failed')}
+          {s.version && ` (${s.version})`}
+          {s.at_ms !== null && <span className="text-xs text-muted"> — {formatDateTime(s.at_ms)}</span>}
+        </p>
+        {s.message && <pre className="max-h-48 overflow-auto rounded bg-bg-2 p-2 font-mono text-xs whitespace-pre-wrap">{s.message}</pre>}
+        <p className="text-xs text-muted">{t('RustNVR continue avec sa version actuelle. Journal complet : /var/lib/rustnvr-update/log.', 'RustNVR goes on with its current version. Full log: /var/lib/rustnvr-update/log.')}</p>
+      </div>
+    )
+  }
+  if (s.state === 'done' && s.version && s.at_ms !== null) {
+    return <p className="text-xs text-muted">{t(`Dernière mise à jour depuis l’interface : ${s.version}, le ${formatDateTime(s.at_ms)}.`, `Last update from the interface: ${s.version}, on ${formatDateTime(s.at_ms)}.`)}</p>
+  }
+  return null
+}
+
 /** À propos → Mises à jour: latest version published on the watched repository. */
 export function UpdatesCard() {
   const demo = useIsDemo()
@@ -48,9 +86,36 @@ export function UpdatesCard() {
   const [u, setU] = useState<UpdateStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState(false)
+  const [finished, setFinished] = useState(false)
+  // The version running when the page opened: once it changes, the update
+  // is done and the page reloads (its interface changed too).
+  const startedOn = useRef<string | null>(null)
   useEffect(() => {
-    if (loaded.data) setU(loaded.data)
+    if (loaded.data) {
+      setU(loaded.data)
+      startedOn.current ??= loaded.data.current
+    }
   }, [loaded.data])
+  const underWay = u?.install_state?.state === 'requested' || u?.install_state?.state === 'running'
+  // While an update runs, read its state again; RustNVR restarting does not
+  // answer for a while: that is expected.
+  useEffect(() => {
+    if (!underWay || finished) return
+    const timer = window.setInterval(() => {
+      getUpdates().then(
+        (next) => {
+          setU(next)
+          if (startedOn.current && next.current !== startedOn.current) {
+            setFinished(true)
+            window.setTimeout(() => window.location.reload(), 3000)
+          }
+        },
+        () => undefined,
+      )
+    }, WATCH_MS)
+    return () => window.clearInterval(timer)
+  }, [underWay, finished])
 
   if (demo) return null
   const run = async (action: () => Promise<UpdateStatus>) => {
@@ -102,14 +167,33 @@ export function UpdatesCard() {
                 )}
               </p>
               {u.notes && <pre className="max-h-64 overflow-auto rounded bg-bg-2 p-3 font-sans text-xs whitespace-pre-wrap">{u.notes}</pre>}
+              {u.can_install && u.latest && (
+                <Button
+                  variant="primary"
+                  icon={<Download className="size-4" />}
+                  disabledReason={readOnly ?? (underWay ? t('Mise à jour déjà en cours.', 'Update already under way.') : busy ? t('En cours…', 'In progress…') : null)}
+                  onClick={() => setConfirm(true)}
+                >
+                  {t(`Mettre à jour vers ${u.latest}`, `Update to ${u.latest}`)}
+                </Button>
+              )}
+              {install && u.install === 'systemd' && !u.can_install && (
+                <p className="text-xs text-muted">
+                  {t('La mise à jour en un clic sera proposée ici une fois son service installé. Il manque si la dernière mise à jour s’est faite avec un rustnvr-update d’avant la 2026.11.10 : réinstallez une fois la version actuelle, en root (Proxmox : ', 'One-click updates will be offered here once their service is installed. It is missing when the last update was made with a rustnvr-update older than 2026.11.10: reinstall the current version once, as root (Proxmox: ')}
+                  <code className="font-mono">pct exec &lt;ctid&gt; -- /usr/local/bin/rustnvr-update --version v{u.current}</code>
+                  {t(' ; Debian : ', '; Debian: ')}
+                  <code className="font-mono">sudo rustnvr-update --version v{u.current}</code>).
+                </p>
+              )}
               {install && (
-                <div>
-                  <p className="text-xs font-medium">{install.title}{t(' — pour installer :', ' — to install:')}</p>
+                <details open={!u.can_install}>
+                  <summary className="cursor-pointer text-xs font-medium">{install.title}{u.can_install ? t(' — ou à la main :', ' — or by hand:') : t(' — pour installer :', ' — to install:')}</summary>
                   <pre className="mt-1 overflow-auto rounded bg-bg-2 p-3 font-mono text-xs whitespace-pre-wrap">{install.steps}</pre>
-                </div>
+                </details>
               )}
             </div>
           )}
+          <InstallProgress u={u} finished={finished} />
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
             <label className="flex items-center gap-2">
@@ -133,8 +217,25 @@ export function UpdatesCard() {
             </Button>
           </div>
           {error && <p className="text-err">{error}</p>}
+          <ConfirmDialog
+            open={confirm}
+            title={t(`Mettre à jour vers ${u.latest ?? ''} ?`, `Update to ${u.latest ?? ''}?`)}
+            confirmLabel={t('Mettre à jour', 'Update')}
+            message={t(
+              'RustNVR télécharge la nouvelle version, vérifie son empreinte, s’arrête puis redémarre : environ une minute sans enregistrement. La configuration, les réglages et les enregistrements sont gardés. Si la nouvelle version modifie la base de données (voir ses notes), une version plus ancienne ne pourra plus la rouvrir.',
+              'RustNVR downloads the new version, checks its fingerprint, stops then starts again: about a minute without recording. The configuration, the settings and the recordings are kept. If the new version changes the database (see its notes), an older version can no longer open it.',
+            )}
+            onCancel={() => setConfirm(false)}
+            onConfirm={() => {
+              setConfirm(false)
+              if (u.latest) {
+                const version = u.latest
+                void run(() => installUpdate(version))
+              }
+            }}
+          />
           <p className="text-xs text-muted">
-            {t('RustNVR ne télécharge ni n’installe rien : il compare sa version à la dernière publication (« release ») du dépôt officiel et indique comment mettre à jour. Un autre dépôt (fork, serveur Gitea) se règle dans config.toml : ', 'RustNVR neither downloads nor installs anything: it compares its version with the latest release of the official repository and tells how to update. Another repository (fork, Gitea server) is set in config.toml: ')}<code className="font-mono">[updates] repository</code>{t(' (jeton d’un dépôt privé : ', ' (token of a private repository: ')}<code className="font-mono">token_env</code>{t(').', ').')}
+            {t('Installé avec install.sh (Debian, Proxmox), RustNVR peut se mettre à jour depuis cette page : un service séparé, en root, télécharge la version demandée sur le dépôt choisi à l’installation et vérifie son empreinte. Sous Docker, il compare seulement sa version et indique comment mettre à jour. Un autre dépôt (fork, serveur Gitea) se règle dans config.toml : ', 'Installed with install.sh (Debian, Proxmox), RustNVR can update itself from this page: a separate service, as root, downloads the version asked from the repository chosen at installation and checks its fingerprint. In Docker, it only compares its version and tells how to update. Another repository (fork, Gitea server) is set in config.toml: ')}<code className="font-mono">[updates] repository</code>{t(' (jeton d’un dépôt privé : ', ' (token of a private repository: ')}<code className="font-mono">token_env</code>{t(').', ').')}
           </p>
         </div>
       )}

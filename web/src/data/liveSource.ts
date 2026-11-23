@@ -94,6 +94,16 @@ export function createLiveSource(): DataSource {
             case 'recorder_error':
               store.notify('error', t(`Erreur d'écriture : ${msg.message}`, `Write error: ${msg.message}`), msg.camera)
               break
+            case 'journey': {
+              const j = msg.journey
+              store.setJourney(j.events, j.id)
+              if (j.ended) {
+                const cams = store.getState().cameras
+                const path = j.cameras.map((id) => cams.find((x) => x.id === id)?.name ?? id).join(' → ')
+                store.notify('info', t(`Trajet : ${objectLabel(j.label)} — ${path}`, `Journey: ${objectLabel(j.label)} — ${path}`), j.cameras[0] ?? null)
+              }
+              break
+            }
             case 'crossing': {
               // Only crossings checked by the AI: lines counting anything
               // moving would flood the bell.

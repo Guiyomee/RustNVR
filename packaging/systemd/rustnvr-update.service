@@ -1,0 +1,15 @@
+# Installs the version asked from the RustNVR interface (see
+# rustnvr-update.path). rustnvr-update reads only a version tag from the
+# request, downloads it from the server of /etc/rustnvr/update.conf, checks
+# its SHA-256, installs it and restarts RustNVR; its state and log go to
+# /var/lib/rustnvr-update, which RustNVR can read but not write.
+
+[Unit]
+Description=RustNVR: update asked from the interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rustnvr-update --from-request
+TimeoutStartSec=15min

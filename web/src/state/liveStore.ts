@@ -99,6 +99,14 @@ export class LiveStore {
     })
   }
 
+  /** The events `ids` joined the journey `journey`. */
+  setJourney(ids: string[], journey: string): void {
+    this.set({
+      recentEvents: this.state.recentEvents.map((e) => (ids.includes(e.id) ? { ...e, journey } : e)),
+      eventsVersion: this.state.eventsVersion + 1,
+    })
+  }
+
   notify(level: Notification['level'], message: string, camera: string | null = null): void {
     const n: Notification = { id: this.nextId++, at: Date.now(), level, camera, message }
     this.set({

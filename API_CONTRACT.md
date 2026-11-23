@@ -19,7 +19,8 @@ Argon2) et sessions par cookie `rustnvr_session` (`HttpOnly`,
 des identifiants HTTP Basic d'un compte (scripts), sauf `/auth/status`,
 `/auth/login` et `/auth/setup`. Les fichiers de l'interface sont publics (ils
 ne contiennent aucune donnée). Rôles : `admin` (tout) et `viewer` (lecture
-seule : `GET`, plus sa déconnexion, son mot de passe et l'ouverture du
+seule : `GET`, plus sa déconnexion, son mot de passe, sa double
+authentification, ses jetons et l'ouverture du
 direct WebRTC `POST /cameras/{id}/live/webrtc` ; sinon 403 ; l'interface grise
 alors toutes les commandes de modification). Un lecteur ne lit pas non plus
 les réglages (`GET /settings`, `/mqtt`, `/storage/destinations`,
@@ -48,14 +49,40 @@ intégré (TLS 1.2/1.3, HTTP/2) avec `web.tls_cert` + `web.tls_key`, ou un
 certificat auto-signé généré dans `<data_dir>/tls` (`web.tls_self_signed`) ;
 les cookies sont alors `Secure` et le direct passe en `wss://`.
 
+**Double authentification (TOTP).** Un compte peut ajouter à sa connexion le
+code à 6 chiffres d'une application d'authentification (RFC 6238 : SHA-1, pas
+de 30 s, le pas courant et ses deux voisins acceptés, chaque code une seule
+fois), ou l'un de ses 10 codes de secours (`xxxx-xxxx`, un usage chacun).
+`POST /auth/login` répond alors `401 totp_required` tant que `code` manque,
+`401 bad_code` (compté comme un échec de connexion) s'il est faux ou déjà
+utilisé. HTTP Basic avec le mot de passe est refusé pour ce compte (401) :
+un script passe par un jeton. `rustnvr reset-password` désactive aussi la
+double authentification du compte (téléphone perdu).
+
+**Jetons d'API.** Un jeton (`rnvr_` suivi de 43 caractères) se connecte
+comme son compte : en-tête `Authorization: Bearer rnvr_…`, ou comme mot de
+passe de HTTP Basic avec le nom du compte. Seul son SHA-256 est gardé ; sa
+dernière utilisation est notée (à la minute près). Un jeton en lecture seule
+ne modifie rien (403, comme un lecteur), même pour un administrateur. Aucun
+jeton n'accède à `/auth/…` ni à `/users…` (403) : il ne gère ni comptes, ni
+mots de passe, ni double authentification, ni jetons.
+
 | Route | Accès | Rôle |
 |---|---|---|
-| `GET /auth/status` | public | `{ "required", "accounts", "setup", "user": { "username", "role", "cameras" } \| null }` (`cameras` : caméras visibles, `null` = toutes) |
-| `POST /auth/login` | public | `{ "username", "password" }` → utilisateur + cookie ; 401 `bad_credentials`, 429 |
+| `GET /auth/status` | public | `{ "required", "accounts", "setup", "user": { "username", "role", "cameras", "read_only" } \| null }` (`cameras` : caméras visibles, `null` = toutes ; `read_only` : jeton en lecture seule) |
+| `POST /auth/login` | public | `{ "username", "password", "code"? }` → utilisateur + cookie ; 401 `bad_credentials`, `totp_required` ou `bad_code` ; 429 |
 | `POST /auth/logout` | session | 204, cookie effacé |
 | `POST /auth/setup` | public, sans aucun compte | crée le premier administrateur et ouvre sa session ; 409 ensuite |
 | `PUT /auth/password` | session | `{ "current", "new" }` (8 caractères min.) ; ferme les sessions du compte |
-| `GET /users` · `POST /users` | admin | `[{ "username", "role", "created_ms", "cameras" }]` ; corps `{ "username", "password", "role", "cameras"? }` |
+| `GET /auth/totp` | session | `{ "enabled", "recovery_codes_left" }` |
+| `POST /auth/totp/setup` | session | nouveau secret, actif seulement après `enable` (10 min pour le confirmer) : `{ "secret", "uri" (otpauth://), "qr_svg" }` ; 400 si déjà actif |
+| `POST /auth/totp/enable` | session | `{ "code" }` (premier code de l'application) → `{ "recovery_codes": [10] }`, donnés une seule fois ; 400 si le code est faux |
+| `POST /auth/totp/disable` | session | `{ "password" }` → 204 ; 403 si le mot de passe est faux |
+| `GET /auth/tokens` | session | `[{ "id", "name", "read_only", "created_ms", "last_used_ms" \| null }]`, du plus récent au plus ancien, sans le jeton |
+| `POST /auth/tokens` | session | `{ "name" (1 à 60 caractères), "read_only"? }` → le jeton créé, avec `"token"` (seule fois où il est donné) ; 50 par compte |
+| `DELETE /auth/tokens/{id}` | session | révoque un jeton du compte ; 404 sinon |
+| `DELETE /users/{nom}/totp` | admin | retire la double authentification d'un compte (téléphone et codes de secours perdus) |
+| `GET /users` · `POST /users` | admin | `[{ "username", "role", "created_ms", "cameras", "totp" }]` ; corps `{ "username", "password", "role", "cameras"? }` |
 | `PUT /users/{nom}` · `DELETE /users/{nom}` | admin | `{ "password"?, "role"?, "cameras"? }` ; mot de passe ou rôle changé : ferme ses sessions ; `cameras` (lecteur) : liste d'identifiants existants, ou `null` pour toutes (400 pour une caméra inconnue), appliqué tout de suite ; 409 pour le dernier administrateur |
 | `GET /audit?before=&limit=` | admin | journal d'activité, du plus récent au plus ancien : `[{ "id", "at_ms", "username" \| null, "client", "action", "status" }]` ; `limit` 100 par défaut, 500 au plus ; `before` : `id` de la dernière ligne reçue, pour la page suivante |
 
@@ -115,7 +142,7 @@ Ce que le serveur sait réellement faire. L'interface s'en sert pour afficher
 ```json
 { "api_version": 1, "live_video": true, "live_transcode": true, "live_webrtc": true, "snapshots": true, "events": true,
   "motion_detection": true, "camera_management": true, "camera_probe": true,
-  "recordings": true, "export": true, "protect": true, "bookmarks": true, "retention": true, "settings_write": true,
+  "recordings": true, "export": true, "protect": true, "bookmarks": true, "journeys": true, "retention": true, "settings_write": true,
   "mqtt": true, "ai": false, "users": true, "audit": true, "backup": true, "ptz": true,
   "usb_cameras": true, "restream_port": 8554, "restream_local_only": false }
 ```
@@ -247,11 +274,16 @@ des seuils (couleur moyenne ≤ 2,5 : nuit, ≥ 5 : jour). `codec`, `width`, `he
 renseignés qu'en `online`. `recorder` est `null` si l'enregistrement est
 désactivé. 404 si la caméra n'existe pas.
 
-`motion` : `{ "enabled", "off_schedule", "paused", "running", "active", "error" }` — détection
+`motion` : `{ "enabled", "off_schedule", "paused", "running", "active", "error",
+"picture" }` — détection
 activée pour cette caméra, hors des plages de sa programmation en ce moment
 (arrêtée jusqu'à la suivante), détection en pause sur toutes les caméras (voir
 `PUT /detection/pause`), images en cours d'analyse, événement en cours,
-dernière erreur du décodeur.
+dernière erreur du décodeur, et ce qui ne va pas dans l'image alors que le
+flux arrive : `"frozen"` (la même image depuis 5 min), `"covered"` (devenue
+d'un coup uniforme depuis 1 min : objectif couvert, lumière éteinte) ou
+`null`. Vu par la détection pendant qu'elle tourne, sauf avec
+`no_picture_check` (voir `/cameras/{id}/motion`).
 
 `managed` vaut `true` pour une caméra ajoutée depuis l'interface (stockée dans
 `cameras.ui.toml`) ; `edit` donne alors ses réglages modifiables
@@ -297,6 +329,68 @@ ces valeurs par défaut. `GET` est ouvert à tous les comptes ; `PUT`
 identifiants valides sans doublon, `columns` hors de 1 à 4 : 400 ; 503 sans
 base de données. Une adresse `/mur?cameras=…&cols=…&focus=0` garde ses
 propres réglages sur un écran (favori d'une tablette).
+
+### `GET /api/v1/journeys/settings` · `PUT /api/v1/journeys/settings` · `GET /api/v1/journeys/{id}`
+
+Trajets entre caméras (`capabilities.journeys`, 503 sans base de données).
+Les flèches disent quelle caméra peut suivre quelle autre :
+
+```json
+{ "links": [
+  { "from": "sonnette", "to": "garage", "max_delay_s": 30, "both_ways": true },
+  { "from": "sonnette", "to": "entree", "max_delay_s": 30, "both_ways": true },
+  { "from": "garage", "to": "entree", "max_delay_s": 60, "both_ways": true },
+  { "from": "entree", "to": "salon", "max_delay_s": 30, "both_ways": true } ] }
+```
+
+Gardées dans la base (table `journey_settings`), les mêmes pour tous.
+`max_delay_s` : de 1 à 600 (30 par défaut), le temps le plus long entre la
+fin de l'événement sur `from` et le début de celui sur `to` ; `both_ways`
+(vrai par défaut) : aussi de `to` vers `from`. `GET` est ouvert à tous les
+comptes ; `PUT` (administrateurs) les remplace : caméras connues, pas de
+flèche d'une caméra vers elle-même ni en double (dans un sens ou l'autre),
+64 au plus, sinon 400.
+
+Un événement où l'IA a reconnu un objet prend sa place dans un trajet, avec
+un objet de même sorte, selon l'heure de son début : à la fin, en tête ou
+au milieu (l'IA ne répond pas forcément dans l'ordre : une personne
+reconnue à la 4e image d'une caméra, à la 1re de la suivante). Il faut une
+flèche avec la caméra d'avant et celle d'après, et que chacune commence
+dans le délai de la flèche après la fin de la précédente (encore en cours :
+« maintenant »). Si deux trajets peuvent le prendre (deux personnes à la
+fois), il n'en rejoint aucun. Une caméra ne revient pas deux fois dans un
+même trajet. Ses événements portent alors `journey` (identifiant de
+l'événement qui a ouvert le trajet, le premier reconnu par l'IA, pas
+forcément le premier dans le temps ; voir `GET /events`). Le trajet est clos quand plus
+aucune flèche ne peut le prolonger (délai le plus long des flèches de sa
+dernière caméra écoulé) ; le WebSocket l'annonce (`journey`).
+
+`GET /journeys/{id}` :
+
+```json
+{ "id": "41", "label": "person", "direction": "arrival",
+  "start_ms": 1793607714212, "end_ms": 1793607739000, "events": [Event, …] }
+```
+
+`events` : un par caméra, dans l'ordre (seulement les caméras que voit le
+compte ; 404 s'il n'en voit aucune ou si la rétention les a supprimés).
+`direction` : `arrival` si chaque étape suit le sens de sa flèche,
+`departure` si chacune va à contresens, `null` sinon (calculé avec les
+flèches d'aujourd'hui). `end_ms` : `null` tant qu'un événement est en cours.
+L'interface groupe les événements d'un trajet dans Événements et le relit
+dans Lecture, ses caméras côte à côte (`/playback?camera=a,b,c&t=…`).
+
+`POST /journeys/{id}/export` : un seul MP4 du trajet, ses caméras à la
+suite (2 s avant la première, la suivante dès qu'elle voit l'objet, 2 s
+après la dernière ; 5 min au plus par caméra, 10 min en tout), 1280×720,
+25 images/s, H.264, avec le son (AAC) si une des caméras en a enregistré
+(un silence pendant celles qui n'en ont pas), bandeau « caméra · heure » (sans bandeau si
+FFmpeg n'a pas de police), masques incrustés. Même réponse que
+`POST /cameras/{id}/export` (`h264: true`) et même téléchargement
+(`GET /exports/{file}`, nom `trajet_AAAAMMJJ-HHMMSS_<secondes>s.mp4`).
+Autorisé au rôle lecteur ; 403 pour un compte limité à certaines caméras ;
+404 sans trajet ou sans enregistrement ; 409 tant qu'un de ses événements
+est en cours ; 503 sans FFmpeg.
 
 ### `POST /api/v1/cameras` · `PUT /api/v1/cameras/{id}` · `DELETE /api/v1/cameras/{id}`
 
@@ -584,6 +678,47 @@ invalide, 404 sans enregistrement sur la période, 503 sans FFmpeg
 `<data_dir>/exports` et supprimés au bout de 15 minutes ; 404 ensuite ou pour
 tout autre nom.
 
+### `GET /api/v1/cameras/{id}/timelapses` · `GET|POST /api/v1/cameras/{id}/timelapses/{day}`
+
+Time-lapses quotidiens d'une caméra (`timelapse` de ses réglages de
+détection). `{day}` est un jour local du serveur, `AAAA-MM-JJ`.
+
+```json
+[ { "day": "2026-11-18", "bytes": 18734211, "destination": "nas" } ]
+```
+
+- `GET …/timelapses` : la liste, du plus récent au plus ancien (un par jour,
+  sur tous les points de stockage), avec ceux en chemin (depuis la
+  2026.11.10) : `{ "day", "state", "bytes", "destination", "percent"?,
+  "error"? }`. `state` : `ready` (la vidéo est là), `waiting` (un autre
+  passe avant : un à la fois), `making` (`percent` : 0 à 99, la part
+  des enregistrements du jour déjà lue par FFmpeg, `rchar` de
+  `/proc/<pid>/io` ; son rapport `-progress` reste à 0 jusqu'à la fin) ou `failed` (`error` : pourquoi, en français ; gardé en
+  mémoire jusqu'au prochain essai ou au redémarrage). Un jour refait prend
+  la place de sa vidéo tant qu'il est en chemin ; `bytes` vaut 0 et
+  `destination` est vide hors `ready`. L'interface relit la liste toutes
+  les 3 s tant qu'un time-lapse attend ou se fait.
+- `GET …/timelapses/{day}` (ou `{day}.mp4`) : la vidéo MP4 (`Range` pris en
+  charge) ; 404 s'il n'y en a pas ce jour-là, 400 pour un jour mal écrit.
+- `DELETE …/timelapses/{day}` (admin) : arrête le
+  time-lapse de ce jour s'il attend ou se fait (FFmpeg arrêté, fichier
+  `.part` effacé, la vidéo d'avant gardée ; celui de la nuit n'est pas
+  refait), sinon supprime sa vidéo sur tous les points de stockage et
+  oublie un échec. 204 ; 404 s'il n'y a rien.
+- `POST …/timelapses/{day}` (admin) : la prépare maintenant, en arrière-plan,
+  et répond 202 tout de suite (celle qui existait est remplacée) ; 400 sans
+  FFmpeg. L'échec éventuel est dans le journal.
+
+Chaque nuit (vérifié toutes les 30 min), celui de la veille est fait pour les
+caméras activées qui l'ont demandé, une caméra à la fois, avec `nice -n 19` :
+FFmpeg ne décode que les images clés des segments du jour, en garde une par
+minute d'enregistrement, noircit les masques de confidentialité, réduit à 720
+lignes au plus et passe 30 images par seconde (une journée continue ≈ 48 s,
+H.264 libx264, sans son). Rangé dans
+`<point de stockage>/.timelapse/<caméra>/<AAAA-MM-JJ>.mp4` (celui du premier
+segment du jour, dossier à point ignoré par la rétention et l'index), effacé
+au bout de 30 jours. Deux essais au plus par jour et par caméra.
+
 ### `GET /api/v1/cameras/{id}/live` (WebSocket)
 
 Direct vidéo, sans décodage ni réencodage, pour Media Source Extensions :
@@ -766,6 +901,20 @@ sans réponse ONVIF. La fiche sert aussi à Home Assistant : fabricant, modèle,
 firmware (`sw_version`) et numéro de série de l'appareil de la caméra, à la
 place de « RustNVR / Caméra ».
 
+### `GET /api/v1/cameras/{id}/photo`
+
+La photo que donne la caméra elle-même par ONVIF (`GetSnapshotUri` de
+chaque profil, téléchargée en HTTP Digest ou Basic avec les identifiants
+ONVIF ; la plus grande est gardée, car certaines caméras donnent la petite
+d'abord ou la même pour tous les profils), masques appliqués, à la largeur
+`?width=` (`1280`, `1920` ou `0` pour la taille d'origine ; absent : le
+`camera_photo_width` de la caméra) : `image/jpeg`, jamais
+mise en cache. C'est le bouton « Essayer » de `camera_photo` (onglet
+Détection) ; l'adresse de la photo est relue à chaque appel. 400 avec la
+raison sinon (pas de port ONVIF, « la caméra ne donne pas de photo en ONVIF
+(GetSnapshotUri) », refus des identifiants, délai dépassé, réponse qui n'est
+pas un JPEG) ; 404 pour une caméra inconnue.
+
 ### `POST /api/v1/cameras/{id}/reboot`
 
 Redémarre la caméra elle-même par ONVIF (`SystemReboot`) : réponse
@@ -855,8 +1004,11 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   caméra échoue : disque plein, erreur d'écriture… ; seule la première
   erreur est annoncée, RustNVR réessayant seul, puis le retour au premier
   segment de nouveau écrit, donc jusqu'à une durée de segment plus tard ;
-  filtré par `cameras`, pas par `objects`). Par défaut `motion` et
-  `objects`.
+  filtré par `cameras`, pas par `objects`), et `ai` (la reconnaissance
+  d'objets a échoué **3 fois de suite**, puis remarche ; ni caméras ni objets
+  ne le filtrent). `camera` annonce aussi l'image figée ou masquée d'une
+  caméra dont le flux arrive encore (corps `"type": "picture"`). Par défaut
+  `motion` et `objects`.
 - `messages` (facultatif, Discord, ntfy et Telegram ; le JSON ne change
   jamais) : par type d'appel, `{ "title", "text", "priority", "silent" }`,
   par exemple `"messages": { "objects": { "title": "{objet} devant
@@ -886,6 +1038,26 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   envoyé). Discord : pièce jointe `evenement.mp4` ; ntfy : pièce jointe ;
   Telegram : `sendVideo`. Une vidéo à la fois est convertie. Pas de vidéo pour
   le JSON de RustNVR.
+- `journeys` (facultatif, `false` par défaut) : regroupe les trajets entre
+  caméras (`/journeys/settings`). La première caméra d'un trajet est appelée
+  comme d'habitude ; les suivantes ne le sont plus (ni `motion` arrivé
+  après leurs objets, ni `objects`, ni `end`, ni vidéo) ; à la fin du trajet,
+  un seul appel le résume — pour Discord, ntfy et Telegram un message
+  « 🚶 Trajet · Personne », le parcours, l'heure, le sens et la durée, avec la
+  vidéo du trajet si `clip` (sinon le message seul) ; pour le JSON
+  `{ "type": "journey", "journey": { "id", "label", "direction", "start_ms",
+  "end_ms", "cameras": [{ "camera", "camera_name", "event", "start_ms",
+  "end_ms" }] } }`. Avec `clip`, la vidéo de la première caméra attend la fin
+  du délai de ses flèches (plus 15 s) : si un trajet commence, elle est
+  remplacée par celle du trajet. Vidéo du trajet : les caméras à la suite
+  (2 s avant la première, la suivante dès qu'elle voit l'objet, 2 s après la
+  dernière ; 20 s au plus chacune, 60 s en tout), 960×540, 15 images/s, avec
+  le son des caméras qui en ont (un silence pendant les autres), bandeau « caméra · heure » incrusté (sans bandeau si FFmpeg n'a pas de
+  police), masques compris. Le résumé suit les filtres `cameras` (une des
+  caméras du trajet), `objects`, `schedule` (heure de début) et demande
+  `objects` dans `events` ; `cooldown_minutes` ne le retient pas. Un
+  `motion` qui arrive avant les objets d'une caméra suivante passe encore :
+  l'option sert surtout aux appels `objects`.
 - `schedule` (facultatif, vide par défaut : tout le temps) : plages où les
   détections sont appelées (`motion`, `objects`, `end`, `crossing`), même
   forme que le `schedule` d'une caméra (voir `/cameras/{id}/motion`). Un
@@ -914,6 +1086,17 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   le nombre d'échecs, et `failed_ms`, la durée depuis le premier). Discord :
   « Erreur d'enregistrement · Garage » avec l'erreur, puis « Enregistrement
   rétabli · Garage ».
+  De l'image d'une caméra : `{ "type": "picture", "camera", "camera_name",
+  "picture": { "ok", "problem": "frozen" | "covered" | null, "at_ms" },
+  "rustnvr" }`. Discord : « Image figée · Garage » ou « Image masquée ·
+  Garage », puis « Image rétablie · Garage » ; message personnalisé : celui
+  de `camera`, `{etat}` valant « figée », « masquée » ou « rétablie ».
+  De l'IA : `{ "type": "ai", "ai": { "ok", "at_ms", "error", "failures",
+  "failed_ms" }, "rustnvr" }` (`ok` : `false` à la panne, avec l'erreur et
+  le nombre d'échecs de suite ; `true` au retour, avec `failed_ms` depuis le
+  premier échec). Discord : « IA en panne » puis « IA rétablie » ;
+  variables `{etat}`, `{erreur}`, `{echecs}`, `{duree}`. Les essais des
+  réglages (`/ai/test`, `/ai/probe`) ne comptent pas.
 - Corps envoyé : `{ "type", "camera", "camera_name", "event": { "id", "kind",
   "start_ms", "end_ms", "score", "zones", "objects" }, "image":
   "data:image/jpeg;base64,…" | null, "rustnvr" }`.
@@ -931,7 +1114,7 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   l'image, l'image en corps (pièce jointe `evenement.jpg`) et le texte dans
   `message=`. Échec ou panne (stockage, caméra, enregistrement) :
   `tags=rotating_light&priority=high` ; retour à la normale :
-  `tags=white_check_mark`.
+  `tags=white_check_mark`. Pareil pour l'image d'une caméra et l'IA.
 - Telegram : `sendMessage` (`parse_mode` HTML, titre en gras, puis le texte)
   ou, avec l'image, `sendPhoto` (`multipart/form-data`, la photo et ce texte
   en légende, coupée à 1 024 caractères).
@@ -953,8 +1136,11 @@ Sauvegarde de la configuration, réservée aux administrateurs (elle contient
 tous les mots de passe). Contenu : le fichier de configuration, les fichiers
 écrits par l'interface (`cameras.ui.toml`, `storage.ui.toml`,
 `settings.ui.toml`, `mqtt.ui.toml`, `ai.ui.toml`, `webhooks.ui.toml`,
-`updates.ui.toml`) et les réglages de détection de chaque caméra (zones,
-lignes, masques). Ni enregistrements, ni événements, ni comptes.
+`updates.ui.toml`, `backup.ui.toml`), les réglages de détection de chaque caméra (zones,
+lignes, masques) et, depuis la 2026.11.10, les réglages gardés dans la base
+pour tous les appareils : le mur (`/wall`) et les flèches des trajets
+(`/journeys/settings`). Ni enregistrements, ni événements, ni comptes. Une
+sauvegarde plus ancienne s'ouvre toujours (sans ces deux réglages).
 
 - `POST /backup` `{ "passphrase": "…" }` (8 caractères au moins) : le fichier
   `rustnvr-config-AAAAMMJJ-HHMM.rnvrbak`, entièrement chiffré (clé tirée de la
@@ -962,7 +1148,9 @@ lignes, masques). Ni enregistrements, ni événements, ni comptes.
 - `POST /backup/inspect` `{ "data": "<fichier en base64>", "passphrase" }` :
   `{ "created_ms", "rustnvr", "files": [{ "name", "state": "same" | "changed"
   | "new" | "not_in_backup", "problem": null }], "cameras": [{ "id", "name"
-  }], "motion": ["jardin"], "problems": [] }`. `cameras` : les caméras une
+  }], "motion": ["jardin"], "wall": true, "journeys": 4, "problems": [] }`.
+  `wall` : le réglage du mur y est ; `journeys` : nombre de flèches des
+  trajets. `cameras` : les caméras une
   fois tout restauré ; `problems` : pourquoi la configuration ne se
   chargerait pas si tout était restauré (elle est chargée à l'essai dans un
   dossier temporaire) ; `files[].problem` : pourquoi elle ne se chargerait
@@ -974,17 +1162,56 @@ lignes, masques). Ni enregistrements, ni événements, ni comptes.
   400 : phrase incorrecte, fichier abîmé ou pas une sauvegarde.
 - `POST /backup/restore` `{ "data", "passphrase", "files": ["webhooks.ui.toml"],
   "motion": true }` : écrit les fichiers choisis (de façon atomique, 0600)
-  après avoir vérifié que la configuration résultante se charge, et les
-  réglages de détection si `motion`. `{ "files": [...], "motion": 2,
-  "restart_needed": true }`. Pris en compte au **redémarrage** de RustNVR ;
+  après avoir vérifié que la configuration résultante se charge et, si
+  `motion`, ce qu'elle garde de la base : réglages de détection, mur et
+  flèches des trajets. `{ "files": [...], "motion": 2, "wall": true,
+  "journeys": 4, "restart_needed": true }`. Pris en compte au **redémarrage** de RustNVR ;
   d'ici là `GET /system` renvoie `config_restored: true` (bandeau de
   l'interface). Un fichier absent de la sauvegarde n'est jamais supprimé.
 
-### `GET /api/v1/updates` · `PUT /api/v1/updates` · `POST /api/v1/updates/check`
+### `GET /api/v1/backup/auto` · `PUT /api/v1/backup/auto` · `POST /api/v1/backup/auto/run`
+
+Sauvegardes automatiques (administrateurs) : la sauvegarde de `POST /backup`,
+faite toute seule dans le dossier `.rustnvr-backups` d'une destination de
+stockage (`local` ou un partage ; pas S3/SFTP, dont le dossier n'est qu'une
+file d'envoi). Réglages dans `backup.ui.toml`, à côté du fichier de
+configuration (0600, avec la phrase secrète ; compris dans les
+sauvegardes). Vérifié 2 min après le démarrage puis toutes les heures : une
+sauvegarde est faite quand la dernière du dossier a `every_days` jours
+(une heure de marge). Un partage qui n'est pas monté, en lecture seule ou
+qui ne répond pas en 60 s n'est jamais remplacé par le disque local :
+l'essai échoue et se refait l'heure suivante (le journal ne le répète pas).
+
+```json
+{ "enabled": true, "destination": "nas", "every_days": 7, "keep": 4,
+  "has_passphrase": true, "folder": "/mnt/nas/rustnvr/.rustnvr-backups",
+  "folder_problem": null,
+  "backups": [{ "name": "rustnvr-config-20261121-153000.rnvrbak", "bytes": 5321,
+                "created_ms": 1795361400000 }],
+  "last": { "at_ms": 1795361400000, "file": "rustnvr-config-20261121-153000.rnvrbak",
+            "error": null },
+  "next_ms": 1795966200000 }
+```
+
+- `backups` : les fichiers `rustnvr-config-AAAAMMJJ-HHMMSS.rnvrbak` du
+  dossier, les plus récents d'abord ; au-delà de `keep`, les plus anciens
+  sont supprimés après chaque nouvelle sauvegarde. `last` : dernier essai
+  depuis le démarrage. `next_ms` : échéance (maintenant s'il n'y en a pas
+  encore), quand `enabled`.
+- `PUT` `{ "enabled", "destination", "every_days", "keep", "passphrase" }` :
+  `every_days` de 1 à 30, `keep` de 1 à 52, `passphrase` (8 caractères au
+  moins) obligatoire la première fois pour activer, absente ou vide : celle
+  enregistrée est gardée. 400 sinon, ou pour une destination inconnue ou
+  distante. Renvoie la vue ci-dessus.
+- `POST /run` : en fait une tout de suite avec les réglages enregistrés,
+  même désactivés : `{ "at_ms", "file", "error": null }`, 400 avec la raison
+  si elle échoue.
+
+### `GET /api/v1/updates` · `PUT /api/v1/updates` · `POST /api/v1/updates/check` · `POST /api/v1/updates/install`
 
 Nouvelles versions : la dernière publication (« release ») du dépôt surveillé
 est comparée à la version en cours, au démarrage (30 s après) puis toutes les
-12 heures. Rien n'est téléchargé ni installé. Le dépôt est le dépôt officiel
+12 heures. La vérification ne télécharge rien. Le dépôt est le dépôt officiel
 (`https://github.com/Guiyomee/RustNVR`) sauf si `config.toml` en donne un
 autre (`[updates] repository`, Gitea, Forgejo ou GitHub) ; `repository` vaut
 `null` quand la vérification est désactivée.
@@ -994,7 +1221,8 @@ autre (`[updates] repository`, Gitea, Forgejo ou GitHub) ; `repository` vaut
   "latest": "v2026.12.01", "available": true, "name": "RustNVR 2026.12.01",
   "notes": "## Nouveautés\n- …", "url": "https://gitea.example.org/owner/RustNVR/releases/tag/v2026.12.01",
   "published_at": "2026-12-01T17:00:00Z", "checked_at_ms": 1793726203661,
-  "error": null, "install": "docker" }
+  "error": null, "install": "systemd", "can_install": true,
+  "install_state": { "state": "done", "version": "v2026.12.01", "at_ms": 1793730000000, "message": null } }
 ```
 
 - `latest` : étiquette (`tag_name`) de la dernière publication ; `null` si le
@@ -1011,6 +1239,21 @@ autre (`[updates] repository`, Gitea, Forgejo ou GitHub) ; `repository` vaut
   vérification immédiate. `POST /check` (administrateur) vérifie tout de suite.
 - `GET /system` porte `update_available` (version publiée plus récente, ou
   `null`), pour le bandeau de l'interface.
+- `can_install` : une mise à jour peut être demandée d'ici (service systemd
+  installé par `install.sh`, avec son unité `rustnvr-update.path` ; jamais
+  sous Docker).
+- `POST /install` (administrateur) : `{ "version": "v2026.12.01" }` (une
+  étiquette `v` suivie de trois nombres, 400 sinon) → 202 et l'état. RustNVR,
+  qui tourne sans droits root, écrit seulement cette version dans
+  `/var/lib/rustnvr/update-request` ; l'unité root `rustnvr-update.path` lance
+  alors `rustnvr-update --from-request`, qui ne lit que l'étiquette, télécharge
+  sur le serveur de `/etc/rustnvr/update.conf`, vérifie le SHA-256, installe et
+  redémarre RustNVR. 400 si `can_install` est faux, 409 si une mise à jour est
+  déjà demandée ou en cours (depuis moins de 15 min).
+- `install_state` : la dernière mise à jour demandée d'ici, lue dans
+  `/var/lib/rustnvr-update/` (dossier root que RustNVR peut seulement lire) :
+  `state` = `requested`, `running`, `done` ou `failed` ; `message` : fin du
+  journal d'un échec.
 
 ### `GET /api/v1/logs?since=&level=&camera=&limit=`
 
@@ -1050,14 +1293,17 @@ l'interface et appliqués sans redémarrage :
 ```json
 { "settings": { "provider": { "type": "onnx", "model": "/var/lib/rustnvr/models/yolox_nano.onnx" },
                 "min_score": 0.5, "labels": ["person", "car"], "timeout_seconds": 10,
-                "max_pictures": 5, "interval_seconds": 3,
+                "max_pictures": 5, "interval_seconds": 3, "watch_seconds": 30,
                 "night": { "min_score": 0.75, "when": "hours", "from": "20:00", "to": "07:00" } },
-  "active": "onnx", "device": "CPU", "error": null, "onnx_available": true,
-  "detection_ready": true, "managed": true,
+  "active": "onnx", "device": "CPU", "error": null, "failures": 0, "failure": null,
+  "onnx_available": true, "detection_ready": true, "managed": true,
   "models": [{ "id": "yolox_nano", "name": "YOLOX-nano", "bytes": 3659407, "license": "Apache-2.0", "hint": "Le plus léger : …",
               "path": "/var/lib/rustnvr/recordings/.rustnvr/models/yolox_nano.onnx", "downloaded": false }] }
 ```
 
+- `failures` : analyses d'événements (et de passages) en échec de suite
+  depuis le dernier succès, `failure` l'erreur de la dernière ; à 3, les
+  webhooks `ai` le signalent.
 - `night` (facultatif, `null` : aucun) : de `from` à `to` (heure locale du
   serveur, `HH:MM`, à cheval sur minuit quand `from` est plus tard), un objet
   doit atteindre `night.min_score` au lieu de `min_score`. Avec `when:
@@ -1077,8 +1323,9 @@ l'interface et appliqués sans redémarrage :
   "kept" }], "image": "data:image/jpeg;base64,…" }` ; `kept` indique si l'objet
   passe les filtres (confiance, `labels`, objets de la caméra). 400 si aucun
   fournisseur n'est actif.
-- `device` : où les analyses tournent. Toujours `CPU` pour la reconnaissance
-  intégrée (tract n'utilise pas de carte graphique) ; pour CodeProject.AI, le
+- `device` : où les analyses tournent. Pour la reconnaissance intégrée,
+  `CPU · ONNX Runtime` ou `CPU · tract` (le moteur, voir docs/AI.md ; ni l'un
+  ni l'autre n'utilise de carte graphique) ; pour CodeProject.AI, le
   champ `inferenceDevice` de sa dernière réponse (`CPU`, `GPU`…), `null` avant
   la première analyse ou avec DeepStack, qui ne le donne pas.
 - `models` : les sept modèles YOLOX publiés, du plus léger au plus gros
@@ -1155,6 +1402,28 @@ valent aussi pour les caméras de `config.toml`.
   continuent, les pannes passent toujours. Absent : `false` (il n'est écrit
   que s'il vaut `true`). Le changer seul ne relance pas la détection. Aussi
   par MQTT (`<p>/<caméra>/notifications/set`, entité « Notifications »).
+- `timelapse` : `true` fait chaque nuit le time-lapse de la veille (voir
+  `/cameras/{id}/timelapses`). Absent : `false` (écrit seulement s'il vaut
+  `true`). Indépendant de `enabled` ; le changer seul ne relance pas la
+  détection.
+- `camera_photo` : `true` prend l'image des événements (vignette, IA,
+  notifications, images gardées, passages vérifiés par l'IA) sur la photo
+  que donne la caméra par ONVIF (`GetSnapshotUri`, 1920 px de large au plus,
+  masques appliqués) au lieu d'une image du flux de détection ; si la photo
+  échoue (pas de port ONVIF, 3 s sans réponse, refus), l'image habituelle
+  est prise et le journal le dit une fois. Absent : `false` (écrit seulement
+  s'il vaut `true`). Le changer seul ne relance pas la détection. Voir
+  `GET /cameras/{id}/photo`.
+- `camera_photo_width` : largeur maximale de cette photo, `1280`, `1920` ou
+  `0` (taille d'origine de la caméra) ; absent : `1920` (écrit seulement
+  s'il est différent). Sans masque et déjà assez petite, la photo de la
+  caméra est gardée telle quelle, sans être réencodée ; 400 pour une autre
+  valeur.
+- `no_picture_check` : `true` ne signale plus l'image figée ou masquée de
+  cette caméra (`motion.picture`, webhooks `camera`) ; pour une pièce sombre
+  où l'on éteint la lumière. Absent : `false` (écrit seulement s'il vaut
+  `true`). Le changer relance la détection. Les masques de confidentialité
+  ne comptent pas dans ces vérifications.
 - `zones` : 8 au plus, 3 à 32 points chacune, coordonnées en fractions de
   l'image (0..1). Le mouvement n'est compté que dans les zones.
   Chaque zone peut avoir `objects` (IA optionnelle) : ces objets ne comptent
@@ -1230,8 +1499,12 @@ plus, 64 caractères chacune.
 [ { "id": "42", "camera": "jardin", "kind": "motion",
     "start_ms": 1793607714212, "end_ms": 1793607722212, "score": 0.17,
     "zones": ["Allée"], "thumbnail_url": "/api/v1/events/42/thumbnail",
-    "objects": [ { "label": "person", "score": 0.87, "bbox": [0.25, 0.25, 0.5, 0.75], "zone": "Allée" } ] } ]
+    "objects": [ { "label": "person", "score": 0.87, "bbox": [0.25, 0.25, 0.5, 0.75], "zone": "Allée" } ],
+    "journey": null } ]
 ```
+
+`journey` : identifiant du trajet entre caméras dont l'événement fait partie
+(`GET /journeys/{id}`), `null` sinon.
 
 `score` : plus grande fraction d'une zone (ou de l'image) qui a changé.
 `objects` : objets reconnus dans la vignette par le fournisseur d'IA optionnel
@@ -1376,6 +1649,7 @@ Messages serveur → client (le client n'envoie rien) :
 | `event` | `{ "event": Event }` | événement commencé, complété (vignette, zones) ou terminé ; suivi du message `camera` (état `motion`) |
 | `recorder_error` | `{ "camera": "id", "message": "…" }` | erreur d'écriture |
 | `crossing` | `{ "crossing": { "camera", "line", "direction", "at_ms", "today", "object" } }` | ligne de passage franchie (l'interface notifie ceux qui ont un `object`) |
+| `journey` | `{ "journey": { "id", "label", "direction", "cameras": [..], "events": [..], "ended" } }` | trajet entre caméras prolongé (`ended: false`) ou clos (`true`) ; seulement les caméras que voit le compte |
 
 Si le client prend du retard, il reçoit de nouveau l'état complet. Le serveur
 ferme proprement les WebSocket à l'arrêt.

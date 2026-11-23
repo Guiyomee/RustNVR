@@ -24,7 +24,7 @@ exclude = ["crates/retina"]
 # Calendar versions: year.month.number of the release in the month. Cargo
 # forbids leading zeros: 2026.11.1 here, published as v2026.11.01 (RustNVR's
 # update check reads both the same).
-version = "2026.11.9"
+version = "2026.11.10"
 edition = "2024"
 license = "PolyForm-Noncommercial-1.0.0"
 publish = false

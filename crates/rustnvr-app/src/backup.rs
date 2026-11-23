@@ -1,6 +1,8 @@
 //! Backup and restore of the configuration: the configuration file, the files
-//! written by the web interface (`*.ui.toml`) and the detection settings of
-//! the cameras (zones, lines, masks), in one file encrypted with a passphrase.
+//! written by the web interface (`*.ui.toml`), the detection settings of the
+//! cameras (zones, lines, masks) and the settings kept in the database for
+//! every device (video wall, journeys between cameras), in one file encrypted
+//! with a passphrase.
 //!
 //! These files hold the passwords of the cameras, MQTT and storage: the whole
 //! backup is encrypted (key derived from the passphrase with Argon2id,
@@ -14,8 +16,9 @@ use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, NONCE_LEN, Nonce, UnboundK
 use ring::rand::{SecureRandom, SystemRandom};
 use rustnvr_core::MotionSettings;
 use rustnvr_core::config::{
-    Config, MANAGED_AI_FILE, MANAGED_CAMERAS_FILE, MANAGED_MQTT_FILE, MANAGED_SETTINGS_FILE,
-    MANAGED_STORAGE_FILE, MANAGED_UPDATES_FILE, MANAGED_WEBHOOKS_FILE,
+    AutoBackupConfig, Config, MANAGED_AI_FILE, MANAGED_BACKUP_FILE, MANAGED_CAMERAS_FILE,
+    MANAGED_MQTT_FILE, MANAGED_SETTINGS_FILE, MANAGED_STORAGE_FILE, MANAGED_UPDATES_FILE,
+    MANAGED_WEBHOOKS_FILE,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -33,7 +36,7 @@ pub const MIN_PASSPHRASE: usize = 8;
 /// Name under which the configuration file is stored, whatever its real name.
 pub const CONFIG_FILE: &str = "config.toml";
 /// Files of a backup, in this order; nothing else is ever written back.
-pub const FILES: [&str; 8] = [
+pub const FILES: [&str; 9] = [
     CONFIG_FILE,
     MANAGED_CAMERAS_FILE,
     MANAGED_STORAGE_FILE,
@@ -42,6 +45,7 @@ pub const FILES: [&str; 8] = [
     MANAGED_AI_FILE,
     MANAGED_WEBHOOKS_FILE,
     MANAGED_UPDATES_FILE,
+    MANAGED_BACKUP_FILE,
 ];
 
 /// Content of a backup.
@@ -57,6 +61,24 @@ pub struct Backup {
     pub files: BTreeMap<String, String>,
     /// Detection settings, by camera.
     pub motion: BTreeMap<String, MotionSettings>,
+    /// Settings of the video wall (JSON as the database keeps it); absent
+    /// from backups made before 2026.11.10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall: Option<String>,
+    /// Arrows between cameras for the journeys (JSON as the database keeps
+    /// it); absent from backups made before 2026.11.10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journeys: Option<String>,
+}
+
+impl Backup {
+    /// Arrows between cameras in the backup.
+    pub fn journey_links(&self) -> usize {
+        self.journeys
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<rustnvr_core::journey::JourneySettings>(j).ok())
+            .map_or(0, |s| s.links.len())
+    }
 }
 
 /// Why a backup cannot be read.
@@ -166,6 +188,8 @@ pub fn collect(
         rustnvr: rustnvr_core::release_version().to_owned(),
         files,
         motion,
+        wall: None,
+        journeys: None,
     })
 }
 
@@ -197,6 +221,10 @@ pub struct Preview {
     pub cameras: Vec<(String, String)>,
     /// Cameras whose detection settings are in the backup.
     pub motion: Vec<String>,
+    /// Whether the settings of the video wall are in it.
+    pub wall: bool,
+    /// Arrows between cameras in it.
+    pub journeys: usize,
     /// Why the restored configuration would not load (empty when it would).
     pub problems: Vec<String>,
 }
@@ -278,6 +306,8 @@ pub fn preview(config_file: &Path, backup: &Backup, models_dir: &Path) -> Previe
         files,
         cameras,
         motion: backup.motion.keys().cloned().collect(),
+        wall: backup.wall.is_some(),
+        journeys: backup.journey_links(),
         problems,
     }
 }
@@ -332,6 +362,11 @@ fn check(config_file: &Path, backup: &Backup, chosen: &[String]) -> Result<Confi
                 None => std::fs::read_to_string(path_of(config_file, name)).ok(),
             };
             if let Some(text) = text {
+                // Not read by `Config::load`: checked here.
+                if name == MANAGED_BACKUP_FILE {
+                    toml::from_str::<AutoBackupConfig>(&text)
+                        .map_err(|e| format!("{MANAGED_BACKUP_FILE} : {e}"))?;
+                }
                 write_private(&scratch.join(name), &text).map_err(|e| e.to_string())?;
             }
         }
@@ -352,6 +387,11 @@ fn scratch_dir(config_file: &Path) -> io::Result<PathBuf> {
 
 /// Writes `text` to `path` atomically, readable by its owner only.
 fn write_private(path: &Path, text: &str) -> io::Result<()> {
+    write_private_bytes(path, text.as_bytes())
+}
+
+/// Writes `data` to `path` atomically, readable by its owner only.
+pub(crate) fn write_private_bytes(path: &Path, data: &[u8]) -> io::Result<()> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -362,7 +402,7 @@ fn write_private(path: &Path, text: &str) -> io::Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     let mut f = opts.open(&tmp)?;
-    f.write_all(text.as_bytes())?;
+    f.write_all(data)?;
     f.sync_all()?;
     drop(f);
     std::fs::rename(&tmp, path)
@@ -447,7 +487,13 @@ mod tests {
         let (_dir, config) = setup();
         let mut motion = BTreeMap::new();
         motion.insert("jardin".to_owned(), MotionSettings::default());
-        let backup = collect(&config, motion, 42).expect("collect");
+        let mut backup = collect(&config, motion, 42).expect("collect");
+        backup.wall = Some(r#"{"cameras":["jardin"]}"#.to_owned());
+        backup.journeys = Some(
+            r#"{"links":[{"from":"jardin","to":"cour","max_delay_s":30,"both_ways":true}]}"#
+                .to_owned(),
+        );
+        assert_eq!(backup.journey_links(), 1);
         assert_eq!(
             backup.files.keys().collect::<Vec<_>>(),
             [CONFIG_FILE, MANAGED_WEBHOOKS_FILE]
@@ -468,6 +514,17 @@ mod tests {
             Err(BackupError::Undecryptable)
         );
         assert_eq!(open(b"[storage]\n", "x"), Err(BackupError::NotABackup));
+    }
+
+    #[test]
+    fn backups_made_before_the_wall_and_journeys_still_open() {
+        let (_dir, config) = setup();
+        let backup = collect(&config, BTreeMap::new(), 7).expect("collect");
+        // Written as 2026.11.09 wrote it: no `wall` nor `journeys`.
+        let json = serde_json::to_string(&backup).expect("json");
+        assert!(!json.contains("journeys") && !json.contains("\"wall\""));
+        let read: Backup = serde_json::from_str(&json).expect("read");
+        assert_eq!((read.journey_links(), read.wall), (0, None));
     }
 
     #[test]

@@ -4,7 +4,8 @@
 //! (the sub stream when there is one) into small grey pictures, a few per
 //! second ([`ffmpeg`]); each picture is compared with a slowly adapting
 //! background, inside the configured zones ([`detector`]); pictures with
-//! motion become events with a start and an end ([`tracker`]).
+//! motion become events with a start and an end ([`tracker`]). The same
+//! pictures show a frozen or covered picture ([`picture`]).
 //!
 //! Detection only reads the live tap: recording and viewers are unaffected,
 //! and a slow detector restarts from the next key frame instead of slowing
@@ -14,13 +15,15 @@ pub mod crossing;
 pub mod detector;
 pub mod ffmpeg;
 pub mod night;
+pub mod picture;
 pub mod tracker;
 
 use crate::detector::Detector;
 use crate::ffmpeg::{FeedEnd, Ffmpeg, analysis_size, feed, grey_args, read_picture};
+use crate::picture::PictureCheck;
 use crate::tracker::{Change, Tracker};
 use rustnvr_core::config::MotionConfig;
-use rustnvr_core::{CameraId, MotionSettings, VideoFrame};
+use rustnvr_core::{CameraId, MotionSettings, PictureProblem, VideoFrame};
 use rustnvr_stream::LiveTap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::error::RecvError;
@@ -28,7 +31,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub use ffmpeg::{boxed_jpeg, mask_filters, snapshot_jpeg};
+pub use ffmpeg::{boxed_jpeg, mask_filters, photo_jpeg, snapshot_jpeg};
 
 /// Delay before restarting a failed decoder, doubled up to [`MAX_RETRY`].
 const FIRST_RETRY: Duration = Duration::from_secs(2);
@@ -107,6 +110,13 @@ pub enum MotionUpdate {
         /// When.
         at_ms: i64,
     },
+    /// The picture went wrong while the stream flows, or is right again.
+    Picture {
+        /// Camera.
+        camera: CameraId,
+        /// What is wrong; `None`: right again.
+        problem: Option<PictureProblem>,
+    },
 }
 
 /// State of the detection of one camera.
@@ -118,6 +128,8 @@ pub struct MotionStatus {
     pub active: bool,
     /// Last decoder failure, cleared once pictures flow again.
     pub error: Option<String>,
+    /// What is wrong with the picture (frozen, covered), if anything.
+    pub picture: Option<PictureProblem>,
 }
 
 /// A running detection.
@@ -175,6 +187,7 @@ pub fn spawn_motion(
         sink,
         status: status_tx,
         cancel: cancel.clone(),
+        picture: None,
     };
     MotionHandle {
         task: tokio::spawn(runner.run()),
@@ -193,6 +206,9 @@ struct Runner {
     cancel: CancellationToken,
     names: Vec<String>,
     tracker: Tracker,
+    /// Kept across decoding sessions: a picture frozen for minutes stays
+    /// so when the decoder restarts.
+    picture: Option<PictureCheck>,
 }
 
 /// How one decoding session ended.
@@ -317,13 +333,18 @@ impl Runner {
                 Err(e) => return Session::Failed(e),
             };
         let mut detector = Detector::new(w as usize, h as usize, self.options.fps, &self.settings);
+        let len = w as usize * h as usize;
+        if !self.settings.no_picture_check
+            && self.picture.as_ref().is_none_or(|p| p.picture_len() != len)
+        {
+            self.picture = Some(PictureCheck::new(w as usize, h as usize, &self.settings));
+        }
         let mut lines = crossing::LineTracker::new(&self.settings.lines);
 
         // Pictures are read by their own task: a partial read must never be
         // interrupted by the other branches below.
         let (pictures_tx, mut pictures) = mpsc::channel::<Vec<u8>>(2);
         let mut stdout = process.stdout;
-        let len = w as usize * h as usize;
         let reader = tokio::spawn(async move {
             loop {
                 let mut buf = vec![0u8; len];
@@ -373,6 +394,14 @@ impl Runner {
                     let analysis = detector.process(&picture);
                     tracing::trace!(camera = %self.camera, motion = analysis.motion, score = analysis.score, "picture analysed");
                     let now = now_ms();
+                    if let Some(problem) = self.picture.as_mut().and_then(|p| p.update(now, &picture)) {
+                        match problem {
+                            Some(p) => tracing::warn!(camera = %self.camera, problem = p.as_str(), "picture of the camera frozen or covered"),
+                            None => tracing::info!(camera = %self.camera, "picture of the camera right again"),
+                        }
+                        self.status.send_modify(|s| s.picture = problem);
+                        let _ = self.sink.send(MotionUpdate::Picture { camera: self.camera.clone(), problem }).await;
+                    }
                     for change in self.tracker.update(now, &analysis) {
                         self.emit(Some(change)).await;
                     }

@@ -98,6 +98,7 @@ async fn capabilities(State(state): State<Arc<ApiState>>) -> Json<CapabilitiesDt
         export: state.ffmpeg_ok(),
         protect: state.database.get().is_some(),
         bookmarks: state.database.get().is_some(),
+        journeys: state.database.get().is_some(),
         retention: state.control.get().is_some(),
         settings_write: state.control.get().is_some(),
         mqtt: state.control.get().is_some(),
@@ -617,6 +618,15 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         )
         .route("/wall", get(detection::wall).put(detection::set_wall))
         .route(
+            "/journeys/settings",
+            get(crate::journeys::settings).put(crate::journeys::set_settings),
+        )
+        .route("/journeys/{id}", get(crate::journeys::journey))
+        .route(
+            "/journeys/{id}/export",
+            post(crate::export::prepare_journey),
+        )
+        .route(
             "/cameras/{id}/presence/reset",
             post(crate::stats::reset_presence),
         )
@@ -626,6 +636,7 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route("/cameras/{id}/ptz/stop", post(crate::ptz::stop))
         .route("/cameras/{id}/reboot", post(crate::ptz::reboot))
         .route("/cameras/{id}/device", get(crate::ptz::device))
+        .route("/cameras/{id}/photo", get(crate::ptz::photo))
         .route("/cameras/{id}/ptz/presets", post(crate::ptz::create_preset))
         .route(
             "/cameras/{id}/ptz/presets/{token}",
@@ -655,6 +666,17 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
             get(detection::updates).put(detection::set_updates),
         )
         .route("/updates/check", post(detection::check_updates))
+        .route("/updates/install", post(detection::install_update))
+        .route(
+            "/cameras/{id}/timelapses",
+            get(crate::timelapse::timelapses),
+        )
+        .route(
+            "/cameras/{id}/timelapses/{day}",
+            get(crate::timelapse::timelapse)
+                .post(crate::timelapse::make_timelapse)
+                .delete(crate::timelapse::delete_timelapse),
+        )
         .route(
             "/webhooks",
             get(detection::webhooks).put(detection::set_webhooks),
@@ -663,6 +685,11 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route("/backup", post(crate::backup::create))
         .route("/backup/inspect", post(crate::backup::inspect))
         .route("/backup/restore", post(crate::backup::restore))
+        .route(
+            "/backup/auto",
+            get(crate::backup::auto).put(crate::backup::set_auto),
+        )
+        .route("/backup/auto/run", post(crate::backup::run_auto))
         .route(
             "/protected",
             get(crate::protect::list).post(crate::protect::protect),
@@ -689,6 +716,22 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route("/auth/logout", post(auth::logout))
         .route("/auth/setup", post(auth::setup))
         .route("/auth/password", axum::routing::put(auth::change_password))
+        .route("/auth/totp", get(crate::account::totp_status))
+        .route("/auth/totp/setup", post(crate::account::totp_setup))
+        .route("/auth/totp/enable", post(crate::account::totp_enable))
+        .route("/auth/totp/disable", post(crate::account::totp_disable))
+        .route(
+            "/auth/tokens",
+            get(crate::account::tokens).post(crate::account::create_token),
+        )
+        .route(
+            "/auth/tokens/{id}",
+            axum::routing::delete(crate::account::delete_token),
+        )
+        .route(
+            "/users/{name}/totp",
+            axum::routing::delete(crate::account::remove_user_totp),
+        )
         .route("/users", get(auth::users).post(auth::create_user))
         .route(
             "/users/{name}",

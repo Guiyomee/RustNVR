@@ -5,15 +5,107 @@ précautions) sont sur la page de chaque
 [release](https://github.com/Guiyomee/RustNVR/releases). Versions
 « calendrier » : année.mois.numéro dans le mois.
 
-## Non publiée
+## 2026.11.10 (2026-11-20)
 
 ### Licence
 - **RustNVR passe sous la licence PolyForm Noncommercial 1.0.0** (fichier
-  `LICENSE`, depuis le 22/11/2026) : toujours gratuit pour tout usage non
-  commercial (maison, homelab, associations, enseignement), mais un usage
-  commercial (vente, service payant, entreprise, produit) demande l'accord
-  de l'auteur. Les versions jusqu'à la 2026.11.09 restent sous MIT ou
-  Apache 2.0.
+  `LICENSE`) : toujours gratuit pour tout usage non commercial (maison,
+  homelab, associations, enseignement), mais un usage commercial (vente,
+  service payant, entreprise, produit) demande l'accord de l'auteur. Les
+  versions jusqu'à la 2026.11.09 restent sous MIT ou Apache 2.0.
+
+### Nouveautés
+- **Double authentification** : en plus du mot de passe, un code à 6
+  chiffres d'une application d'authentification (Google Authenticator,
+  Aegis, 2FAS…), activé par chaque compte dans Paramètres → Utilisateurs,
+  avec 10 codes de secours. Un administrateur peut la retirer d'un compte
+  (téléphone perdu), et `reset-password` aussi.
+- **Jetons d'API** : un script, une tablette ou Home Assistant se connecte
+  avec un jeton (en lecture seule ou complet) au lieu du mot de passe ; la
+  liste montre leur dernière utilisation, on les révoque d'un clic.
+- **Mise à jour en un clic** (Debian, Proxmox) : À propos → Mises à jour →
+  « Mettre à jour vers … ». Un service séparé, en root, télécharge la version,
+  vérifie son empreinte, l'installe et redémarre RustNVR ; la page se
+  recharge toute seule. Ce service est installé par une mise à jour à la
+  main faite avec le `rustnvr-update` de cette version ou d'une plus
+  récente : depuis la 2026.11.09, il en faut donc une seconde, qui
+  réinstalle la version en place (la commande exacte est affichée dans À
+  propos). Sous Docker, les commandes à lancer restent affichées.
+- **Bandeau « mis à jour »** : après une mise à jour (bouton, à la main ou
+  Docker), un bandeau vert « RustNVR a été mis à jour : … → … » s'affiche
+  une fois, avec un lien vers les nouveautés ; la cloche le note aussi.
+- **Time-lapse quotidien** : une case par caméra (onglet Détection) ; chaque
+  nuit, une vidéo d'environ 48 s de la veille (une image par minute, masques
+  appliqués, 720p), gardée 30 jours à côté des enregistrements. Dans
+  l'onglet Enregistrements de la caméra : lecture, téléchargement,
+  « Préparer » pour un autre jour, l'avancement dans la liste (« En
+  attente », « En préparation… 42 % » avec une barre), un bouton pour
+  l'arrêter et un autre pour supprimer une vidéo faite.
+- **Trajets entre caméras** (Paramètres → Trajets) : on indique quelle
+  caméra peut suivre quelle autre (Sonnette → Entrée → Salon, avec un délai
+  maximal). Quand l'IA reconnaît la même sorte d'objet sur une caméra puis
+  sur la suivante (même si elle reconnaît la personne plus tard sur la
+  première), les événements forment un seul trajet : une seule carte
+  dans Événements, relue caméras côte à côte dans Lecture. Il faut l'IA.
+  Au choix pour chaque notification (« Regrouper les trajets ») : la
+  première caméra prévient, les suivantes se taisent, et un seul message
+  résume le trajet à la fin, avec sa vidéo (les caméras à la suite, bandeau
+  « caméra · heure », avec le son des caméras qui en ont) ; il part dès qu'une des caméras du trajet n'a pas
+  ses notifications coupées. MQTT : `<préfixe>/journey`. Un bouton « Exporter »
+  fait un seul MP4 du trajet.
+- **Photo pleine résolution de la caméra** (au choix, onglet Détection) :
+  l'image des événements (vignette, IA, notifications, images gardées) est
+  demandée à la caméra elle-même par ONVIF, en pleine définition (1280 px,
+  1920 px ou taille d'origine, au choix ; masques appliqués), au lieu d'une
+  image du sous-flux. Si la
+  caméra ne la donne pas en 3 s, l'image habituelle est prise. Un bouton
+  « Essayer » montre la photo, sa taille et son temps. Il faut le port
+  ONVIF de la caméra.
+- **L'IA continue de regarder pendant un mouvement long** : pluie, vent ou
+  phares peuvent faire durer un mouvement de longues minutes ; elle ne
+  s'arrête plus après les premières images, mais en analyse une toutes les
+  30 s tant qu'il dure (réglable : 30 s, 1 min ou plus du tout, Paramètres
+  → Intelligence artificielle). Quelqu'un qui passe pendant ce temps est
+  reconnu : alerte « personne » et trajet.
+- **Image figée ou masquée** : une caméra qui envoie encore son flux mais
+  dont l'image ne change plus depuis 5 min (caméra bloquée), ou devenue
+  d'un coup uniforme depuis 1 min (objectif couvert, caméra masquée,
+  lumière éteinte), est signalée comme une caméra hors ligne (notification
+  « Caméra », badge sur la fiche), puis « rétablie ». La nuit qui tombe
+  n'est pas signalée. Vu par la détection de mouvement, pendant qu'elle
+  tourne ; une case par caméra pour s'en passer (onglet Détection).
+- **IA en panne** : un nouveau type de notification prévient quand la
+  reconnaissance d'objets échoue 3 fois de suite (serveur d'IA arrêté,
+  modèle illisible), puis quand elle remarche ; Paramètres → Intelligence
+  artificielle affiche aussi les échecs. À cocher dans chaque webhook.
+- **Sauvegarde automatique** (Paramètres → Sauvegarde) : la sauvegarde
+  chiffrée de la configuration, faite toute seule chaque jour, semaine…
+  dans le dossier `.rustnvr-backups` du stockage choisi (le NAS de
+  préférence), en gardant les dernières ; un bouton « Sauvegarder
+  maintenant ». La phrase secrète est enregistrée sur le serveur.
+- La sauvegarde de configuration garde aussi les flèches des trajets et
+  les réglages du mur, et les réglages de la sauvegarde automatique.
+- La base de données est migrée au premier démarrage : une version plus
+  ancienne ne pourra plus la rouvrir.
+
+### Améliorations
+- Sécurité : bibliothèque `url` mise à jour (2.5.9, RUSTSEC-2026-0592,
+  dépassement de pile sur des adresses `blob:` imbriquées ; pas exploitable
+  dans RustNVR, qui n'utilise pas la fonction concernée).
+- **IA intégrée 2 à 4 fois plus rapide** : la reconnaissance d'objets tourne
+  avec **ONNX Runtime** (bibliothèque officielle de Microsoft, livrée dans
+  l'archive Debian / Proxmox) au lieu de tract, sur le même processeur et
+  avec les mêmes résultats : YOLOX-m passe de 1,25 s à 0,31 s par image sur
+  un i5-6500. Paramètres → IA indique le moteur (« CPU · ONNX Runtime »).
+  Sans la bibliothèque (image Docker pour l'instant), rien ne change : tract
+  reste utilisé. Elle prend les cœurs que RustNVR a le droit d'utiliser
+  (limite d'un conteneur ou d'un LXC comprise : 0,8 s avec 2 cœurs, 0,3 s
+  avec 4) ; `RUSTNVR_AI_THREADS` en fixe le nombre (par exemple pour laisser
+  un cœur libre sur un Raspberry Pi).
+- Le journal note chaque notification envoyée (webhook, type de message,
+  titre, réponse du serveur), pas seulement les échecs : on peut vérifier
+  après coup qu'une notification est bien partie. Jamais l'adresse du
+  webhook.
 
 ## 2026.11.09 (2026-11-18)
 

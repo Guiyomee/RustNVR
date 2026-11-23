@@ -180,6 +180,10 @@ timeout_seconds = 10
 # interval_seconds while the motion lasts and nothing is recognized.
 max_pictures = 5
 interval_seconds = 3
+# Then, while the motion still lasts (rain, wind, headlights), one picture
+# every watch_seconds (10 to 600), so that someone passing meanwhile is seen;
+# 0: no more pictures after max_pictures.
+watch_seconds = 30
 
 # New versions: the latest release published on a Git forge (Gitea, Forgejo
 # or GitHub) is compared with this version, shown in the interface (À propos,

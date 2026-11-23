@@ -5,6 +5,7 @@ import { AuditLog } from '../components/settings/AuditLog'
 import { useIsViewer } from '../auth/AuthGate'
 import { BackupSettings } from '../components/settings/BackupSettings'
 import { GeneralSettingsForm } from '../components/settings/GeneralSettingsForm'
+import { JourneySettingsForm } from '../components/settings/JourneySettings'
 import { RestreamSettings } from '../components/settings/RestreamSettings'
 import { LogsViewer } from '../components/settings/LogsViewer'
 import { MqttSettings } from '../components/settings/MqttSettings'
@@ -29,6 +30,7 @@ type Category =
   | 'cameras'
   | 'recording'
   | 'motion'
+  | 'journeys'
   | 'ai'
   | 'storage'
   | 'mqtt'
@@ -43,6 +45,7 @@ const CATEGORIES: { key: Category; label: string }[] = [
   { key: 'cameras', label: t('Caméras', 'Cameras') },
   { key: 'recording', label: t('Enregistrement', 'Recording') },
   { key: 'motion', label: t('Détection de mouvement', 'Motion detection') },
+  { key: 'journeys', label: t('Trajets', 'Journeys') },
   { key: 'ai', label: t('Intelligence artificielle', 'Artificial intelligence') },
   { key: 'storage', label: t('Stockage', 'Storage') },
   { key: 'mqtt', label: 'MQTT / Home Assistant' },
@@ -159,6 +162,16 @@ function Section({ category }: { category: Category }) {
             {cameras.filter((c) => c.motion.active).map((c) => c.name).join(', ') || 'aucun'}
           </SettingRow>
           <GeneralSettingsForm section="motion" />
+        </SettingsSection>
+      )
+    case 'journeys':
+      return (
+        <SettingsSection
+          title={t('Trajets entre caméras', 'Journeys between cameras')}
+          description={t("Indiquez quelle caméra peut suivre quelle autre (« Sonnette → Entrée »). Quand l'IA reconnaît le même objet sur une caméra puis sur la suivante dans le délai, les deux événements forment un seul trajet, affiché d'un bloc dans Événements et relu caméras côte à côte. Il faut l'IA : sans objet reconnu, pas de trajet.", "Tell which camera may follow which other (« Doorbell → Entrance »). When the AI recognizes the same object on a camera then on the next one within the delay, both events make one journey, shown as one block in Events and played back cameras side by side. It needs the AI: no recognized object, no journey.")}
+          available={cap('journeys')}
+        >
+          <JourneySettingsForm />
         </SettingsSection>
       )
     case 'ai':

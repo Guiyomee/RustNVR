@@ -101,7 +101,35 @@ pub fn mask_filters(masks: &[[f32; 4]]) -> String {
 }
 
 fn snapshot_args(max_width: u32, masks: &[[f32; 4]]) -> Vec<String> {
-    let mut a = base_args(false);
+    picture_args(base_args(false), max_width, masks)
+}
+
+/// Arguments reading one JPEG (a photo given by the camera) on stdin and
+/// writing it back at most `max_width` wide, `masks` blacked out.
+fn photo_args(max_width: u32, masks: &[[f32; 4]]) -> Vec<String> {
+    let input = [
+        "-hide_banner",
+        "-nostats",
+        "-loglevel",
+        "error",
+        "-threads",
+        "1",
+        "-f",
+        "jpeg_pipe",
+        "-i",
+        "pipe:0",
+        "-frames:v",
+        "1",
+    ];
+    picture_args(
+        input.iter().map(|s| (*s).to_owned()).collect(),
+        max_width,
+        masks,
+    )
+}
+
+/// `input` arguments followed by the masks, the size and the JPEG output.
+fn picture_args(mut a: Vec<String>, max_width: u32, masks: &[[f32; 4]]) -> Vec<String> {
     let hide = mask_filters(masks);
     let hide = if hide.is_empty() {
         hide
@@ -344,6 +372,17 @@ pub(crate) async fn raw_picture(
         .map_err(|_| "image trop longue à décoder (délai dépassé)".to_owned())?
 }
 
+/// A photo given by the camera (JPEG), at most `max_width` wide, with the
+/// privacy `masks` blacked out: one picture decoded, nothing else.
+pub async fn photo_jpeg(
+    ffmpeg: &str,
+    jpeg: Bytes,
+    max_width: u32,
+    masks: &[[f32; 4]],
+) -> Result<Bytes, String> {
+    jpeg_from(ffmpeg, &photo_args(max_width, masks), jpeg.to_vec()).await
+}
+
 /// `jpeg` with the boxes `[x1, y1, x2, y2]` (fractions of the picture)
 /// drawn in blue, as the interface shows them.
 pub async fn boxed_jpeg(ffmpeg: &str, jpeg: Bytes, boxes: &[[f32; 4]]) -> Result<Bytes, String> {
@@ -479,6 +518,79 @@ mod tests {
                 "drawbox=x=iw*0.5000:y=ih*0.0000:w=iw*0.5000:h=ih*0.2500:color=black:t=fill,scale="
             ),
             "{vf}"
+        );
+    }
+
+    /// Width and height read from the start-of-frame marker of a JPEG.
+    fn jpeg_size(j: &[u8]) -> Option<(u16, u16)> {
+        let mut i = 2;
+        while i + 9 < j.len() {
+            if j[i] != 0xff {
+                return None;
+            }
+            let marker = j[i + 1];
+            let len = usize::from(u16::from_be_bytes([j[i + 2], j[i + 3]]));
+            if (0xc0..=0xc2).contains(&marker) {
+                let h = u16::from_be_bytes([j[i + 5], j[i + 6]]);
+                let w = u16::from_be_bytes([j[i + 7], j[i + 8]]);
+                return Some((w, h));
+            }
+            i += 2 + len;
+        }
+        None
+    }
+
+    #[test]
+    fn a_photo_is_read_as_a_jpeg() {
+        let args = photo_args(1920, &[[0.0, 0.0, 0.5, 0.5]]);
+        assert!(args.windows(2).any(|w| w == ["-f", "jpeg_pipe"]));
+        let vf = &args[args.iter().position(|a| a == "-vf").expect("-vf") + 1];
+        assert!(vf.contains("t=fill,scale='min(1920,iw)'"), "{vf}");
+    }
+
+    /// A real conversion: a 2560×1440 photo comes back 1920 wide, masked.
+    #[tokio::test]
+    async fn a_large_photo_is_reduced_and_masked() {
+        let made = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=white:s=2560x1440",
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "-c:v",
+                "mjpeg",
+                "pipe:1",
+            ])
+            .output();
+        let Some(made) = made.ok().filter(|o| o.status.success()) else {
+            eprintln!("ffmpeg missing: test skipped");
+            return;
+        };
+        let photo = photo_jpeg(
+            "ffmpeg",
+            Bytes::from(made.stdout),
+            1920,
+            &[[0.0, 0.0, 0.5, 1.0]],
+        )
+        .await
+        .expect("photo");
+        assert_eq!(jpeg_size(&photo), Some((1920, 1080)));
+        // A small photo keeps its size.
+        let small = photo_jpeg("ffmpeg", photo.clone(), 4000, &[])
+            .await
+            .expect("photo");
+        assert_eq!(jpeg_size(&small), Some((1920, 1080)));
+        assert!(
+            photo_jpeg("ffmpeg", Bytes::from_static(b"not a jpeg"), 1920, &[])
+                .await
+                .is_err()
         );
     }
 

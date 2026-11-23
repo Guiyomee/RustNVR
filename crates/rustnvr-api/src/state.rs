@@ -199,6 +199,10 @@ pub struct ApiState {
     camera_order: RwLock<Vec<String>>,
     /// Settings of the video wall chosen in the interface.
     wall: RwLock<crate::dto::WallSettings>,
+    /// Arrows between cameras for the journeys.
+    journeys: RwLock<rustnvr_core::journey::JourneySettings>,
+    /// Time-lapses being made, waiting, or that failed: `(camera, day)`.
+    timelapse_jobs: Mutex<HashMap<(String, String), crate::timelapse::Job>>,
     /// Whether FFmpeg could be started (snapshots and motion detection need it).
     pub(crate) ffmpeg_available: OnceLock<bool>,
     /// Object recognition provider, when one is configured.
@@ -217,6 +221,9 @@ pub struct ApiState {
     pub(crate) has_users: std::sync::atomic::AtomicBool,
     /// Failed login attempts.
     pub(crate) login_guard: crate::auth::LoginGuard,
+    /// Two-step login secrets being set up, by account, waiting for their
+    /// first code.
+    pub(crate) totp_pending: std::sync::Mutex<HashMap<String, (String, std::time::Instant)>>,
     /// Reverse proxies whose `X-Forwarded-For` names the client.
     pub(crate) trusted_proxies: OnceLock<Vec<rustnvr_core::config::TrustedProxy>>,
     /// Names of the destinations short of space (updated every minute).
@@ -276,6 +283,8 @@ impl ApiState {
             database: OnceLock::new(),
             camera_order: RwLock::new(Vec::new()),
             wall: RwLock::new(crate::dto::WallSettings::default()),
+            journeys: RwLock::new(rustnvr_core::journey::JourneySettings::default()),
+            timelapse_jobs: Mutex::new(HashMap::new()),
             ffmpeg_available: OnceLock::new(),
             ai_provider: RwLock::new(None),
             updates: RwLock::new(crate::dto::UpdateStatus {
@@ -289,6 +298,7 @@ impl ApiState {
             https: std::sync::atomic::AtomicBool::new(false),
             has_users: std::sync::atomic::AtomicBool::new(false),
             login_guard: crate::auth::LoginGuard::default(),
+            totp_pending: std::sync::Mutex::new(HashMap::new()),
             trusted_proxies: OnceLock::new(),
             low_space: RwLock::new(Vec::new()),
             storage_problems: RwLock::new(Vec::new()),
@@ -346,6 +356,57 @@ impl ApiState {
             Ok(wall) => self.set_wall(wall),
             Err(e) => tracing::warn!(error = %e, "video wall settings not read"),
         }
+    }
+
+    /// The arrows between cameras for the journeys.
+    pub fn journeys(&self) -> rustnvr_core::journey::JourneySettings {
+        self.journeys
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Sets the arrows between cameras.
+    pub(crate) fn set_journeys(&self, settings: rustnvr_core::journey::JourneySettings) {
+        *self.journeys.write().unwrap_or_else(|e| e.into_inner()) = settings;
+    }
+
+    /// Sets the arrows between cameras from their JSON in the database (at
+    /// startup); unreadable ones are left out with a warning.
+    pub fn set_journeys_json(&self, json: &str) {
+        match serde_json::from_str(json) {
+            Ok(s) => self.set_journeys(s),
+            Err(e) => tracing::warn!(error = %e, "journey settings not read"),
+        }
+    }
+
+    /// Where the time-lapse of `camera` for `day` is (`None`: done, or no
+    /// longer followed).
+    pub fn set_timelapse_job(&self, camera: &str, day: &str, job: Option<crate::timelapse::Job>) {
+        let mut jobs = self
+            .timelapse_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let key = (camera.to_owned(), day.to_owned());
+        match job {
+            Some(job) => {
+                jobs.insert(key, job);
+            }
+            None => {
+                jobs.remove(&key);
+            }
+        }
+    }
+
+    /// The time-lapses of `camera` being made, waiting or failed, by day.
+    pub(crate) fn timelapse_jobs(&self, camera: &str) -> Vec<(String, crate::timelapse::Job)> {
+        self.timelapse_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|((c, _), _)| c == camera)
+            .map(|((_, day), job)| (day.clone(), job.clone()))
+            .collect()
     }
 
     /// Enables events and detection settings. Returns false if already set.
@@ -776,6 +837,7 @@ impl ApiState {
                     running: status.running,
                     active: status.active,
                     error: status.error,
+                    picture: status.picture.map(|p| p.as_str()),
                 }
             },
             record_audio: c.record_audio,

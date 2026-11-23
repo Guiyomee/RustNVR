@@ -2,9 +2,12 @@
 // Routes that do not exist yet are documented in API_CONTRACT.md and are not
 // called from here: the data layer reports them as unavailable instead.
 
-import { API_BASE, apiGet, apiSend, apiSendForFile } from './client'
+import { API_BASE, apiGet, apiGetFile, apiSend, apiSendForFile } from './client'
 import type {
   WallSettings,
+  AutoBackupInput,
+  AutoBackupRun,
+  AutoBackupView,
   BackupPreview,
   Bookmark,
   BackupRestored,
@@ -34,6 +37,8 @@ import type {
   ExportResult,
   GeneralSettings,
   GeneralSettingsInput,
+  Journey,
+  JourneySettings,
   MotionSettings,
   MqttInput,
   MqttView,
@@ -44,6 +49,7 @@ import type {
   Recording,
   Storage,
   SystemInfo,
+  Timelapse,
   UpdateStatus,
   Webhook,
   WebhookTestResult,
@@ -117,6 +123,22 @@ export const getMotion = (id: string) => apiGet<MotionSettings>(`/cameras/${enco
 export const setMotion = (id: string, settings: MotionSettings) =>
   apiSend<MotionSettings>('PUT', `/cameras/${encodeURIComponent(id)}/motion`, settings, 30_000)
 
+// Journeys between cameras (capabilities.journeys).
+export const getJourneySettings = () => apiGet<JourneySettings>('/journeys/settings')
+export const setJourneySettings = (settings: JourneySettings) => apiSend<JourneySettings>('PUT', '/journeys/settings', settings, 20_000)
+export const getJourney = (id: string) => apiGet<Journey>(`/journeys/${encodeURIComponent(id)}`)
+/** One MP4 of a journey, its cameras one after the other (capabilities.export). */
+export const exportJourney = (id: string) => apiSend<ExportResult>('POST', `/journeys/${encodeURIComponent(id)}/export`, undefined, 30 * 60_000)
+
+// Daily time-lapses (motion settings `timelapse`).
+export const getTimelapses = (id: string) => apiGet<Timelapse[]>(`/cameras/${encodeURIComponent(id)}/timelapses`, 20_000)
+export const timelapseUrl = (id: string, day: string) => `${API_BASE}/cameras/${encodeURIComponent(id)}/timelapses/${encodeURIComponent(day)}`
+/** Stops the time-lapse of that day if it is on its way, else removes its video. */
+export const deleteTimelapse = (id: string, day: string) =>
+  apiSend<null>('DELETE', `/cameras/${encodeURIComponent(id)}/timelapses/${encodeURIComponent(day)}`, undefined, 20_000)
+export const makeTimelapse = (id: string, day: string) =>
+  apiSend<null>('POST', `/cameras/${encodeURIComponent(id)}/timelapses/${encodeURIComponent(day)}`, undefined, 20_000)
+
 /** Current picture of a camera as a JPEG (capabilities.snapshots); `t` defeats caching. */
 export const snapshotUrl = (id: string, t = Date.now()) => `${API_BASE}/cameras/${encodeURIComponent(id)}/snapshot?t=${t}`
 
@@ -134,6 +156,8 @@ export interface AuthUser {
   role: 'admin' | 'viewer'
   /** Cameras this account sees (null: all of them; always null for an administrator). */
   cameras?: string[] | null
+  /** Signed in with a read-only API token. */
+  read_only?: boolean
 }
 export interface AuthStatus {
   /** Authentication is required. */
@@ -150,6 +174,30 @@ export interface UserAccount {
   created_ms: number
   /** Cameras a viewer sees (null: all of them). */
   cameras: string[] | null
+  /** The two-step login is on. */
+  totp: boolean
+}
+/** Two-step login of the signed-in account. */
+export interface TotpStatus {
+  enabled: boolean
+  /** Recovery codes not used yet. */
+  recovery_codes_left: number
+}
+/** A secret to scan, active once a first code confirms it. */
+export interface TotpSetup {
+  secret: string
+  uri: string
+  /** QR code of `uri`, as SVG. */
+  qr_svg: string
+}
+/** An API token of the signed-in account; `token` only in the answer that creates it. */
+export interface ApiToken {
+  id: number
+  name: string
+  read_only: boolean
+  created_ms: number
+  last_used_ms: number | null
+  token?: string
 }
 /** A line of the activity log of the accounts (`GET /audit`, administrators). */
 export interface AuditEntry {
@@ -165,7 +213,8 @@ export interface AuditEntry {
   status: number
 }
 export const getAuthStatus = () => apiGet<AuthStatus>('/auth/status')
-export const login = (username: string, password: string) => apiSend<AuthUser>('POST', '/auth/login', { username, password }, 30_000)
+/** `code`: of the authenticator app, or a recovery code, for an account with a two-step login (error `totp_required` without it). */
+export const login = (username: string, password: string, code?: string) => apiSend<AuthUser>('POST', '/auth/login', code ? { username, password, code } : { username, password }, 30_000)
 export const logout = () => apiSend<null>('POST', '/auth/logout')
 export const setupAdmin = (username: string, password: string) => apiSend<AuthUser>('POST', '/auth/setup', { username, password }, 30_000)
 export const changePassword = (current: string, next: string) => apiSend<null>('PUT', '/auth/password', { current, new: next }, 30_000)
@@ -183,6 +232,16 @@ export const getAudit = (q: { before?: number; limit?: number } = {}) => {
   return apiGet<AuditEntry[]>(`/audit${query ? `?${query}` : ''}`)
 }
 export const deleteUser = (name: string) => apiSend<null>('DELETE', `/users/${encodeURIComponent(name)}`)
+/** Turns the two-step login of an account off (administrators: lost phone). */
+export const removeUserTotp = (name: string) => apiSend<null>('DELETE', `/users/${encodeURIComponent(name)}/totp`)
+export const getTotp = () => apiGet<TotpStatus>('/auth/totp')
+export const setupTotp = () => apiSend<TotpSetup>('POST', '/auth/totp/setup', {})
+/** The first code of the app turns it on; the recovery codes are given once, here. */
+export const enableTotp = (code: string) => apiSend<{ recovery_codes: string[] }>('POST', '/auth/totp/enable', { code })
+export const disableTotp = (password: string) => apiSend<null>('POST', '/auth/totp/disable', { password }, 30_000)
+export const getTokens = () => apiGet<ApiToken[]>('/auth/tokens')
+export const createToken = (name: string, readOnly: boolean) => apiSend<ApiToken>('POST', '/auth/tokens', { name, read_only: readOnly })
+export const deleteToken = (id: number) => apiSend<null>('DELETE', `/auth/tokens/${id}`)
 
 // Sound recording of a camera (camera_management).
 export const setDetectionPaused = (paused: boolean) => apiSend<{ paused: boolean }>('PUT', '/detection/pause', { paused }, 30_000)
@@ -197,6 +256,8 @@ export interface CameraDevice {
 /** The record of a camera, as last read (`refresh`: read again from the camera). */
 export const getCameraDevice = (id: string, refresh = false) => apiGet<CameraDevice>(`/cameras/${encodeURIComponent(id)}/device${refresh ? '?refresh=1' : ''}`, 20_000)
 /** Restarts the camera itself through ONVIF; what the camera answered. */
+/** The photo the camera gives through ONVIF, masks applied (`camera_photo`). */
+export const getCameraPhoto = (id: string, width?: number) => apiGetFile(`/cameras/${encodeURIComponent(id)}/photo${width === undefined ? '' : `?width=${width}`}`, 30_000)
 export const rebootCamera = (id: string) => apiSend<{ message: string }>('POST', `/cameras/${encodeURIComponent(id)}/reboot`, {}, 30_000)
 /** Pauses a camera until it is resumed or RustNVR restarts (never stored). */
 /** Order of the cameras kept on the server (empty: the configuration's order). */
@@ -232,6 +293,8 @@ export const exportClip = (id: string, q: { fromMs: number; toMs: number; h264: 
 export const getUpdates = () => apiGet<UpdateStatus>('/updates')
 export const checkUpdates = () => apiSend<UpdateStatus>('POST', '/updates/check', {}, 30_000)
 export const setUpdates = (check: boolean) => apiSend<UpdateStatus>('PUT', '/updates', { check }, 30_000)
+/** Asks root to install `version` (a tag, as `latest`); only when `can_install`. */
+export const installUpdate = (version: string) => apiSend<UpdateStatus>('POST', '/updates/install', { version }, 30_000)
 
 // Bookmarks on the timeline (capabilities.bookmarks).
 export const getBookmarks = (fromMs: number, toMs: number, signal?: AbortSignal) =>
@@ -260,6 +323,10 @@ export const createBackup = (passphrase: string) => apiSendForFile('/backup', { 
 export const inspectBackup = (data: string, passphrase: string) => apiSend<BackupPreview>('POST', '/backup/inspect', { data, passphrase }, 60_000)
 export const restoreBackup = (data: string, passphrase: string, files: string[], motion: boolean) =>
   apiSend<BackupRestored>('POST', '/backup/restore', { data, passphrase, files, motion }, 60_000)
+// Automatic backups: a share may take a moment to answer.
+export const getAutoBackup = () => apiGet<AutoBackupView>('/backup/auto', 70_000)
+export const setAutoBackup = (input: AutoBackupInput) => apiSend<AutoBackupView>('PUT', '/backup/auto', input, 70_000)
+export const runAutoBackup = () => apiSend<AutoBackupRun>('POST', '/backup/auto/run', undefined, 120_000)
 export const resetPresence = (camera: string, line: string) =>
   apiSend<null>('POST', `/cameras/${encodeURIComponent(camera)}/presence/reset`, { line })
 

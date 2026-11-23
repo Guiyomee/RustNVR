@@ -9,6 +9,7 @@ mod gpu;
 pub mod hwaccel;
 pub mod sysinfo;
 
+mod account;
 pub mod auth;
 mod backup;
 mod bookmarks;
@@ -18,6 +19,7 @@ mod devices;
 mod discovery;
 mod export;
 mod ingress;
+pub mod journeys;
 mod live;
 pub mod logs;
 mod playback;
@@ -27,18 +29,22 @@ mod ptz;
 mod recordings;
 mod replay;
 mod routes;
+mod self_update;
 mod state;
 mod stats;
 pub mod storage;
+pub mod timelapse;
 pub mod tls;
+pub mod totp;
 pub mod transcode;
 mod ws;
 
 pub use control::{
-    AiModelView, AiProbeInput, AiProbeResult, AiTestObject, AiTestResult, AiView, BackupCamera,
-    BackupFile, BackupPreview, BackupRestored, CameraInput, CaptureDay, CapturePicture,
-    ControlError, DestinationInput, MqttInput, MqttView, NvrControl, ReplayPicture, ReplayResult,
-    RestreamInput, RestreamView, SettingsInput, SettingsView, StreamInput, WebhookTestResult,
+    AiModelView, AiProbeInput, AiProbeResult, AiTestObject, AiTestResult, AiView, AutoBackupFile,
+    AutoBackupInput, AutoBackupRun, AutoBackupView, BackupCamera, BackupFile, BackupPreview,
+    BackupRestored, CameraInput, CaptureDay, CapturePicture, ControlError, DestinationInput,
+    MqttInput, MqttView, NvrControl, ReplayPicture, ReplayResult, RestreamInput, RestreamView,
+    SettingsInput, SettingsView, StreamInput, WebhookTestResult,
 };
 pub use routes::router;
 pub use state::{ApiState, CameraEditInfo, CameraSource, DestinationInfo, StreamSource};

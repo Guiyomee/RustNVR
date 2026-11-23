@@ -87,7 +87,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=RustNVR
             org.opencontainers.image.description=Low-CPU network video recorder: RTSP H.264/H.265 recorded without re-encoding
-            org.opencontainers.image.licenses=MIT OR Apache-2.0
+            org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0
 
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:

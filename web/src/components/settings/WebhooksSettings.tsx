@@ -21,8 +21,9 @@ const EVENTS: { key: Webhook['events'][number]; label: string; help: string }[] 
   { key: 'end', label: t('Fin de l’événement', 'End of the event'), help: t('durée et objets, sans image', 'length and objects, no picture') },
   { key: 'crossing', label: t('Passage de ligne', 'Line crossing'), help: t('ligne de passage franchie (avec l’objet vu sur la ligne)', 'crossing line crossed (with the object seen at the line)') },
   { key: 'storage', label: t('Stockage dégradé', 'Storage degraded'), help: t('partage non monté, en lecture seule ou qui ne répond plus ; puis rétabli', 'share not mounted, read-only or not answering; then back') },
-  { key: 'camera', label: t('Caméra hors ligne / rétablie', 'Camera offline / back'), help: t('plus d’image depuis 1 min, puis de nouveau en ligne', 'no picture for 1 min, then online again') },
+  { key: 'camera', label: t('Caméra hors ligne / rétablie', 'Camera offline / back'), help: t('plus d’image depuis 1 min, image figée depuis 5 min ou masquée depuis 1 min ; puis rétablie', 'no picture for 1 min, picture frozen for 5 min or covered for 1 min; then back') },
   { key: 'recording', label: t('Erreur d’enregistrement', 'Recording error'), help: t('écriture impossible (disque plein, erreur du disque…) ; puis rétabli au segment suivant', 'cannot write (disk full, disk error…); then back at the next segment') },
+  { key: 'ai', label: t('IA en panne / rétablie', 'AI failing / back'), help: t('la reconnaissance d’objets a échoué 3 fois de suite ; puis de nouveau en marche', 'object recognition failed 3 times in a row; then working again') },
 ]
 
 /** Objects offered as filters: the usual ones (people, vehicles, animals). */
@@ -60,6 +61,7 @@ const MESSAGE_HELP: Record<WebhookEvent, { title: string; text: string; vars: st
   storage: { title: 'Stockage {etat} · {stockage}', text: '{erreur}', vars: ['stockage', 'etat', 'erreur', 'heure', 'date'] },
   camera: { title: 'Caméra {etat} · {camera}', text: 'Sans image depuis {duree}. {erreur}', vars: ['camera', 'etat', 'erreur', 'duree', 'heure', 'date'] },
   recording: { title: 'Enregistrement {etat} · {camera}', text: '{erreur}', vars: ['camera', 'etat', 'erreur', 'echecs', 'duree', 'heure', 'date'] },
+  ai: { title: 'IA {etat}', text: '{erreur}', vars: ['etat', 'erreur', 'echecs', 'duree', 'heure', 'date'] },
 }
 
 const PRIORITIES: { value: string; label: string }[] = [
@@ -286,6 +288,15 @@ function HookEditor({ hook, onChange, onRemove, disabled }: { hook: Webhook; onC
               <span className="block text-xs text-muted">{kind === 'json' ? t('JPEG en base64 dans le JSON', 'JPEG in base64 inside the JSON') : t('JPEG joint au message', 'JPEG attached to the message')}</span>
             </span>
           </label>
+          <label className="flex items-start gap-2">
+            <input type="checkbox" className="mt-0.5 size-4 accent-accent" disabled={disabled} checked={hook.journeys ?? false} onChange={(e) => set('journeys', e.target.checked)} />
+            <span>
+              {t('Regrouper les trajets', 'Group the journeys')}
+              <span className="block text-xs text-muted">
+                {t('Trajets entre caméras (Paramètres → Trajets) : la première caméra prévient comme d’habitude, les suivantes se taisent, et un seul message résume le trajet à la fin (avec sa vidéo si « courte vidéo » est cochée). Demande les objets reconnus.', 'Journeys between cameras (Settings → Journeys): the first camera alerts as usual, the next ones stay silent, and one message sums the journey up at its end (with its video when « short video » is ticked). Needs recognized objects.')}
+              </span>
+            </span>
+          </label>
           {kind !== 'json' && (
             <label className="flex items-start gap-2">
               <input type="checkbox" className="mt-0.5 size-4 accent-accent" disabled={disabled} checked={hook.clip ?? false} onChange={(e) => set('clip', e.target.checked)} />
@@ -405,6 +416,7 @@ export function WebhooksSettings() {
             cooldown_minutes: h.cooldown_minutes ?? 0,
             schedule: h.schedule ?? [],
             clip: kind !== 'json' && (h.clip ?? false),
+            journeys: h.journeys ?? false,
           }
         }),
       )
