@@ -251,8 +251,12 @@ fn filters(masks: &str) -> String {
     f.push(format!("scale=-2:'min({HEIGHT},ih)'"));
     // After `fps`, the time base is a minute: the pictures are numbered in
     // a time base of 1/`FPS` first (`N/FPS/TB` in a one-minute time base
-    // rounds every picture to 0, and only 2 or 3 of them were left).
-    f.push(format!("settb=1/{FPS},setpts=N"));
+    // rounds every picture to 0, and only 2 or 3 of them were left). The
+    // final `fps` states the rate in the graph itself: with `-r` alone,
+    // FFmpeg 6.1 (Ubuntu 24.04) kept the pictures a second apart and
+    // repeated each one 30 times (1859 pictures instead of 60); 5.1 and 7.1
+    // give 60 either way.
+    f.push(format!("settb=1/{FPS},setpts=N,fps={FPS}"));
     f.join(",")
 }
 
@@ -458,7 +462,7 @@ mod tests {
     fn builds_the_filters_and_the_day() {
         assert_eq!(
             filters(""),
-            "fps=1/60,scale=-2:'min(720,ih)',settb=1/30,setpts=N"
+            "fps=1/60,scale=-2:'min(720,ih)',settb=1/30,setpts=N,fps=30"
         );
         assert!(filters("drawbox=x=0").starts_with("fps=1/60,drawbox=x=0,scale"));
         let day = jiff::civil::date(2026, 11, 18);

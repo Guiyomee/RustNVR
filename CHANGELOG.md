@@ -88,6 +88,12 @@ précautions) sont sur la page de chaque
 - La base de données est migrée au premier démarrage : une version plus
   ancienne ne pourra plus la rouvrir.
 
+### Corrections
+- Time-lapse : avec FFmpeg 6.1 (Ubuntu 24.04), la vidéo d'une journée
+  durait une vingtaine de minutes au lieu d'environ 48 s, chaque image
+  répétée 30 fois. Le débit est maintenant fixé dans le filtre : 48 s avec
+  FFmpeg 5.1, 6.1 et 7.1.
+
 ### Améliorations
 - Sécurité : bibliothèque `url` mise à jour (2.5.9, RUSTSEC-2026-0592,
   dépassement de pile sur des adresses `blob:` imbriquées ; pas exploitable
