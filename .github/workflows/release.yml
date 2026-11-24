@@ -86,7 +86,10 @@ jobs:
           else
             VERSION="$(build/rustnvr --version | awk '{print $2}')-test"
           fi
-          RUSTNVR_BIN=build/rustnvr bash scripts/package-release.sh "$VERSION" dist
+          # ONNX Runtime (official build, fixed SHA-256), shipped in lib/:
+          # object recognition 2 to 4 times faster than tract.
+          bash scripts/fetch-onnxruntime.sh x86_64 ort
+          RUSTNVR_BIN=build/rustnvr RUSTNVR_ORT=ort bash scripts/package-release.sh "$VERSION" dist
           echo "name=rustnvr-$VERSION-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
           ls -l dist
       - name: Install and start on Debian 12 and 13
@@ -108,6 +111,9 @@ jobs:
               echo
               runuser -u rustnvr -- env RUSTNVR_WEB_PASSWORD="$RUSTNVR_WEB_PASSWORD" /usr/local/bin/rustnvr health -c /etc/rustnvr/config.toml
               curl -fsk https://127.0.0.1:8080/ | grep -q "<title>"
+              # ONNX Runtime installed, with every library it needs.
+              test -f /usr/local/lib/rustnvr/libonnxruntime.so
+              if ldd /usr/local/lib/rustnvr/libonnxruntime.so | grep "not found"; then exit 1; fi
               # An update keeps the configuration.
               echo "# kept" >> /etc/rustnvr/config.toml
               bash /usr/local/bin/rustnvr-update --archive /dist/${{ steps.archive.outputs.name }} --no-start
