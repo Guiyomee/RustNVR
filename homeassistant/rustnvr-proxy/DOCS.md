@@ -1,5 +1,10 @@
 # RustNVR Proxy
 
+> **Cette app a déménagé** dans le dépôt
+> `https://github.com/Guiyomee/RustNVR-HomeAssistant` : ajoutez-le, installez
+> « RustNVR Proxy » depuis lui, puis désinstallez celle-ci. Cette copie ne
+> reçoit plus de mises à jour.
+
 Affiche l'interface de RustNVR dans Home Assistant (panneau « RustNVR » de la
 barre latérale), sans ouvrir de port supplémentaire : Home Assistant authentifie
 l'accès (ingress) et l'app relaie vers votre serveur RustNVR.

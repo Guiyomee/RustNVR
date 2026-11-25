@@ -1,5 +1,15 @@
 # Journal des versions
 
+## 1.2.0
+
+- **L'app a déménagé** dans le dépôt
+  [RustNVR-HomeAssistant](https://github.com/Guiyomee/RustNVR-HomeAssistant),
+  où arrivera aussi l'app « RustNVR » (RustNVR dans Home Assistant). Cette
+  copie ne recevra plus de mises à jour : ajoutez le dépôt
+  `https://github.com/Guiyomee/RustNVR-HomeAssistant` (Paramètres → Apps →
+  Magasin d'apps → ⋮ → Dépôts), installez « RustNVR Proxy » depuis lui avec
+  les mêmes options, puis désinstallez celle-ci et retirez l'ancien dépôt.
+
 ## 1.1.0
 
 - Le panneau apparaît aussi pour les comptes Home Assistant qui ne sont pas

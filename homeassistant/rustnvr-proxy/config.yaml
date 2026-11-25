@@ -1,8 +1,11 @@
-name: RustNVR Proxy
-version: "1.1.0"
+name: RustNVR Proxy (obsolète)
+version: "1.2.0"
+# Moved to the RustNVR-HomeAssistant repository: shown as deprecated in the
+# app store of the users who added this one.
+stage: deprecated
 slug: rustnvr_proxy
-description: L'interface de RustNVR dans la barre latérale de Home Assistant (RustNVR tourne sur une autre machine).
-url: https://github.com/Guiyomee/RustNVR/tree/main/homeassistant/rustnvr-proxy
+description: Obsolète, ne reçoit plus de mises à jour. Installez « RustNVR Proxy » depuis le dépôt https://github.com/Guiyomee/RustNVR-HomeAssistant.
+url: https://github.com/Guiyomee/RustNVR-HomeAssistant/tree/main/rustnvr-proxy
 arch:
   - aarch64
   - amd64
