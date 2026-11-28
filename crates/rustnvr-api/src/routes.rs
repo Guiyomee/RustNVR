@@ -485,13 +485,29 @@ async fn recording_file(
         .uri()
         .query()
         .is_some_and(|q| q.split('&').any(|p| p == "transcode=h264"));
-    if transcode {
-        let key = format!("{dest}_{camera}_{}", file.trim_end_matches(".mp4"));
+    // `?thumbnail=1`: its first picture (page Vidéos).
+    let thumbnail = req
+        .uri()
+        .query()
+        .is_some_and(|q| q.split('&').any(|p| p == "thumbnail=1"));
+    let key = format!("{dest}_{camera}_{}", file.trim_end_matches(".mp4"));
+    if thumbnail {
+        path = state.playback.thumbnail(&state, &path, &key).await?;
+    } else if transcode {
         path = state.playback.get(&state, &path, &key).await?;
     }
     // Serving a file never fails (`Infallible`): a missing file is a 404.
     let Ok(response) = ServeFile::new(path).oneshot(req).await;
-    Ok(response.into_response())
+    let mut response = response.into_response();
+    if thumbnail && response.status().is_success() {
+        // A recording never changes once written: its picture neither, so
+        // the browser keeps it a day instead of asking again.
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("private, max-age=86400"),
+        );
+    }
+    Ok(response)
 }
 
 async fn api_not_found(req: Request) -> ApiError {
@@ -524,13 +540,18 @@ async fn interface_cache(req: Request, next: middleware::Next) -> Response {
         // browser would fail to run as a script, and cache).
         return (StatusCode::NOT_FOUND, [(header::CACHE_CONTROL, "no-cache")]).into_response();
     }
-    let value = if assets && res.status().is_success() {
-        "public, max-age=31536000, immutable"
+    if assets && res.status().is_success() {
+        res.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
     } else {
-        "no-cache"
-    };
-    res.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+        // A route that chose its own caching (pictures of recordings…)
+        // keeps it.
+        res.headers_mut()
+            .entry(header::CACHE_CONTROL)
+            .or_insert(HeaderValue::from_static("no-cache"));
+    }
     res
 }
 
@@ -580,7 +601,7 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route("/storage", get(storage))
         .route(
             "/recordings/{dest}/{camera}/{day}/{file}",
-            get(recording_file),
+            get(recording_file).delete(crate::deletion::delete_recording),
         )
         .route(
             "/storage/destinations",
@@ -593,7 +614,10 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         .route("/events", get(detection::events))
         .route("/events/stats", get(crate::stats::stats))
         .route("/crossings", get(crate::stats::crossings))
-        .route("/events/{id}", get(detection::event))
+        .route(
+            "/events/{id}",
+            get(detection::event).delete(crate::deletion::delete_event),
+        )
         .route("/events/{id}/thumbnail", get(detection::thumbnail))
         .route("/cameras/{id}/snapshot", get(detection::snapshot))
         .route(
@@ -658,7 +682,7 @@ pub fn router(state: Arc<ApiState>, static_dir: &FsPath) -> Router {
         )
         .route(
             "/ai/captures/{camera}/{day}/{file}",
-            get(crate::replay::picture),
+            get(crate::replay::picture).delete(crate::replay::delete_picture),
         )
         .route("/ai/replay", post(crate::replay::replay))
         .route(

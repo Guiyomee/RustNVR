@@ -287,6 +287,24 @@ fn limit(key: &str) -> u32 {
     }
 }
 
+/// Most keys the failure counter holds: past it, new keys are not counted,
+/// so a flood of made-up usernames cannot fill the memory.
+const MAX_GUARD_KEYS: usize = 10_000;
+/// Longest key kept; a longer username is counted under its first bytes.
+const MAX_GUARD_KEY_LEN: usize = 96;
+
+/// `key` cut to [`MAX_GUARD_KEY_LEN`] bytes on a character boundary.
+fn guard_key(key: &str) -> &str {
+    if key.len() <= MAX_GUARD_KEY_LEN {
+        return key;
+    }
+    let mut end = MAX_GUARD_KEY_LEN;
+    while !key.is_char_boundary(end) {
+        end -= 1;
+    }
+    &key[..end]
+}
+
 /// Failed login attempts, by client address and by account.
 #[derive(Default)]
 pub(crate) struct LoginGuard {
@@ -303,6 +321,7 @@ impl LoginGuard {
         let mut map = self.lock();
         map.retain(|_, (_, since)| since.elapsed() < FAILURE_WINDOW);
         keys.iter()
+            .map(|k| guard_key(k))
             .filter_map(|k| map.get(k).map(|v| (k, v)))
             .filter(|(k, (n, _))| *n >= limit(k))
             .map(|(_, (_, since))| {
@@ -316,16 +335,25 @@ impl LoginGuard {
 
     fn failed(&self, keys: &[String]) {
         let mut map = self.lock();
+        if map.len() >= MAX_GUARD_KEYS {
+            map.retain(|_, (_, since)| since.elapsed() < FAILURE_WINDOW);
+        }
         for k in keys {
-            let e = map.entry(k.clone()).or_insert((0, Instant::now()));
-            e.0 += 1;
+            let k = guard_key(k);
+            if let Some(e) = map.get_mut(k) {
+                e.0 += 1;
+            } else if map.len() < MAX_GUARD_KEYS {
+                map.insert(k.to_owned(), (1, Instant::now()));
+            } else {
+                tracing::debug!("login failure counter full, attempt not counted");
+            }
         }
     }
 
     fn succeeded(&self, keys: &[String]) {
         let mut map = self.lock();
         for k in keys {
-            map.remove(k);
+            map.remove(guard_key(k));
         }
     }
 }
@@ -1481,6 +1509,24 @@ mod tests {
         assert!(browser_https(false, &proto("https")));
         assert!(browser_https(false, &proto("HTTPS, http")));
         assert!(!browser_https(true, &proto("http, https")));
+    }
+
+    /// The counter never holds more than its cap, and a very long username
+    /// is counted under its first bytes.
+    #[test]
+    fn login_guard_is_bounded() {
+        let guard = LoginGuard::default();
+        for i in 0..MAX_GUARD_KEYS + 50 {
+            guard.failed(&[format!("user:u{i}")]);
+        }
+        assert_eq!(guard.lock().len(), MAX_GUARD_KEYS);
+        let long = format!("user:{}", "é".repeat(500));
+        let guard = LoginGuard::default();
+        for _ in 0..MAX_ACCOUNT_FAILURES {
+            guard.failed(std::slice::from_ref(&long));
+        }
+        assert!(guard.lock().keys().all(|k| k.len() <= MAX_GUARD_KEY_LEN));
+        assert!(guard.blocked(&[long]).is_some());
     }
 
     /// One address waits after 5 failures; the account itself only after

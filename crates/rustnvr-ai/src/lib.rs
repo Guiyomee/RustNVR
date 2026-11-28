@@ -10,6 +10,8 @@ pub mod models;
 pub mod onnx;
 #[cfg(feature = "onnx")]
 mod ort_engine;
+#[cfg(feature = "onnx")]
+pub mod plates;
 
 use rustnvr_core::config::{AiConfig, AiNight, AiProviderConfig};
 use rustnvr_core::{DetectedObject, Secret};
@@ -279,7 +281,7 @@ impl Analyzer {
 
 /// Minute of the day now (0..1440), in the local time of the server.
 fn local_minute() -> u16 {
-    let now = jiff::Zoned::now();
+    let now = jiff::ZonedDateTime::now();
     u16::try_from(i32::from(now.hour()) * 60 + i32::from(now.minute())).unwrap_or(0)
 }
 
@@ -367,7 +369,7 @@ impl DeepStackHttp {
         if let Some(key) = &self.api_key {
             form = form.text("api_key", key.expose().to_owned());
         }
-        let reply: DeepStackReply = self
+        let response = self
             .client
             .post(&self.endpoint)
             .multipart(form)
@@ -375,10 +377,16 @@ impl DeepStackHttp {
             .await
             .map_err(http)?
             .error_for_status()
-            .map_err(http)?
-            .json()
+            .map_err(http)?;
+        // A list of objects fits in a few KiB; a longer reply is refused.
+        let (body, cut) = read_capped(response, MAX_REPLY)
             .await
             .map_err(|e| AiError::Provider(format!("unreadable reply: {}", e.without_url())))?;
+        if cut {
+            return Err(AiError::Provider("reply too large".to_owned()));
+        }
+        let reply: DeepStackReply = serde_json::from_slice(&body)
+            .map_err(|e| AiError::Provider(format!("unreadable reply: {e}")))?;
         if !reply.success {
             return Err(AiError::Provider(
                 reply.error.unwrap_or_else(|| "success = false".to_owned()),
@@ -404,6 +412,8 @@ impl DeepStackHttp {
                 label: p.label,
                 score: p.confidence,
                 zone: None,
+                plate: None,
+                plate_owner: None,
             })
             .collect())
     }
@@ -494,6 +504,27 @@ pub fn jpeg_size(jpeg: &[u8]) -> Option<(u32, u32)> {
         }
         pos += 2 + len;
     }
+}
+
+/// Largest reply read from an HTTP provider.
+const MAX_REPLY: usize = 1 << 20;
+
+/// Reads at most `max` bytes of `response`. The flag is true when the body
+/// was longer and has been cut: a server cannot make us hold an endless reply.
+async fn read_capped(
+    mut response: reqwest::Response,
+    max: usize,
+) -> Result<(Vec<u8>, bool), reqwest::Error> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let room = max - body.len();
+        if chunk.len() > room {
+            body.extend_from_slice(&chunk[..room]);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
 }
 
 #[cfg(test)]
@@ -592,6 +623,8 @@ mod tests {
             score,
             bbox: None,
             zone: None,
+            plate: None,
+            plate_owner: None,
         };
         let at = |h: u16, m: u16| h * 60 + m;
         // Day: 0.6 is enough; night (across midnight): it is not.
@@ -703,7 +736,9 @@ mod tests {
             interval_seconds: 2,
             watch_seconds: 60,
             keep_pictures: false,
+            plates: false,
             night: None,
+            known_plates: Vec::new(),
         };
         let analyzer = Analyzer::from_config(&config, |_| Some("s3cret".into()))
             .expect("config")

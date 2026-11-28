@@ -1,27 +1,25 @@
-import { Activity, ArrowRight, Cpu, HardDrive, Video } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Activity, ArrowRight, MonitorPlay, Video } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { describeError, UnavailableError } from '../api/client'
 import { getCameraOrder, setCameraOrder } from '../api/endpoints'
 import { CameraGrid, type GridColumns } from '../components/cameras/CameraCard'
+import { PhoneCameras } from '../components/cameras/PhoneCameras'
 import { EventRow } from '../components/events/EventCard'
 import { StorageCard } from '../components/storage/StorageCard'
 import { TimelineCard } from '../components/timeline/TimelineCard'
 import { Button } from '../components/ui/Button'
 import { Card, CardHeader } from '../components/ui/Card'
-import { Meter } from '../components/ui/Meter'
-import { Sparkline } from '../components/ui/Sparkline'
 import { useIsViewer } from '../auth/AuthGate'
-import { StatCard } from '../components/ui/StatCard'
 import { Segmented } from '../components/ui/Tabs'
 import { EmptyState, ErrorState, LoadingState, Unavailable } from '../components/ui/States'
 import { useIsDemo, useLive } from '../data/DataContext'
 import { useAsync } from '../hooks/useAsync'
-import { bucketByHour, useEvents } from '../hooks/useEvents'
-import { defaultDiskDestination, diskPercent, useStorage } from '../hooks/useStorage'
-import { useNow } from '../hooks/useUi'
-import { formatBytes, formatNumber, formatPercent } from '../lib/format'
+import { useEvents } from '../hooks/useEvents'
+import { useStorage } from '../hooks/useStorage'
+import { useMediaQuery, useNow } from '../hooks/useUi'
+import { formatNumber } from '../lib/format'
 import { Link, navigate } from '../lib/router'
-import type { Camera } from '../types/api'
+import type { Camera, EventKind } from '../types/api'
 import { t } from '../lib/i18n'
 
 const DAY = 86_400_000
@@ -108,29 +106,25 @@ function ordered(cameras: Camera[], order: string[]): Camera[] {
   return [...cameras].sort((a, b) => (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9))
 }
 
-/** Number of online cameras sampled every 10 s since the page was opened. */
-function useOnlineHistory(online: number): number[] {
-  const [history, setHistory] = useState<number[]>([])
-  const latest = useRef(online)
-  latest.current = online
-  useEffect(() => {
-    const push = () => setHistory((h) => [...h.slice(-29), latest.current])
-    push()
-    const id = window.setInterval(push, 10_000)
-    return () => window.clearInterval(id)
-  }, [])
-  return history
-}
+const EVENT_FILTERS: { kind: EventKind | null; label: string }[] = [
+  { kind: null, label: t('Tous', 'All') },
+  { kind: 'person', label: t('Personne', 'Person') },
+  { kind: 'vehicle', label: t('Véhicule', 'Vehicle') },
+  { kind: 'animal', label: t('Animal', 'Animal') },
+  { kind: 'motion', label: t('Mouvement', 'Motion') },
+]
 
 function RecentEvents({ cameras }: { cameras: Camera[] }) {
   const now = useNow(60_000)
-  const query = useMemo(() => ({ camera: null, fromMs: now - DAY, toMs: now, kinds: null }), [now])
+  const [kind, setKind] = useState<EventKind | null>(null)
+  const query = useMemo(() => ({ camera: null, fromMs: now - DAY, toMs: now, kinds: kind ? [kind] : null }), [now, kind])
   const events = useEvents(query)
   const names = useMemo(() => new Map(cameras.map((c) => [c.id, c.name])), [cameras])
   return (
     <Card className="flex min-h-0 flex-col">
       <CardHeader
-        title={t('Événements récents', 'Recent events')}
+        title={t('Événements', 'Events')}
+        subtitle={events.data ? t(`${formatNumber(events.data.length)} sur 24 h`, `${formatNumber(events.data.length)} in 24 h`) : undefined}
         icon={<Activity className="size-4" />}
         actions={
           <Button size="sm" variant="ghost" onClick={() => navigate('/events')}>
@@ -138,6 +132,22 @@ function RecentEvents({ cameras }: { cameras: Camera[] }) {
           </Button>
         }
       />
+      <div role="group" aria-label={t('Filtrer les événements', 'Filter the events')} className="flex gap-1 overflow-x-auto border-b border-line px-3 py-2.5">
+        {EVENT_FILTERS.map((f) => {
+          const on = kind === f.kind
+          return (
+            <button
+              key={f.label}
+              type="button"
+              aria-pressed={on}
+              onClick={() => setKind(f.kind)}
+              className={`h-8 shrink-0 rounded-full border px-2.5 text-xs ${on ? 'border-accent bg-accent/15 text-accent' : 'border-line text-muted hover:text-fg'}`}
+            >
+              {f.label}
+            </button>
+          )
+        })}
+      </div>
       {events.error instanceof UnavailableError ? (
         <Unavailable compact title={t('Événements indisponibles', 'Events unavailable')}>
           {t("Base de données indisponible sur le serveur : aucun événement n'est enregistré.", "Database unavailable on the server: no event is recorded.")}
@@ -164,129 +174,72 @@ function RecentEvents({ cameras }: { cameras: Camera[] }) {
   )
 }
 
-function EventsStat() {
-  const now = useNow(60_000)
-  const query = useMemo(() => ({ camera: null, fromMs: now - DAY, toMs: now, kinds: null }), [now])
-  const events = useEvents(query)
-  if (events.error instanceof UnavailableError) {
-    return <StatCard label={t('Événements (24 h)', 'Events (24 h)')} icon={<Activity className="size-4" />} value="—" detail={t('Détection non disponible', 'Detection not available')} tone="neutral" />
-  }
-  const list = events.data ?? []
-  return (
-    <StatCard label={t('Événements (24 h)', 'Events (24 h)')} icon={<Activity className="size-4" />} value={events.data ? formatNumber(list.length) : '…'} detail={t('Mouvements détectés', 'Detected motion')} tone="info">
-      <Sparkline values={bucketByHour(list, 12, now)} min={0} label={t('Événements par heure, 12 dernières heures', 'Events per hour, last 12 hours')} format={(v) => `${v} / h`} width={96} />
-    </StatCard>
-  )
-}
-
 export function OverviewPage() {
   const viewer = useIsViewer()
   const cameras = useLive((s) => s.cameras)
   const loaded = useLive((s) => s.loaded)
   const error = useLive((s) => s.error)
-  const system = useLive((s) => s.system)
   const storage = useStorage()
   const order = useCameraOrder(cameras, !viewer)
   const enabled = order.shown.filter((c) => c.enabled)
-  const online = enabled.filter((c) => c.status === 'online').length
-  const onlineHistory = useOnlineHistory(online)
-  // Disk of the default destination (where cameras record unless told
-  // otherwise); the recordings directory's disk for S3 / SFTP or before the
-  // server reports it.
-  const defaultDest = defaultDiskDestination(storage.data)
-  const shownDisk = defaultDest ? defaultDest.disk : storage.data?.disk
-  const diskPct = diskPercent(shownDisk)
   // Rows only change when cameras are added/renamed, not on every live update.
   const rowsKey = JSON.stringify(enabled.map((c) => [c.id, c.name]))
   const rows = useMemo(() => (JSON.parse(rowsKey) as [string, string][]).map(([id, label]) => ({ id, label })), [rowsKey])
   const [columns, setColumns] = useColumns()
-  // With 3 or 4 cameras per row, the cameras take the full width and the side column goes below.
-  const wide = columns === 3 || columns === 4
+  // Phones: one camera large, the others small (see PhoneCameras).
+  const phone = !useMediaQuery('(min-width: 768px)')
 
   return (
-    <div className="space-y-4 lg:space-y-5">
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          label={t('Caméras actives', 'Active cameras')}
-          icon={<Video className="size-4" />}
-          value={loaded ? `${online} / ${enabled.length}` : '…'}
-          detail={loaded ? (online === enabled.length ? t('Toutes en ligne', 'All online') : t(`${enabled.length - online} hors ligne`, `${enabled.length - online} offline`)) : t('Connexion…', 'Connecting…')}
-          tone={!loaded ? 'neutral' : online === enabled.length ? 'ok' : online === 0 ? 'err' : 'warn'}
-        >
-          <Sparkline values={onlineHistory} min={0} max={Math.max(1, enabled.length)} label={t("Caméras en ligne depuis l'ouverture de la page", "Cameras online since the page was opened")} format={(v) => t(`${v} en ligne`, `${v} online`)} width={96} />
-        </StatCard>
-        <EventsStat />
-        <StatCard
-          label={defaultDest ? t(`Stockage · ${defaultDest.name}`, `Storage · ${defaultDest.name}`) : t('Stockage', 'Storage')}
-          icon={<HardDrive className="size-4" />}
-          value={diskPct === null ? '—' : formatPercent(diskPct)}
-          detail={shownDisk ? `${formatBytes(shownDisk.used_bytes)} / ${formatBytes(shownDisk.total_bytes)}` : defaultDest && !defaultDest.available ? t('Point de stockage indisponible', 'Destination unavailable') : storage.error ? t('Indisponible', 'Unavailable') : '…'}
-          tone={(defaultDest && !defaultDest.available) || (diskPct !== null && diskPct >= 90) ? 'err' : diskPct !== null && diskPct >= 75 ? 'warn' : 'info'}
-        >
-          <div className="w-24 pb-1.5">
-            <Meter value={diskPct} label={defaultDest ? t(`Occupation de ${defaultDest.name}`, `${defaultDest.name} usage`) : t('Occupation du disque', 'Disk usage')} />
-          </div>
-        </StatCard>
-        <StatCard
-          label="CPU"
-          icon={<Cpu className="size-4" />}
-          value={formatPercent(system?.cpu_percent)}
-          detail={(() => {
-            const own = system?.service_cpu_percent ?? system?.process_cpu_percent
-            return own != null ? `RustNVR ${formatNumber(own, 1)} %` : t('Machine, tous cœurs', 'Machine, all cores')
-          })()}
-          title={t("Grand chiffre : toute la machine, tous cœurs (sous Docker : la machine hôte). RustNVR : avec les FFmpeg qu'il lance, en % d'un cœur comme docker stats.", 'Large figure: the whole machine, all cores (under Docker: the host). RustNVR: with the FFmpeg processes it starts, as % of one core like docker stats.')}
-          tone={(system?.cpu_percent ?? 0) >= 90 ? 'err' : (system?.cpu_percent ?? 0) >= 75 ? 'warn' : 'info'}
-        >
-          <Sparkline values={system?.cpu_history ?? []} min={0} max={100} label={t('CPU sur la dernière minute', 'CPU over the last minute')} format={(v) => `${formatNumber(v)} %`} width={96} />
-        </StatCard>
-      </div>
-
-      <div className={`grid grid-cols-1 gap-4 lg:gap-5 ${wide ? '' : 'xl:grid-cols-[minmax(0,1fr)_340px]'}`}>
-        <section aria-labelledby="cams-title" className="min-w-0">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 id="cams-title" className="text-sm font-semibold">
-              {t('Caméras', 'Cameras')}
-            </h2>
-            <div className="flex items-center gap-3">
-              {order.custom && !viewer && (
-                <Button size="sm" variant="ghost" title={t("Revenir à l'ordre des caméras de la configuration, pour tous les appareils", "Back to the camera order of the configuration, on every device")} onClick={() => order.save([])}>
-                  {t('Ordre par défaut', 'Default order')}
-                </Button>
-              )}
-              <span className="hidden items-center gap-2 text-xs text-muted md:flex">
-                {t('Par ligne', 'Per row')}
-                <Segmented label={t('Caméras par ligne', 'Cameras per row')} options={COLUMN_OPTIONS} value={columns} onChange={setColumns} />
-              </span>
-              {!viewer && (
-                <Link to="/cameras" className="text-xs text-accent hover:underline">
-                  {t('Gérer les caméras', 'Manage cameras')}
-                </Link>
-              )}
-            </div>
-          </div>
-          {!loaded ? (
-            error ? <ErrorState error={error} /> : <LoadingState />
-          ) : enabled.length === 0 ? (
-            <Card>
-              <EmptyState title={t('Aucune caméra activée', 'No camera on')} icon={<Video className="size-7" />}>
-                {t('Déclarez vos caméras dans config.toml (section [[cameras]]), puis redémarrez RustNVR.', 'Declare your cameras in config.toml ([[cameras]] section), then restart RustNVR.')}
-              </EmptyState>
-            </Card>
-          ) : (
-            <>
-              {order.error && <p className="mb-2 rounded-md border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{t("L'ordre n'a pas été enregistré : ", 'The order was not saved: ')}{order.error}</p>}
-              <CameraGrid cameras={enabled} columns={columns} onReorder={viewer ? undefined : (ids) => order.save([...ids, ...order.shown.filter((c) => !c.enabled).map((c) => c.id)])} />
-            </>
+    <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <section aria-labelledby="cams-title" className="flex min-w-0 flex-col gap-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 id="cams-title" className="text-[15px] font-semibold">
+            {t('Caméras', 'Cameras')}
+          </h2>
+          {order.custom && !viewer && (
+            <Button size="sm" variant="ghost" title={t("Revenir à l'ordre des caméras de la configuration, pour tous les appareils", 'Back to the camera order of the configuration, on every device')} onClick={() => order.save([])}>
+              {t('Ordre par défaut', 'Default order')}
+            </Button>
           )}
-        </section>
-        <aside className={`grid min-w-0 gap-4 lg:gap-5 ${wide ? 'lg:grid-cols-2' : 'grid-cols-1 content-start'}`}>
-          <RecentEvents cameras={cameras} />
-          <StorageCard storage={storage.data} error={storage.error} onRetry={storage.reload} />
-        </aside>
-      </div>
-
-      {rows.length > 0 && <TimelineCard rows={rows} onSelect={(camera, t) => navigate(`/playback?camera=${encodeURIComponent(camera)}&t=${Math.round(t)}`)} />}
+          <span className="flex-1" />
+          <span className="hidden items-center gap-2 text-xs text-muted md:flex">
+            {t('Par ligne', 'Per row')}
+            <Segmented label={t('Caméras par ligne', 'Cameras per row')} options={COLUMN_OPTIONS} value={columns} onChange={setColumns} />
+          </span>
+          {!viewer && (
+            <Link to="/cameras" className="text-xs text-accent hover:underline">
+              {t('Gérer les caméras', 'Manage cameras')}
+            </Link>
+          )}
+          <Link to="/mur" className="hidden h-9 items-center gap-2 sm:inline-flex rounded-lg bg-accent px-3.5 text-[13px] font-semibold text-on-accent hover:bg-accent/90">
+            <MonitorPlay className="size-4" aria-hidden />
+            {t("Ouvrir le mur d'écrans", 'Open the video wall')}
+          </Link>
+        </div>
+        {!loaded ? (
+          error ? <ErrorState error={error} /> : <LoadingState />
+        ) : enabled.length === 0 ? (
+          <Card>
+            <EmptyState title={t('Aucune caméra activée', 'No camera on')} icon={<Video className="size-7" />}>
+              {t('Ajoutez une caméra dans Caméras → Ajouter une caméra, ou dans config.toml (section [[cameras]]).', 'Add a camera in Cameras → Add a camera, or in config.toml ([[cameras]] section).')}
+            </EmptyState>
+          </Card>
+        ) : (
+          <>
+            {order.error && <p className="rounded-md border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{t("L'ordre n'a pas été enregistré : ", 'The order was not saved: ')}{order.error}</p>}
+            {phone ? (
+              <PhoneCameras cameras={enabled} />
+            ) : (
+              <CameraGrid cameras={enabled} columns={columns} onReorder={viewer ? undefined : (ids) => order.save([...ids, ...order.shown.filter((c) => !c.enabled).map((c) => c.id)])} />
+            )}
+          </>
+        )}
+        {rows.length > 0 && !phone && <TimelineCard rows={rows} onSelect={(camera, at) => navigate(`/playback?camera=${encodeURIComponent(camera)}&t=${Math.round(at)}`)} />}
+      </section>
+      <aside aria-label={t('Événements et stockage', 'Events and storage')} className="flex min-w-0 flex-col gap-4">
+        <RecentEvents cameras={cameras} />
+        <StorageCard storage={storage.data} error={storage.error} onRetry={storage.reload} />
+      </aside>
     </div>
   )
 }

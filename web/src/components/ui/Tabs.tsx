@@ -42,7 +42,7 @@ export function Segmented<K extends string | number>({ options, value, onChange,
           role="radio"
           aria-checked={o.value === value}
           onClick={() => onChange(o.value)}
-          className={`rounded px-2.5 py-1 text-xs font-medium tabular transition-colors ${o.value === value ? 'bg-accent text-white' : 'text-muted hover:text-fg'}`}
+          className={`rounded px-2.5 py-1 text-xs font-medium tabular transition-colors ${o.value === value ? 'bg-accent text-on-accent' : 'text-muted hover:text-fg'}`}
         >
           {o.label}
         </button>

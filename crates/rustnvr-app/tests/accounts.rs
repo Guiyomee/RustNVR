@@ -765,8 +765,13 @@ async fn long_connections_follow_the_camera_rights() {
         }
     };
     assert_eq!(closed, "access to this camera withdrawn");
+    // Rights are checked every 5 s, but the server first sends the video
+    // this test left unread meanwhile (several seconds of it): on a loaded
+    // machine, in debug, draining it took 14 then 24 s (release.sh, 24 and
+    // 25/11). The bound only catches a view that would never close; the
+    // reason above is what proves the rights were applied.
     assert!(
-        changed.elapsed() < Duration::from_secs(10),
+        changed.elapsed() < Duration::from_secs(60),
         "{:?}",
         changed.elapsed()
     );
@@ -990,6 +995,22 @@ async fn two_step_login_and_api_tokens() {
             .await
             .status,
         403
+    );
+    // Webhooks: a read-only token sees them without their secrets.
+    let hooks = r#"[{"name":"Discord","url":"https://discord.com/api/webhooks/1/s3cret"},
+        {"name":"ntfy","url":"https://ntfy.sh/topic-s3cret","kind":"ntfy","token":"tk_s3cret"}]"#;
+    let r = http(addr, "PUT", "/api/v1/webhooks", Some(hooks), &admin).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = http(addr, "GET", "/api/v1/webhooks", None, &bearer).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(!r.body.to_string().contains("s3cret"), "{}", r.body);
+    assert_eq!(r.body[0]["url"].as_str(), Some("https://discord.com/•••"));
+    assert_eq!(r.body[0]["kind"].as_str(), Some("discord"));
+    assert_eq!(r.body[1]["token"].as_str(), Some("•••"));
+    let r = http(addr, "GET", "/api/v1/webhooks", None, &admin).await;
+    assert!(
+        r.body.to_string().contains("tk_s3cret"),
+        "the administrator edits them"
     );
     let r = http(
         addr,

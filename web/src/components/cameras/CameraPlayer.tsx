@@ -130,7 +130,7 @@ function DemoPreview({ camera, animate }: { camera: Camera; animate: boolean }) 
     return (
       <div className="relative h-full w-full overflow-hidden bg-bg-2">
         <img src={picture} alt="" decoding="async" className="absolute inset-0 h-full w-full object-cover" onError={() => setBroken(true)} />
-        <div className="absolute right-2 bottom-2 rounded bg-black/55 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-warn uppercase" title={t('Photo libre de droits (CC0) : ce n’est pas une caméra.', 'Royalty-free photo (CC0): this is not a camera.')}>
+        <div className="absolute top-10 left-2.5 rounded bg-black/55 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-warn uppercase" title={t('Photo libre de droits (CC0) : ce n’est pas une caméra.', 'Royalty-free photo (CC0): this is not a camera.')}>
           {t('Image fixe · démo', 'Still picture · demo')}
         </div>
         <div className="absolute bottom-2 left-2 rounded bg-black/55 px-1.5 py-0.5 font-mono text-[10px] text-fg/90 tabular">

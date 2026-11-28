@@ -98,11 +98,16 @@ pub(super) async fn delete(
     shared: &Shared,
     camera: String,
     day: String,
+    file: Option<String>,
 ) -> Result<usize, ControlError> {
     let root = root(shared)?;
-    let (c, d) = (camera.clone(), day.clone());
-    let removed = blocking(move || captures::delete_day(&root, &c, &d)).await?;
-    info!(%camera, day, pictures = removed, "kept pictures deleted");
+    let (c, d, f) = (camera.clone(), day.clone(), file.clone());
+    let removed = blocking(move || match f {
+        Some(f) => captures::delete_one(&root, &c, &d, &f).map(|()| 1),
+        None => captures::delete_day(&root, &c, &d),
+    })
+    .await?;
+    info!(%camera, day, file = file.as_deref().unwrap_or("all"), pictures = removed, "kept pictures deleted");
     Ok(removed)
 }
 
@@ -205,6 +210,8 @@ mod tests {
             score: 0.8,
             bbox: Some(bbox),
             zone: None,
+            plate: None,
+            plate_owner: None,
         }
     }
 

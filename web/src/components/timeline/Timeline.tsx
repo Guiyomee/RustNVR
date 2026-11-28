@@ -118,7 +118,7 @@ export const Timeline = memo(function Timeline({ rows, start, end, recordings, m
                 ))}
                 {rec?.map((p) => {
                   const style = clip(p)
-                  return style && <div key={`r${p.start}`} className="absolute inset-y-1.5 rounded-sm bg-accent" style={style} />
+                  return style && <div key={`r${p.start}`} className="absolute inset-y-1.5 rounded-sm bg-recorded" style={style} />
                 })}
                 {motion?.[row.id]?.map((p) => {
                   const style = clip(p)
@@ -205,7 +205,7 @@ function TimelineLegend({ motionAvailable, eventsAvailable, showCursor, showBook
   return (
     <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-1 pl-24 text-xs text-muted sm:pl-32">
       <li className="flex items-center gap-1.5">
-        <span className="h-2.5 w-4 rounded-sm bg-accent" aria-hidden />{t(' Enregistré', ' Recorded')}
+        <span className="h-2.5 w-4 rounded-sm bg-recorded" aria-hidden />{t(' Enregistré', ' Recorded')}
       </li>
       <li className={`flex items-center gap-1.5 ${motionAvailable ? '' : 'opacity-60'}`}>
         <span className="h-1.5 w-4 rounded-sm bg-motion" aria-hidden />{t(' Mouvement', ' Motion')}{!motionAvailable && t(' (non disponible)', ' (not available)')}

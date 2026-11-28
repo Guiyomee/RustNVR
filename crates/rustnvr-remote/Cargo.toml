@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 object_store = { version = "0.14.2", default-features = false, features = ["aws"] }
 russh = "0.65.0"
-russh-sftp = "3.0.1"
+russh-sftp = "4.0.0"
 rustnvr-core.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 tokio-util.workspace = true

@@ -110,7 +110,7 @@ fn file_part(s: &str) -> String {
 /// Keeps `jpeg` and what was found in it. Blocking.
 pub fn save(root: &Path, camera: &CameraId, jpeg: &[u8], capture: &Capture) -> io::Result<PathBuf> {
     let at = jiff::Timestamp::from_millisecond(capture.at_ms).map_err(io::Error::other)?;
-    let utc = at.to_zoned(jiff::tz::TimeZone::UTC);
+    let utc = at.to_zoned_datetime(jiff::tz::TimeZone::UTC);
     let dir = day_dir(root, camera.as_str(), &utc.date().to_string())?;
     std::fs::create_dir_all(&dir)?;
     let source = match (&capture.event, &capture.line) {
@@ -203,6 +203,20 @@ pub fn read(root: &Path, camera: &str, day: &str, file: &str) -> io::Result<Vec<
     std::fs::read(day_dir(root, camera, day)?.join(file))
 }
 
+/// Deletes the picture `file` of `camera` on `day`, with its `.json`.
+/// Blocking.
+pub fn delete_one(root: &Path, camera: &str, day: &str, file: &str) -> io::Result<()> {
+    if !valid_file(file) {
+        return Err(invalid("nom de fichier invalide"));
+    }
+    let dir = day_dir(root, camera, day)?;
+    std::fs::remove_file(dir.join(file))?;
+    let _ = std::fs::remove_file(dir.join(format!("{}.json", file.trim_end_matches(".jpg"))));
+    // The last picture of the day: the folder goes too.
+    let _ = std::fs::remove_dir(&dir);
+    Ok(())
+}
+
 /// Deletes the pictures of `camera` on `day`; how many. Blocking.
 pub fn delete_day(root: &Path, camera: &str, day: &str) -> io::Result<usize> {
     let dir = day_dir(root, camera, day)?;
@@ -217,7 +231,7 @@ pub fn prune(root: &Path, days: u32, now_ms: i64) -> usize {
     let Ok(now) = jiff::Timestamp::from_millisecond(now_ms) else {
         return 0;
     };
-    let today = now.to_zoned(jiff::tz::TimeZone::UTC).date();
+    let today = now.to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
     let Ok(oldest) = today.checked_sub(jiff::Span::new().days(i64::from(days))) else {
         return 0;
     };
@@ -250,6 +264,8 @@ mod tests {
                 score: 0.81,
                 bbox: Some([0.1, 0.2, 0.3, 0.9]),
                 zone: None,
+                plate: None,
+                plate_owner: None,
             }],
             kept: vec!["person".into()],
         }
@@ -305,7 +321,13 @@ mod tests {
         // Older than 0 days before 2026-11-05: the 4th goes.
         assert_eq!(prune(root, 0, t), 1);
         assert_eq!(days(root).len(), 1);
-        assert_eq!(delete_day(root, "garage", "2026-11-05").expect("delete"), 2);
+        // One picture, with its `.json`; never outside the folder.
+        assert!(delete_one(root, "garage", "2026-11-05", "../../x.jpg").is_err());
+        delete_one(root, "garage", "2026-11-05", &pictures[1].0).expect("delete one");
+        assert_eq!(list(root, "garage", "2026-11-05").expect("list").len(), 1);
+        let json = pictures[1].0.replace(".jpg", ".json");
+        assert!(!root.join(".captures/garage/2026-11-05").join(json).exists());
+        assert_eq!(delete_day(root, "garage", "2026-11-05").expect("delete"), 1);
         assert!(days(root).is_empty());
     }
 }

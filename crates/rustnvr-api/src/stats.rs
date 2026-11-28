@@ -65,7 +65,7 @@ fn compute(
     let local = |ms: i64| {
         jiff::Timestamp::from_millisecond(ms)
             .ok()
-            .map(|t| t.to_zoned(tz.clone()))
+            .map(|t| t.to_zoned_datetime(tz.clone()))
     };
     let from_ms = now_ms - i64::from(days) * DAY_MS;
     // Every day of the period, even without events.
@@ -185,7 +185,7 @@ fn count_crossings(
     let local = |ms: i64| {
         jiff::Timestamp::from_millisecond(ms)
             .ok()
-            .map(|t| t.to_zoned(tz.clone()))
+            .map(|t| t.to_zoned_datetime(tz.clone()))
     };
     let from_ms = now_ms - i64::from(days) * DAY_MS;
     let mut empty_days: BTreeMap<String, u64> = BTreeMap::new();

@@ -212,6 +212,59 @@ requête conforme, filtres par étiquette et confiance, cadres convertis en
 fractions de l'image, objets dans l'API, MQTT et l'interface, comportement
 quand le fournisseur est arrêté.
 
+## Lire les plaques d'immatriculation
+
+Paramètres → Intelligence artificielle → « Lire les plaques
+d'immatriculation » (`[ai] plates = true`), avec deux petits modèles à
+télécharger depuis la même page (`<data_dir>/models/`, empreinte SHA-256
+vérifiée) :
+
+| Modèle | Rôle | Taille | Licence |
+|---|---|---|---|
+| YOLOv9-t 384 de [open-image-models](https://github.com/ankandrew/open-image-models) | trouve la plaque sur le véhicule | 7,8 Mo | MIT |
+| CCT-S v2 de [fast-plate-ocr](https://github.com/ankandrew/fast-plate-ocr) | lit ses lettres et chiffres (plus de 60 pays) | 5,3 Mo | MIT |
+
+Licences : code et poids sous MIT selon leur auteur (réponses dans les
+tickets des deux dépôts) ; le détecteur a été entraîné avec une copie de
+YOLOv9 (GPL-3.0) sur ≈ 11 000 photos collectées sur le web, le lecteur sur
+≈ 600 000 plaques d'une collection privée. Pas d'AGPL ; les données
+d'entraînement ne sont pas publiées. Rien n'est livré avec RustNVR :
+l'utilisateur les télécharge.
+
+Fonctionnement : quand la reconnaissance trouve une voiture, un camion, un
+bus ou une moto (quel que soit le fournisseur, intégré ou HTTP), RustNVR
+prend une image du **flux principal** (1920 pixels de large : celle du
+sous-flux, 640 pixels, donne des plaques d'une trentaine de pixels),
+découpe chaque véhicule (4 au plus, avec une marge de 15 %), y cherche la
+plaque, puis la lit. La plaque (`"plate": "AB123CD"`, lettres et chiffres
+sans tirets) s'ajoute à l'objet du véhicule : dans l'événement, l'API, MQTT
+et les webhooks (`{plaque}`). Événements → « Plaque » cherche un morceau de
+plaque (`GET /events?plate=AB-123`).
+
+**Plaques connues** (même page, `[[ai.known_plates]]` avec `plate` et
+`name`, 500 au plus) : une plaque lue qui en fait partie (tirets, espaces et
+casse ignorés) porte son nom, `plate_owner` dans l'objet (« AB-123-CD
+(Paul) » dans l'interface, `{plaque}` et `{objets}` des notifications,
+MQTT). Gardées dans `ai.ui.toml`, donc dans les sauvegardes de la
+configuration.
+
+Une plaque n'est gardée que si elle est entière (pas coupée par le bord de
+l'image), large d'au moins 60 pixels, longue d'au moins 5 caractères, et si
+chaque caractère est lu avec une probabilité d'au moins 0,95 : mieux vaut
+rien qu'une plaque fausse.
+
+Essai (24/11, 89 photos libres de Wikimedia Commons avec des plaques
+françaises, YOLOX-s pour les véhicules) : 86 lectures, une cinquantaine de
+plaques différentes, toutes justes sauf deux lectures incomplètes (une
+plaque cachée en partie par un poteau, une vieille plaque abîmée). Avant
+les règles ci-dessus, au seuil 0,9 : une plaque coupée par le bord, un
+chiffre mal lu (`3069SX25` pour `0069SX25`) et des plaques belges de
+moins de 50 pixels douteuses. Temps pour lire les véhicules d'une image
+(2 cœurs de la VM de test) : **146 ms** médiane avec ONNX Runtime, ≈ 950 ms
+avec tract (image Docker), mêmes plaques lues avec les deux.
+⚠ Pas encore essayé sur de vraies caméras : de nuit (infrarouge, reflets
+de la plaque), en mouvement et de biais, la lecture sera moins bonne.
+
 ## Rejouer l'IA sur de vraies images
 
 Paramètres → Intelligence artificielle → « Garder les images analysées » :

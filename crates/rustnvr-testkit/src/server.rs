@@ -57,6 +57,9 @@ pub struct MockServerConfig {
     /// Also offer a G.711 µ-law audio track (8 kHz mono, a 440 Hz tone),
     /// sent with the video when the client sets it up.
     pub pcmu_audio: bool,
+    /// With `pcmu_audio`, leave the audio track out of the first this many
+    /// connections (cameras that offer it only once awake).
+    pub audio_after_connections: u64,
 }
 
 impl MockServerConfig {
@@ -73,6 +76,7 @@ impl MockServerConfig {
             drop_fragment_start_every: None,
             marker: true,
             pcmu_audio: false,
+            audio_after_connections: 0,
         }
     }
 }
@@ -286,6 +290,8 @@ struct Connection<'a> {
     config: &'a MockServerConfig,
     stats: &'a ServerStats,
     base: String,
+    /// This connection offers the audio track.
+    audio: bool,
     playing: bool,
     channel: u8,
     /// Interleaved channel of the audio track, once set up.
@@ -306,10 +312,13 @@ enum Outcome {
 
 impl<'a> Connection<'a> {
     fn new(config: &'a MockServerConfig, stats: &'a ServerStats, base: String) -> Self {
+        // `connections` already counts this one.
+        let number = stats.connections.load(Ordering::SeqCst);
         Self {
             config,
             stats,
             base,
+            audio: config.pcmu_audio && number > config.audio_after_connections,
             playing: false,
             channel: 0,
             audio_channel: None,
@@ -469,7 +478,7 @@ impl<'a> Connection<'a> {
                     .and_then(|p| p.split('-').next())
                     .and_then(|c| c.parse().ok())
                     .unwrap_or(0);
-                let ssrc = if self.config.pcmu_audio && req.uri.ends_with("trackID=1") {
+                let ssrc = if self.audio && req.uri.ends_with("trackID=1") {
                     self.audio_channel = Some(channel);
                     AUDIO_SSRC
                 } else {
@@ -544,7 +553,7 @@ impl<'a> Connection<'a> {
              a=rtpmap:{PAYLOAD_TYPE} {rtpmap}\r\na=fmtp:{PAYLOAD_TYPE} {fmtp}\r\n\
              a=framerate:{}\r\na=control:trackID=0\r\n{}",
             f.fps,
-            if self.config.pcmu_audio {
+            if self.audio {
                 "m=audio 0 RTP/AVP 0\r\nc=IN IP4 0.0.0.0\r\na=rtpmap:0 PCMU/8000\r\na=control:trackID=1\r\n"
             } else {
                 ""

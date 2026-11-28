@@ -15,6 +15,8 @@ export interface EventQuery {
   kinds: EventKind[] | null
   /** Only events in one of these zones (motion zones, or the zone of a recognized object); null: all. */
   zones?: string[] | null
+  /** Only events with a plate read containing this text (letters and digits); null: all. */
+  plate?: string | null
 }
 
 export interface DataSource {

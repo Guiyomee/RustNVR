@@ -314,6 +314,8 @@ export interface AiSettings {
   watch_seconds?: number
   /** Keep every analysed picture in the default destination, to replay the AI on them. */
   keep_pictures?: boolean
+  /** Read the plate of the vehicles recognized (built-in plate models, on a picture of the main stream). Absent (older server): off. */
+  plates?: boolean
   /**
    * A higher confidence at night: from `from` to `to` (local time of the
    * server, `HH:MM`, across midnight when `from` is later), or with
@@ -321,6 +323,15 @@ export interface AiSettings {
    * while that is not known yet).
    */
   night?: { min_score: number; when?: 'hours' | 'night_vision'; from: string; to: string } | null
+  /** Plates known by their owner; absent: none. */
+  known_plates?: KnownPlate[]
+}
+
+/** A license plate known by its owner (`ai.known_plates`). */
+export interface KnownPlate {
+  /** `AB-123-CD`: separators and case do not matter. */
+  plate: string
+  name: string
 }
 
 /** GET /api/v1/ai. */
@@ -341,6 +352,8 @@ export interface AiView {
   managed: boolean
   /** Models of the built-in recognition that can be downloaded. */
   models: AiModel[]
+  /** The two plate models (detector, reader), both needed for `settings.plates`. Absent: older server. */
+  plate_models?: AiModel[]
 }
 
 /** A downloadable model (`POST /api/v1/ai/models/{id}`). */
@@ -704,6 +717,10 @@ export interface DetectedObject {
   bbox?: [number, number, number, number]
   /** Detection zone the object is in. */
   zone?: string
+  /** License plate read on this vehicle (`AB123CD`), with `ai.plates`. */
+  plate?: string
+  /** Owner of that plate, when it is one of `ai.known_plates`. */
+  plate_owner?: string
 }
 
 /** `[recording]` of the configuration. */

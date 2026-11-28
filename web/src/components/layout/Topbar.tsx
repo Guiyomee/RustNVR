@@ -1,30 +1,39 @@
-import { Bell, CircleUser, Cpu, HardDrive, Gpu, MemoryStick, Menu, ShieldAlert, Video } from 'lucide-react'
+import { Bell, CircleUser, ShieldAlert } from 'lucide-react'
 import { busiestGpu, computeGpus, gpuStatusLabel } from '../../lib/gpu'
 import type { ReactNode } from 'react'
 import { useData, useLive } from '../../data/DataContext'
 import { useGlobalStatus } from '../../hooks/useSystemStatus'
 import { destinationsDefaultFirst, diskPercent, useStorage } from '../../hooks/useStorage'
-import { formatBytes, formatNumber, formatPercent, formatTime } from '../../lib/format'
+import { formatBytes, formatDate, formatNumber, formatPercent, formatTime } from '../../lib/format'
+import { useNow } from '../../hooks/useUi'
 import { useAuth } from '../../auth/AuthGate'
-import { navigate } from '../../lib/router'
+import { Link, navigate } from '../../lib/router'
+import { Logo } from './Logo'
 import { Button, IconButton } from '../ui/Button'
 import { Popover } from '../ui/Popover'
-import { StatusDot, toneText } from '../ui/StatusIndicator'
+import type { Tone } from '../ui/StatusIndicator'
 import { t } from '../../lib/i18n'
 
-function Metric({ icon, label, value, title, warn = false }: { icon: ReactNode; label: string; value: string; title?: string; warn?: boolean }) {
+/** One figure of the bar: a muted label and its value in monospace. */
+function Metric({ label, value, title, warn = false }: { label: string; value: ReactNode; title?: string; warn?: boolean }) {
   return (
-    <div className="hidden items-center gap-2 xl:flex" title={title}>
-      <span className="text-muted" aria-hidden>
-        {icon}
-      </span>
-      <div className="leading-tight">
-        <div className="text-[11px] text-muted">{label}</div>
-        <div className={`tabular text-sm font-medium ${warn ? 'text-warn' : ''}`}>{value}</div>
-      </div>
+    <div className="hidden items-baseline gap-2 xl:flex" title={title}>
+      <dt className="text-xs text-muted">{label}</dt>
+      <dd className={`m-0 font-mono text-[13px] ${warn ? 'text-warn' : ''}`}>{value}</dd>
     </div>
   )
 }
+
+const PILL: Record<Tone, string> = {
+  ok: 'bg-ok/12 text-ok',
+  warn: 'bg-warn/12 text-warn',
+  err: 'bg-err/12 text-err',
+  info: 'bg-info/12 text-info',
+  neutral: 'bg-card text-muted',
+}
+const PILL_DOT: Record<Tone, string> = { ok: 'bg-ok', warn: 'bg-warn', err: 'bg-err', info: 'bg-info', neutral: 'bg-muted' }
+
+
 
 function Notifications() {
   const { source } = useData()
@@ -63,7 +72,7 @@ function Notifications() {
           <ul className="divide-y divide-line">
             {notifications.map((n) => (
               <li key={n.id} className="flex gap-3 px-4 py-2.5 text-sm">
-                <span className={`mt-1.5 size-2 shrink-0 rounded-full ${n.level === 'error' ? 'bg-err' : n.level === 'warning' ? 'bg-warn' : 'bg-accent'}`} aria-hidden />
+                <span className={`mt-1.5 size-2 shrink-0 rounded-full ${n.level === 'error' ? 'bg-err' : n.level === 'warning' ? 'bg-warn' : 'bg-info'}`} aria-hidden />
                 <div className="min-w-0">
                   <p className="break-words">{n.message}</p>
                   <p className="text-xs text-muted">{formatTime(n.at, true)}</p>
@@ -128,10 +137,11 @@ function Profile() {
   )
 }
 
-export function Topbar({ onOpenMenu }: { onOpenMenu: () => void }) {
+export function Topbar() {
   const status = useGlobalStatus()
   const system = useLive((s) => s.system)
   const { data: storage } = useStorage()
+  const now = useNow(1000)
   // RustNVR's own figures (the container under Docker, as `docker stats`),
   // never the whole machine.
   const scope = system?.service_scope
@@ -143,7 +153,6 @@ export function Topbar({ onOpenMenu }: { onOpenMenu: () => void }) {
         : scope === 'processes'
           ? t('RustNVR et ses FFmpeg', 'RustNVR and its FFmpeg')
           : t('Processus RustNVR', 'RustNVR process')
-  const suffix = scope === 'container' ? t(' (conteneur)', ' (container)') : ' (RustNVR)'
   const cpu = system?.service_cpu_percent ?? system?.process_cpu_percent
   const mem = system?.service_memory_bytes ?? system?.process_rss_bytes
   // Out of the container's limit, or of the machine's memory without one (as docker stats).
@@ -162,69 +171,63 @@ export function Topbar({ onOpenMenu }: { onOpenMenu: () => void }) {
     : ''
 
   return (
-    <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b border-line bg-bg/95 px-4 backdrop-blur lg:px-6">
-      <IconButton className="lg:hidden" label={t('Ouvrir le menu', 'Open the menu')} icon={<Menu className="size-5" />} onClick={onOpenMenu} />
+    <header className="sticky top-0 z-30 flex min-h-[60px] flex-wrap items-center gap-x-3 gap-y-2 sm:gap-x-7 lg:min-h-[72px] border-b border-line bg-bg/95 px-4 py-3 backdrop-blur lg:px-6">
+      {/* Phones: the mark leads home; the menu is « Plus » in the bottom bar. */}
+      <Link to="/" className="lg:hidden" aria-label={t("Vue d'ensemble", 'Overview')}>
+        <Logo compact />
+      </Link>
 
-      <div className="flex min-w-0 items-center gap-3" title={status.detail}>
-        <StatusDot tone={status.tone} label="" pulse={status.tone === 'ok'} />
-        <div className="min-w-0 leading-tight">
-          <div className="text-[11px] text-muted">{t('État du NVR', 'NVR state')}</div>
-          <div className={`truncate text-sm font-semibold ${toneText[status.tone]}`}>{status.label}</div>
-        </div>
-      </div>
+      <span className="hidden font-mono text-xs text-muted sm:inline">
+        {formatDate(now)} · {formatTime(now, true)}
+      </span>
 
-      <div className="ml-auto flex items-center gap-6">
-        <div className="hidden items-center gap-2 md:flex">
-          <Video className="size-4 text-muted" aria-hidden />
-          <div className="leading-tight">
-            <div className="text-[11px] text-muted">{t('Caméras', 'Cameras')}</div>
-            <div className="tabular text-sm font-medium">
-              {system ? t(`${system.cameras_online} / ${system.cameras_enabled} en ligne`, `${system.cameras_online} / ${system.cameras_enabled} online`) : '—'}
-            </div>
-          </div>
-        </div>
-        <Metric
-          icon={<Cpu className="size-4" />}
-          label={`CPU${suffix}`}
-          value={formatPercent(cpu)}
-          title={t(`${who} : pourcentage d’un cœur (200 % = deux cœurs occupés).`, `${who}: percent of one core (200 % = two busy cores).`)}
-        />
-        <Metric
-          icon={<MemoryStick className="size-4" />}
-          label={`RAM${suffix}`}
-          value={mem == null ? '—' : memPct === null ? formatBytes(mem) : `${formatBytes(mem)} · ${formatPercent(memPct)}`}
-          title={
-            system?.service_memory_limit_bytes != null
-              ? t(`${who} : ${formatBytes(mem)} sur la limite de ${formatBytes(system.service_memory_limit_bytes)}.`, `${who}: ${formatBytes(mem)} out of the ${formatBytes(system.service_memory_limit_bytes)} limit.`)
-              : t(`${who} : ${formatBytes(mem)}, pourcentage de la mémoire de la machine (${formatBytes(system?.memory_total_bytes)}, aucune limite fixée).`, `${who}: ${formatBytes(mem)}, percent of the machine's memory (${formatBytes(system?.memory_total_bytes)}, no limit set).`)
-          }
-        />
-        {gpus.length > 0 && (
+      <span title={status.detail} className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-[13px] font-medium ${PILL[status.tone]}`}>
+        <span className={`size-2 rounded-full ${PILL_DOT[status.tone]}`} aria-hidden />
+        {status.label}
+        {system && <span className="hidden sm:inline"> · {t(`${system.cameras_online} / ${system.cameras_enabled} caméras`, `${system.cameras_online} / ${system.cameras_enabled} cameras`)}</span>}
+      </span>
+
+      <div className="ml-auto flex items-center gap-2 sm:gap-6">
+        <dl className="m-0 flex flex-wrap items-center gap-x-6 gap-y-1">
           <Metric
-            icon={<Gpu className="size-4" />}
-            label="GPU"
-            value={formatPercent(busiest?.busy_percent)}
-            title={[
-              t('Occupation de toute la carte (tous ses utilisateurs, CodeProject.AI compris) :', 'Busy share of the whole card (all its users, CodeProject.AI included):'),
-              ...gpus.map((g) => `${g.name} : ${g.busy_percent === null ? t('occupation inconnue', 'busy share unknown') : formatPercent(g.busy_percent)} · ${gpuStatusLabel(g)}`),
-            ].join('\n')}
+            label="CPU"
+            value={formatPercent(cpu)}
+            title={t(`${who} : pourcentage d’un cœur (200 % = deux cœurs occupés).`, `${who}: percent of one core (200 % = two busy cores).`)}
           />
-        )}
-        <Metric
-          icon={<HardDrive className="size-4" />}
-          label={t('Vidéos', 'Videos')}
-          value={storage ? `${formatBytes(storage.recordings_bytes)}${system?.storage_problems?.length ? t(' · dégradé', ' · degraded') : system?.low_space.length ? t(' · espace faible', ' · low space') : ''}` : '—'}
-          warn={Boolean(system?.low_space.length || system?.storage_problems?.length)}
-          title={[
-            t('Enregistrements de RustNVR, tous points de stockage :', 'RustNVR recordings, every destination:'),
-            perDestination,
-            ...(system?.storage_problems ?? []).map((p) => t(`Dégradé : ${p.name} — ${p.problem}`, `Degraded: ${p.name} — ${p.problem}`)),
-            system?.low_space.length ? t(`Espace faible : ${system.low_space.join(', ')}`, `Low space: ${system.low_space.join(', ')}`) : '',
-          ]
-            .filter(Boolean)
-            .join('\n')}
-        />
-        <div className="flex items-center gap-1">
+          <Metric
+            label="RAM"
+            value={mem == null ? '—' : memPct === null ? formatBytes(mem) : `${formatBytes(mem)} · ${formatPercent(memPct)}`}
+            title={
+              system?.service_memory_limit_bytes != null
+                ? t(`${who} : ${formatBytes(mem)} sur la limite de ${formatBytes(system.service_memory_limit_bytes)}.`, `${who}: ${formatBytes(mem)} out of the ${formatBytes(system.service_memory_limit_bytes)} limit.`)
+                : t(`${who} : ${formatBytes(mem)}, pourcentage de la mémoire de la machine (${formatBytes(system?.memory_total_bytes)}, aucune limite fixée).`, `${who}: ${formatBytes(mem)}, percent of the machine's memory (${formatBytes(system?.memory_total_bytes)}, no limit set).`)
+            }
+          />
+          {gpus.length > 0 && (
+            <Metric
+              label="GPU"
+              value={formatPercent(busiest?.busy_percent)}
+              title={[
+                t('Occupation de toute la carte (tous ses utilisateurs, CodeProject.AI compris) :', 'Busy share of the whole card (all its users, CodeProject.AI included):'),
+                ...gpus.map((g) => `${g.name} : ${g.busy_percent === null ? t('occupation inconnue', 'busy share unknown') : formatPercent(g.busy_percent)} · ${gpuStatusLabel(g)}`),
+              ].join('\n')}
+            />
+          )}
+          <Metric
+            label={t('Vidéos', 'Videos')}
+            value={storage ? `${formatBytes(storage.recordings_bytes)}${system?.storage_problems?.length ? t(' · dégradé', ' · degraded') : system?.low_space.length ? t(' · espace faible', ' · low space') : ''}` : '—'}
+            warn={Boolean(system?.low_space.length || system?.storage_problems?.length)}
+            title={[
+              t('Enregistrements de RustNVR, tous points de stockage :', 'RustNVR recordings, every destination:'),
+              perDestination,
+              ...(system?.storage_problems ?? []).map((p) => t(`Dégradé : ${p.name} — ${p.problem}`, `Degraded: ${p.name} — ${p.problem}`)),
+              system?.low_space.length ? t(`Espace faible : ${system.low_space.join(', ')}`, `Low space: ${system.low_space.join(', ')}`) : '',
+            ]
+              .filter(Boolean)
+              .join('\n')}
+          />
+        </dl>
+        <div className="flex items-center gap-2">
           <Notifications />
           <Profile />
         </div>

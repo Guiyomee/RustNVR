@@ -14,6 +14,7 @@ pub mod auth;
 mod backup;
 mod bookmarks;
 pub mod control;
+mod deletion;
 mod detection;
 mod devices;
 mod discovery;

@@ -39,6 +39,27 @@ async fn http(
     (status, json)
 }
 
+/// A GET answered with bytes: the status and the body.
+async fn get_bytes(addr: SocketAddr, path: &str) -> (u16, Vec<u8>) {
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n");
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).await.unwrap();
+    let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8_lossy(&raw[..head_end]);
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, raw[head_end + 4..].to_vec())
+}
+
+/// Whether `ffmpeg -version` runs here.
+fn ffmpeg_installed() -> bool {
+    std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn add_edit_test_and_delete_a_camera_from_the_api() {
     let dir = tempfile::tempdir().unwrap();
@@ -230,23 +251,72 @@ async fn add_edit_test_and_delete_a_camera_from_the_api() {
     })
     .await
     .expect("records to the destination");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let (_, recs) = http(
+    // The file is there; the index may list it a moment later (loaded VM).
+    let recs = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            let (_, recs) = http(
+                addr,
+                "GET",
+                &format!(
+                    "/api/v1/cameras/distante/recordings?from={}&to={}",
+                    now - 600_000,
+                    now + 1000
+                ),
+                None,
+            )
+            .await;
+            if recs.as_array().is_some_and(|a| !a.is_empty()) {
+                return recs;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("the recording is listed");
+    let url = recs[0]["url"].as_str().unwrap().to_owned();
+    assert!(url.starts_with("/api/v1/recordings/nas/distante/"), "{url}");
+    // Its picture (page Vidéos): a JPEG, made by FFmpeg when installed.
+    if ffmpeg_installed() {
+        let (status, body) = get_bytes(addr, &format!("{url}?thumbnail=1")).await;
+        assert_eq!(status, 200);
+        assert!(body.starts_with(&[0xff, 0xd8]), "a JPEG");
+    }
+
+    // Deleting a recording by hand: never in a protected period.
+    let (start, end) = (
+        recs[0]["start_ms"].as_i64().unwrap(),
+        recs[0]["end_ms"].as_i64().unwrap(),
+    );
+    let (status, kept) = http(
         addr,
-        "GET",
-        &format!(
-            "/api/v1/cameras/distante/recordings?from={}&to={}",
-            now - 600_000,
-            now + 1000
-        ),
+        "POST",
+        "/api/v1/protected",
+        Some(&format!(
+            r#"{{"camera":"distante","start_ms":{start},"end_ms":{end}}}"#
+        )),
+    )
+    .await;
+    assert!(status < 300, "{kept}");
+    let (status, err) = http(addr, "DELETE", &url, None).await;
+    assert_eq!(status, 409, "{err}");
+    let id = kept["id"].as_i64().unwrap();
+    let (status, _) = http(addr, "DELETE", &format!("/api/v1/protected/{id}"), None).await;
+    assert!(status < 300);
+    let (status, err) = http(addr, "DELETE", &url, None).await;
+    assert_eq!(status, 204, "{err}");
+    assert_eq!(http(addr, "GET", &url, None).await.0, 404);
+    let (status, _) = http(
+        addr,
+        "DELETE",
+        "/api/v1/recordings/nas/distante/2026-11-05/x.mp4",
         None,
     )
     .await;
-    let url = recs[0]["url"].as_str().unwrap().to_owned();
-    assert!(url.starts_with("/api/v1/recordings/nas/distante/"), "{url}");
+    assert_eq!(status, 400, "a name that is not a recording");
 
     // In use: cannot be removed.
     let (status, err) = http(addr, "DELETE", "/api/v1/storage/destinations/nas", None).await;
@@ -776,6 +846,24 @@ async fn onvif_camera_record_and_restart() {
     let config = Config::load_with_env(&config_path, |_| None).unwrap();
     let nvr = Nvr::start(&config, event_bus(256)).await.unwrap();
     let addr = nvr.web_addr().unwrap();
+    let count = |what: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.contains(what))
+            .count()
+    };
+    // At startup, the record then the presets are read in the background
+    // (the presets ask `GetCapabilities`): wait for it, or its request could
+    // land in the middle of the counts below on a busy machine.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while count("GetCapabilities") == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the record was not read at startup"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let (status, device) = http(addr, "GET", "/api/v1/cameras/salon/device", None).await;
     assert_eq!(status, 200, "{device}");
@@ -796,13 +884,6 @@ async fn onvif_camera_record_and_restart() {
         )
     );
     // Kept: asking again does not call the camera; `refresh=1` does.
-    let count = |what: &str| {
-        seen.lock()
-            .unwrap()
-            .iter()
-            .filter(|r| r.contains(what))
-            .count()
-    };
     let read = count("GetDeviceInformation");
     let _ = http(addr, "GET", "/api/v1/cameras/salon/device", None).await;
     assert_eq!(count("GetDeviceInformation"), read);

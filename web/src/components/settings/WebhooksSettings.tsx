@@ -55,8 +55,8 @@ const COOLDOWN_MAX = 1440
 /** Default title and text of each kind of call (shown as examples), and its variables. */
 const MESSAGE_HELP: Record<WebhookEvent, { title: string; text: string; vars: string[] }> = {
   motion: { title: 'Mouvement · {camera}', text: 'Zones : {zones}', vars: ['camera', 'objet', 'zones', 'heure', 'date'] },
-  objects: { title: '{objet} · {camera}', text: '{objets}\nZones : {zones}', vars: ['camera', 'objet', 'objets', 'zones', 'heure', 'date'] },
-  end: { title: 'Fin de l’événement · {camera}', text: '{objets}\nDurée : {duree}', vars: ['camera', 'objet', 'objets', 'zones', 'duree', 'heure', 'date'] },
+  objects: { title: '{objet} · {camera}', text: '{objets}\nZones : {zones}', vars: ['camera', 'objet', 'objets', 'plaque', 'zones', 'heure', 'date'] },
+  end: { title: 'Fin de l’événement · {camera}', text: '{objets}\nDurée : {duree}', vars: ['camera', 'objet', 'objets', 'plaque', 'zones', 'duree', 'heure', 'date'] },
   crossing: { title: '{objet} · {ligne} · {camera}', text: 'Ligne « {ligne} » franchie {sens}.\nAujourd’hui : {compte}', vars: ['camera', 'ligne', 'sens', 'compte', 'objet', 'heure', 'date'] },
   storage: { title: 'Stockage {etat} · {stockage}', text: '{erreur}', vars: ['stockage', 'etat', 'erreur', 'heure', 'date'] },
   camera: { title: 'Caméra {etat} · {camera}', text: 'Sans image depuis {duree}. {erreur}', vars: ['camera', 'etat', 'erreur', 'duree', 'heure', 'date'] },

@@ -57,6 +57,20 @@ pub struct EventFilter {
     /// Only events in one of these zones (motion zones, or the zone of a
     /// recognized object).
     pub zones: Option<Vec<String>>,
+    /// Only events with a plate read containing this text (capital letters
+    /// and digits only: anything else never matches).
+    pub plate: Option<String>,
+}
+
+/// What [`Database::delete_event`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventDeletion {
+    /// Deleted, with its thumbnail.
+    Deleted,
+    /// No such event.
+    Missing,
+    /// Still going on: kept.
+    Ongoing,
 }
 
 /// A finished recording segment in the index.
@@ -399,6 +413,18 @@ impl Database {
         let cameras = f.cameras.as_ref().map(serde_json::to_string).transpose()?;
         let objects = f.objects.as_ref().map(serde_json::to_string).transpose()?;
         let zones = f.zones.as_ref().map(serde_json::to_string).transpose()?;
+        // Letters and digits only, so no LIKE wildcard gets in.
+        let plate = f
+            .plate
+            .as_deref()
+            .filter(|p| {
+                p.bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            })
+            .map(|p| format!("%{p}%"));
+        if f.plate.is_some() && plate.is_none() {
+            return Ok(Vec::new());
+        }
         // An ongoing event (end_ms NULL) overlaps any period after its start.
         let rows = sqlx::query(
             "SELECT * FROM events \
@@ -410,6 +436,8 @@ impl Database {
                   WHERE z.value IN (SELECT value FROM json_each(?7))) \
                   OR EXISTS (SELECT 1 FROM json_each(events.objects) o \
                   WHERE json_extract(o.value, '$.zone') IN (SELECT value FROM json_each(?7)))) \
+             AND (?8 IS NULL OR EXISTS (SELECT 1 FROM json_each(events.objects) o \
+                  WHERE json_extract(o.value, '$.plate') LIKE ?8)) \
              ORDER BY start_ms DESC LIMIT ?4",
         )
         .bind(f.camera.as_ref().map(CameraId::as_str))
@@ -419,6 +447,7 @@ impl Database {
         .bind(cameras)
         .bind(objects)
         .bind(zones)
+        .bind(plate)
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(event_from_row).collect()
@@ -448,6 +477,51 @@ impl Database {
         .await
         .map_err(std::io::Error::other)?;
         Ok(deleted)
+    }
+
+    /// Deletes one finished event with its thumbnail. The other events of
+    /// its journey stay together: the journey is then named after the first
+    /// one left, and is no journey any more with a single event.
+    pub async fn delete_event(&self, id: i64) -> Result<EventDeletion, DbError> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT end_ms, thumbnail, journey FROM events WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(row) = row else {
+            return Ok(EventDeletion::Missing);
+        };
+        let end: Option<i64> = row.try_get("end_ms")?;
+        if end.is_none() {
+            return Ok(EventDeletion::Ongoing);
+        }
+        let thumbnail: Option<String> = row.try_get("thumbnail")?;
+        let journey: Option<i64> = row.try_get("journey")?;
+        sqlx::query("DELETE FROM events WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        if let Some(journey) = journey {
+            let left: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM events WHERE journey = ? ORDER BY start_ms, id")
+                    .bind(journey)
+                    .fetch_all(&mut *tx)
+                    .await?;
+            let named = (left.len() > 1).then(|| left[0]);
+            if named != Some(journey) {
+                sqlx::query("UPDATE events SET journey = ? WHERE journey = ?")
+                    .bind(named)
+                    .bind(journey)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        tx.commit().await?;
+        if let Some(t) = thumbnail {
+            let path = self.thumbnails.join(t);
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        Ok(EventDeletion::Deleted)
     }
 
     /// Motion detection settings of every camera that has some.
@@ -1390,6 +1464,8 @@ mod tests {
             score: 0.9,
             bbox: Some([0.1, 0.2, 0.3, 0.4]),
             zone: Some("Allée".into()),
+            plate: None,
+            plate_owner: None,
         };
         db.set_objects(e1.id, std::slice::from_ref(&person))
             .await
@@ -1408,6 +1484,7 @@ mod tests {
                 limit: 10,
                 objects: None,
                 zones: None,
+                plate: None,
             })
             .await
             .expect("list");
@@ -1428,6 +1505,7 @@ mod tests {
             limit: 10,
             objects: objects.map(|o| o.iter().map(|s| (*s).to_owned()).collect()),
             zones: zones.map(|z| z.iter().map(|s| (*s).to_owned()).collect()),
+            plate: None,
         };
         let ids = |list: Vec<DetectionEvent>| list.iter().map(|e| e.id).collect::<Vec<_>>();
         let found = db
@@ -1450,6 +1528,27 @@ mod tests {
             .await
             .expect("zones");
         assert!(found.is_empty());
+        // By a part of a plate read on a vehicle of the event.
+        let car = DetectedObject {
+            label: "car".into(),
+            score: 0.8,
+            bbox: Some([0.5, 0.5, 0.9, 0.9]),
+            zone: None,
+            plate: Some("AB123CD".into()),
+            plate_owner: None,
+        };
+        db.set_objects(e2.id, &[car]).await.expect("objects");
+        let by_plate = |plate: &str| EventFilter {
+            plate: Some(plate.to_owned()),
+            ..search(None, None)
+        };
+        let found = db.events(&by_plate("123C")).await.expect("plate");
+        assert_eq!(ids(found), vec![e2.id]);
+        let found = db.events(&by_plate("ZZ999")).await.expect("plate");
+        assert!(found.is_empty());
+        // A wildcard is never a search.
+        let found = db.events(&by_plate("%")).await.expect("plate");
+        assert!(found.is_empty());
         // Ongoing events overlap any later period.
         let later = db
             .events(&EventFilter {
@@ -1460,6 +1559,7 @@ mod tests {
                 limit: 10,
                 objects: None,
                 zones: None,
+                plate: None,
             })
             .await
             .expect("list");
@@ -1474,6 +1574,7 @@ mod tests {
                 limit: 10,
                 objects: None,
                 zones: None,
+                plate: None,
             })
             .await
             .expect("list");
@@ -1639,6 +1740,7 @@ mod tests {
                     limit,
                     objects: None,
                     zones: None,
+                    plate: None,
                 })
                 .await
                 .expect("events")
@@ -1780,6 +1882,7 @@ mod tests {
                 limit: 10,
                 objects: None,
                 zones: None,
+                plate: None,
             })
             .await
             .expect("list");
@@ -1959,6 +2062,51 @@ mod tests {
             None
         );
         assert!(db.journey_events(other.id).await.expect("none").is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_an_event_keeps_its_journey_together() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db = Database::open(dir.path()).await.expect("open");
+        let mut ids = Vec::new();
+        for (camera, start) in [("sonnette", 1_000), ("entree", 9_000), ("garage", 20_000)] {
+            let mut e = db
+                .start_event(&cam(camera), EventKind::Motion, start, 0.2, &[])
+                .await
+                .expect("start");
+            e.end_ms = Some(start + 5_000);
+            db.update_event(&e).await.expect("end");
+            ids.push(e.id);
+        }
+        db.set_journey(&ids, ids[0]).await.expect("join");
+        let ongoing = db
+            .start_event(&cam("jardin"), EventKind::Motion, 30_000, 0.2, &[])
+            .await
+            .expect("ongoing");
+        assert_eq!(
+            db.delete_event(ongoing.id).await.expect("del"),
+            EventDeletion::Ongoing
+        );
+        assert_eq!(
+            db.delete_event(999).await.expect("del"),
+            EventDeletion::Missing
+        );
+
+        // The first one goes: the journey is named after the next one.
+        assert_eq!(
+            db.delete_event(ids[0]).await.expect("del"),
+            EventDeletion::Deleted
+        );
+        assert!(db.event(ids[0]).await.expect("get").is_none());
+        let journey = db.journey_events(ids[1]).await.expect("journey");
+        assert_eq!(journey.len(), 2);
+        // One event left: no journey any more.
+        assert_eq!(
+            db.delete_event(ids[2]).await.expect("del"),
+            EventDeletion::Deleted
+        );
+        let left = db.event(ids[1]).await.expect("get").expect("kept");
+        assert_eq!(left.journey, None);
     }
 
     #[tokio::test]

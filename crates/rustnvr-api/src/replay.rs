@@ -57,7 +57,18 @@ pub(crate) async fn delete(
     State(state): State<Arc<ApiState>>,
     Path((camera, day)): Path<(String, String)>,
 ) -> Result<Json<Deleted>, ApiError> {
-    let deleted = control(&state)?.delete_captures(camera, day).await?;
+    let deleted = control(&state)?.delete_captures(camera, day, None).await?;
+    Ok(Json(Deleted { deleted }))
+}
+
+/// `DELETE /ai/captures/{camera}/{day}/{file}`: deletes one kept picture.
+pub(crate) async fn delete_picture(
+    State(state): State<Arc<ApiState>>,
+    Path((camera, day, file)): Path<(String, String, String)>,
+) -> Result<Json<Deleted>, ApiError> {
+    let deleted = control(&state)?
+        .delete_captures(camera, day, Some(file))
+        .await?;
     Ok(Json(Deleted { deleted }))
 }
 

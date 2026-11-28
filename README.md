@@ -37,15 +37,17 @@ fictional cameras and events, nothing to install.
   NAS is away.
 - **Home Assistant** over MQTT, with no integration to install: motion,
   recognized objects, status, recording, last picture, PTZ position; and the
-  whole interface in Home Assistant's side panel (« RustNVR Proxy » app).
+  whole interface in Home Assistant's side panel (« RustNVR Proxy » app of
+  [RustNVR-HomeAssistant](https://github.com/Guiyomee/RustNVR-HomeAssistant)).
 - **One connection to the camera**: RustNVR can republish its streams over
   RTSP, without converting them, for Home Assistant, Frigate or VLC.
-- **Wherever you like**: Docker, a Proxmox LXC container in one command, or a
-  service on Debian / Ubuntu.
+- **Wherever you like**: Docker, a Proxmox LXC container in one command, a
+  service on Debian / Ubuntu, or (since 2026.11.11, beta) an app of Home
+  Assistant OS; since 2026.11.11, also on ARM 64-bit (Raspberry Pi 4 and 5).
 
 ## Install
 
-**Docker** (image `ghcr.io/guiyomee/rustnvr`, Linux x86-64):
+**Docker** (image `ghcr.io/guiyomee/rustnvr`, Linux x86-64 and ARM 64-bit):
 
 ```sh
 mkdir rustnvr && cd rustnvr
@@ -157,7 +159,8 @@ Reference, in French: [MQTT](docs/MQTT.md) ·
 ## Support
 
 Feedback, a camera that does not work, an idea: open an
-[issue](https://github.com/Guiyomee/RustNVR/issues), in English or French.
+[issue](https://github.com/Guiyomee/RustNVR/issues) or ask on
+[Discord](https://discord.gg/6aDKTM6pXY), in English or French.
 And if RustNVR is useful to you: [a coffee on Ko-fi](https://ko-fi.com/Q4Z62AA835).
 
 ## License

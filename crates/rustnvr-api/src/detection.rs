@@ -51,6 +51,26 @@ pub(crate) struct EventsQuery {
     objects: Option<String>,
     /// Comma-separated zone names: events in one of them.
     zones: Option<String>,
+    /// Part of a plate read (`AB-123`, `ab123`: separators and case do not
+    /// matter).
+    plate: Option<String>,
+}
+
+/// The plate searched: letters and digits in capitals, separators
+/// dropped; `None` when absent or empty.
+fn plate_param(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(value) = value else { return Ok(None) };
+    let plate: String = value
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '-' | '.'))
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if plate.len() > 16 || !plate.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(ApiError::bad_request(
+            "plate: letters and digits only, at most 16",
+        ));
+    }
+    Ok((!plate.is_empty()).then_some(plate))
 }
 
 /// `a,b,c` as a list (empty items dropped); `None` when absent or empty.
@@ -68,7 +88,7 @@ fn list_param(value: Option<&str>) -> Result<Option<Vec<String>>, ApiError> {
     Ok((!items.is_empty()).then_some(items))
 }
 
-/// `GET /events?camera=&from=&to=&limit=&objects=&zones=`: events
+/// `GET /events?camera=&from=&to=&limit=&objects=&zones=&plate=`: events
 /// overlapping the period, newest first.
 pub(crate) async fn events(
     State(state): State<Arc<ApiState>>,
@@ -97,6 +117,7 @@ pub(crate) async fn events(
             limit: q.limit.unwrap_or(200).min(MAX_EVENTS_PER_QUERY),
             objects: list_param(q.objects.as_deref())?,
             zones: list_param(q.zones.as_deref())?,
+            plate: plate_param(q.plate.as_deref())?,
         })
         .await
         .map_err(internal)?;
@@ -407,13 +428,19 @@ fn admin_only(principal: Option<&axum::Extension<crate::auth::Principal>>) -> Re
     Ok(())
 }
 
-/// `GET /webhooks`: webhooks in effect (administrators only).
+/// `GET /webhooks`: webhooks in effect (administrators only; secrets masked
+/// for a read-only token).
 pub(crate) async fn webhooks(
     State(state): State<Arc<ApiState>>,
     principal: Option<axum::Extension<crate::auth::Principal>>,
 ) -> Result<Json<Vec<rustnvr_core::config::WebhookConfig>>, ApiError> {
     admin_only(principal.as_ref())?;
-    Ok(Json(control(&state)?.webhooks().await))
+    let hooks = control(&state)?.webhooks().await;
+    // A read-only token sees the webhooks, never their addresses or tokens.
+    if principal.is_some_and(|p| p.read_only) {
+        return Ok(Json(hooks.iter().map(|h| h.masked()).collect()));
+    }
+    Ok(Json(hooks))
 }
 
 /// `PUT /webhooks`: replaces every webhook.

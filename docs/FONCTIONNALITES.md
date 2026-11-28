@@ -85,6 +85,15 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   Signets sur la timeline (une note sur un moment, liste « Signets du
   jour ») ; objets reconnus marqués en vert sur la timeline, vignette au
   survol (⚠ pas encore essayés dans un navigateur).
+- Page Vidéos (depuis la 2026.11.11) : les enregistrements d'une caméra
+  par jour, en vignettes (première image faite par FFmpeg une fois, gardée
+  une semaine), à regarder ou ouvrir dans Lecture — vignette testée sur un
+  vrai enregistrement ; ⚠ page pas encore essayée dans un navigateur.
+- Suppression à la main (administrateurs, avec confirmation, depuis la
+  2026.11.11) : un enregistrement (Vidéos), un événement (Événements, sa
+  vidéo reste), une image gardée de l'IA (Images) ; jamais dans une période
+  protégée — testé par l'API et le stockage ; ⚠ corbeilles pas encore
+  essayées dans un navigateur.
 - Ordre des caméras gardé par le serveur (glisser les vignettes de la vue
   d'ensemble) : le même sur tous les appareils, pour tous les comptes et sur
   toutes les pages — testé par l'API ; ⚠ glisser-déposer pas encore essayé
@@ -114,6 +123,12 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   CodeProject.AI (objets reconnus dans l'API, MQTT et l'interface) ; un seuil
   plus exigeant la nuit est possible, à heures fixes ou dès que la caméra
   passe en vision nocturne ([AI.md](AI.md)).
+- Lecture des plaques d'immatriculation (facultative, deux petits modèles
+  MIT à télécharger) : sur une image du flux principal, la plaque de chaque
+  véhicule reconnu va dans l'événement, l'API, MQTT et les webhooks
+  (`{plaque}`), et se cherche dans Événements. Essayée sur 89 photos de
+  plaques françaises (86 lectures, toutes justes sauf deux incomplètes ;
+  146 ms par image avec ONNX Runtime) ; ⚠ pas encore sur de vraies caméras.
 - Stockage S3 (Amazon, MinIO, Backblaze, Wasabi…) et SFTP : les segments
   sont écrits dans un dossier d'attente local puis envoyés un par un
   (reprise automatique après une coupure, rien n'est perdu au redémarrage) ;
@@ -170,12 +185,19 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   masques compris ; conversion vérifiée avec FFmpeg, ⚠ pas encore reçue sur
   un vrai téléphone).
 - Interface dans la barre latérale de Home Assistant (ingress), avec l'app
-  « RustNVR Proxy » de ce dépôt
+  « RustNVR Proxy » (dépôt RustNVR-HomeAssistant depuis la 2026.11.11)
   ([wiki](https://github.com/Guiyomee/RustNVR/wiki/FR-Home-Assistant)) ;
   depuis l'app 1.1.0, page d'ouverture au choix (`page`) et panneau visible
   par les comptes Home Assistant non administrateurs, ouvert seulement si
   RustNVR demande une connexion ou aux comptes de l'option `users` (testé
   avec nginx dans un conteneur, ⚠ pas encore dans un vrai Home Assistant).
+- App Home Assistant « RustNVR » (bêta, x86-64 et ARM 64 bits, dépôt
+  RustNVR-HomeAssistant) : RustNVR lui-même dans Home Assistant OS, sur
+  l'image Docker de la même version ; mot de passe admin en option,
+  enregistrements dans `/media/rustnvr`, MQTT de Mosquitto branché au
+  premier démarrage, interface par ingress (essayée dans un vrai Home
+  Assistant OS x86-64 avec l'image de test Gitea le 26/11 ; ⚠ pas encore
+  sur un Raspberry Pi).
 - Mur d'écrans : toucher une caméra l'affiche seule, avec son son, et la
   toucher encore ramène au mur (⚠ pas encore essayé dans un navigateur).
 - Mur d'écrans, réglage général gardé sur le serveur (caméras, nombre par
@@ -196,6 +218,12 @@ résumé est dans le [README](../README.fr.md) ; les limites connues aussi.
   (Debian, Proxmox) : un service root séparé télécharge, vérifie et installe
   la version demandée ; sous Docker, les commandes à lancer (⚠ unité
   systemd pas encore essayée sur un vrai LXC).
+- ARM 64 bits (2026.11.11) : archive `linux-aarch64` compilée en croisé
+  depuis Debian 12 par `release.sh` (mise à jour d'un Raspberry Pi 4 sous
+  Raspberry Pi OS 13 essayée, ONNX Runtime compris), image Docker
+  amd64 + arm64 (programme compilé en croisé, image finale par
+  architecture) ; ⚠ pas encore : installation neuve sur un Pi, hôte
+  Proxmox ARM, workflows GitHub (runner ARM, image arm64 publiée).
 - Page d'accueil au choix par navigateur (Paramètres → Général : vue
   d'ensemble, mur d'écrans, événements, images ou lecture ; ⚠ pas encore
   essayée dans un navigateur).

@@ -117,8 +117,10 @@ python3 scripts/interop-gst-rtsp-server.py --width 1920 --height 1080 --fps 25 -
 `scripts/release.sh` (Linux, ou Git Bash avec Docker Desktop) compile et teste
 une release sans rien publier : export du commit en fins de ligne LF,
 interface (node:24), programme compilé sur Debian 12 (il tourne donc sur
-Debian 12 et 13), archive et `.sha256`, installation neuve sur Debian 12 et 13,
-mise à jour depuis la dernière release publiée.
+Debian 12 et 13), tous les tests avec le FFmpeg de Debian 12 (5.1), d'Ubuntu
+24.04 (6.1) et de Debian 13 (7.1), archive et `.sha256`, installation neuve sur
+Debian 12 et 13, mise à jour depuis la dernière release publiée. Les workflows
+GitHub (`.github/` de la copie publique) sont rangés dans `packaging/github/`.
 
 ```sh
 scripts/release.sh --rehearse          # répétition avec la version actuelle

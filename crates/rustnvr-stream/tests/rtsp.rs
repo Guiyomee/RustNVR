@@ -180,6 +180,51 @@ async fn supervisor_reconnects_after_disconnection() {
     assert_eq!(*handle.state.borrow(), StreamState::Stopped);
 }
 
+/// A camera that leaves its audio track out at first (EZVIZ waking up):
+/// the supervisor checks again and reconnects once the track is offered,
+/// without counting a failure.
+#[tokio::test]
+async fn supervisor_reconnects_when_the_audio_track_appears() {
+    let mut cfg = MockServerConfig::new(Fixture::h264());
+    cfg.pcmu_audio = true;
+    cfg.audio_after_connections = 1;
+    let server = MockRtspServer::start(cfg).await.unwrap();
+
+    let mut fanout = FrameFanout::new();
+    let (mut rx, _) = fanout.subscribe("test", 4096);
+    let cancel = CancellationToken::new();
+    let mut config = supervisor_config(&server.url(), Duration::from_secs(2));
+    config.session.audio = true;
+    config.session.audio_recheck = Duration::from_millis(300);
+    let handle = spawn_supervisor(config, fanout, event_bus(64), cancel.clone());
+
+    let mut first = None;
+    let with_sound = timeout(Duration::from_secs(15), async {
+        loop {
+            if let StreamItem::Frame(f) = rx.recv().await.unwrap() {
+                let first = *first.get_or_insert(f.session);
+                if f.session == first {
+                    assert!(f.audio.is_none(), "no sound in the first session");
+                } else if f.audio.is_some() {
+                    return f.session;
+                }
+            }
+        }
+    })
+    .await
+    .expect("expected a session with sound");
+
+    assert!(with_sound > first.unwrap());
+    // One session without sound, one DESCRIBE alone, one session with sound.
+    assert!(ServerStats::get(&server.stats().connections) >= 3);
+    assert_eq!(handle.metrics.snapshot().failures, 0);
+    cancel.cancel();
+    timeout(Duration::from_secs(5), handle.task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn supervisor_detects_stalled_stream() {
     let mut cfg = MockServerConfig::new(Fixture::h264());

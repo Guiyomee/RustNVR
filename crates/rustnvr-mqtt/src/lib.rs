@@ -620,6 +620,12 @@ fn event_json(e: &DetectionEvent) -> String {
             if let Some(z) = &o.zone {
                 v["zone"] = z.as_str().into();
             }
+            if let Some(p) = &o.plate {
+                v["plate"] = p.as_str().into();
+            }
+            if let Some(owner) = &o.plate_owner {
+                v["plate_owner"] = owner.as_str().into();
+            }
             v
         })
         .collect();
@@ -1312,6 +1318,8 @@ mod tests {
                 score: 0.87,
                 bbox: Some([0.25, 0.25, 0.5, 0.75]),
                 zone: Some("Allée".into()),
+                plate: None,
+                plate_owner: None,
             }],
             journey: None,
         };

@@ -266,11 +266,13 @@ pub trait NvrControl: Send + Sync {
         day: String,
         file: String,
     ) -> BoxFuture<'_, Result<Vec<u8>, ControlError>>;
-    /// Deletes the kept pictures of `camera` on `day`; how many.
+    /// Deletes the kept pictures of `camera` on `day` (only `file` when
+    /// given); how many.
     fn delete_captures(
         &self,
         camera: String,
         day: String,
+        file: Option<String>,
     ) -> BoxFuture<'_, Result<usize, ControlError>>;
     /// Analyses again the kept pictures of `camera` on `day` (only `file`
     /// when given) with the current recognition settings.
@@ -423,6 +425,9 @@ pub struct AiView {
     pub managed: bool,
     /// Models of the built-in recognition that can be downloaded.
     pub models: Vec<AiModelView>,
+    /// The two models of plate reading (`settings.plates`): detector, then
+    /// reader; both must be downloaded.
+    pub plate_models: Vec<AiModelView>,
 }
 
 /// Answer of a webhook to `POST /api/v1/webhooks/test`.

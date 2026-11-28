@@ -28,6 +28,8 @@ interface Props {
   masks?: number[][]
   width?: number | null
   height?: number | null
+  /** Several cameras: this one carries the clock, shown on its picture. */
+  clock?: boolean
 }
 
 /** Drift tolerated before a player is re-seeked to the shared clock. */
@@ -101,7 +103,7 @@ function hlsMode(): Promise<Mode> {
  * as one HLS stream (no pause between files): hls.js where Media Source
  * Extensions exist, native HLS on Safari / iPhone, else one file at a time.
  */
-export function RecordingPlayer({ camera, name, codec, recordings, position, playing, rate, master, onTime, onGap, masks = [], width = null, height = null }: Props) {
+export function RecordingPlayer({ camera, name, codec, recordings, position, playing, rate, master, onTime, onGap, masks = [], width = null, height = null, clock = false }: Props) {
   const video = useRef<HTMLVideoElement>(null)
   const [error, setError] = useState<string | null>(null)
   const [mode, setMode] = useState<Mode | null>(null)
@@ -205,7 +207,7 @@ export function RecordingPlayer({ camera, name, codec, recordings, position, pla
 
   if (!seg) {
     return (
-      <Frame name={name} label={formatTime(position, true)}>
+      <Frame name={name} clock={clock} label={formatTime(position, true)}>
         <div className="flex h-full flex-col items-center justify-center gap-1 text-center text-sm text-muted">
           <Film className="size-6" aria-hidden />
           {t("Pas d'enregistrement à cet instant", "No recording at this time")}
@@ -215,7 +217,7 @@ export function RecordingPlayer({ camera, name, codec, recordings, position, pla
   }
   if (!seg.url) {
     return (
-      <Frame name={name} label={formatTime(position, true)}>
+      <Frame name={name} clock={clock} label={formatTime(position, true)}>
         <div className="flex h-full flex-col items-center justify-center gap-1 p-4 text-center text-sm text-muted">
           <Film className="size-6" aria-hidden />
           {t('Enregistrement fictif (mode démo) : aucune vidéo à lire.', 'Fictional recording (demo mode): no video to play.')}
@@ -223,9 +225,9 @@ export function RecordingPlayer({ camera, name, codec, recordings, position, pla
       </Frame>
     )
   }
-  if (!mode) return <Frame name={name} label={formatTime(position, true)}>{null}</Frame>
+  if (!mode) return <Frame name={name} clock={clock} label={formatTime(position, true)}>{null}</Frame>
   return (
-    <Frame name={name} label={formatTime(position, true)} overlay={<MaskOverlay masks={masks} width={width} height={height} />}>
+    <Frame name={name} clock={clock} label={formatTime(position, true)} overlay={<MaskOverlay masks={masks} width={width} height={height} />}>
       <video
         ref={video}
         key={`${mode}:${src}`}
@@ -288,13 +290,21 @@ export function RecordingPlayer({ camera, name, codec, recordings, position, pla
   )
 }
 
-function Frame({ name, label, children, overlay = null }: { name: string; label: string; children: ReactNode; overlay?: ReactNode }) {
+function Frame({ name, label, children, overlay = null, clock = false }: { name: string; label: string; children: ReactNode; overlay?: ReactNode; clock?: boolean }) {
   return (
     <div className="card relative aspect-video overflow-hidden">
       {children}
       {overlay}
-      <div className="pointer-events-none absolute top-2 left-2 rounded bg-black/60 px-2 py-0.5 text-xs font-medium">{name}</div>
-      <div className="pointer-events-none absolute top-2 right-2 rounded bg-black/60 px-2 py-0.5 font-mono text-xs tabular">{label}</div>
+      <div className="pointer-events-none absolute top-2 left-2 flex items-center gap-1.5">
+        <span className="rounded bg-black/65 px-2 py-0.5 text-xs font-semibold text-white">{name}</span>
+        {clock && (
+          <span className="rounded bg-black/65 px-2 py-0.5 text-[11px] text-accent" title={t("Les autres caméras suivent l'heure de celle-ci", "The other cameras follow this one's time")}>
+            {t('horloge', 'clock')}
+          </span>
+        )}
+      </div>
+      {/* On a phone, the large clock under the videos gives the time. */}
+      <div className="pointer-events-none absolute top-2 right-2 hidden rounded bg-black/60 px-2 py-0.5 font-mono text-xs tabular sm:block">{label}</div>
     </div>
   )
 }

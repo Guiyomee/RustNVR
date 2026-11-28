@@ -168,10 +168,13 @@ impl Client {
                 }
             })?;
         let status = response.status();
-        let text = response
-            .text()
+        let (body, cut) = read_capped(response, MAX_SOAP)
             .await
             .map_err(|e| OnvifError::Other(e.without_url().to_string()))?;
+        if cut {
+            return Err(OnvifError::Other("réponse ONVIF trop grande".into()));
+        }
+        let text = String::from_utf8_lossy(&body);
         if status.as_u16() == 401 {
             return Err(OnvifError::Unauthorized);
         }
@@ -231,7 +234,7 @@ impl Client {
             n(&["Time", "Second"]),
         ) && let Ok(t) =
             jiff::civil::datetime(y, mo as i8, d as i8, h as i8, mi as i8, s as i8, 0)
-                .to_zoned(jiff::tz::TimeZone::UTC)
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         {
             self.clock_offset = t.timestamp().as_second() - now_seconds();
         }
@@ -495,11 +498,10 @@ impl Client {
         {
             return Err(OnvifError::Other("photo trop grande".into()));
         }
-        let bytes = response
-            .bytes()
+        let (bytes, cut) = read_capped(response, MAX_PHOTO)
             .await
             .map_err(|e| OnvifError::Other(e.without_url().to_string()))?;
-        if bytes.len() > MAX_PHOTO {
+        if cut {
             return Err(OnvifError::Other("photo trop grande".into()));
         }
         if !bytes.starts_with(&[0xff, 0xd8]) {
@@ -507,7 +509,7 @@ impl Client {
                 "la caméra n'a pas renvoyé une image JPEG".into(),
             ));
         }
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
 }
 
@@ -581,6 +583,27 @@ pub async fn read_camera(
     let media = client.media_url(&url).await?;
     let streams = client.streams(&media).await?;
     Ok((url, info, streams))
+}
+
+/// Largest SOAP answer read (a profile list is a few tens of KiB).
+const MAX_SOAP: usize = 4 << 20;
+
+/// Reads at most `max` bytes of `response`. The flag is true when the body
+/// was longer and has been cut: a server cannot make us hold an endless reply.
+async fn read_capped(
+    mut response: reqwest::Response,
+    max: usize,
+) -> Result<(Vec<u8>, bool), reqwest::Error> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let room = max - body.len();
+        if chunk.len() > room {
+            body.extend_from_slice(&chunk[..room]);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
 }
 
 #[cfg(test)]

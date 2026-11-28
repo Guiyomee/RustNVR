@@ -1,4 +1,4 @@
-import { Download, Gpu, PlugZap, ScanSearch, Save } from 'lucide-react'
+import { Download, Gpu, PlugZap, Plus, ScanSearch, Save, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { describeError } from '../../api/client'
 import { downloadAiModel, getAi, probeAi, setAi, testAi } from '../../api/endpoints'
@@ -8,7 +8,7 @@ import { useAsync } from '../../hooks/useAsync'
 import { formatBytes, formatPercent } from '../../lib/format'
 import { gpuStatusHelp, gpuStatusLabel } from '../../lib/gpu'
 import { OBJECT_GROUPS, OTHER_OBJECTS, objectLabel } from '../../lib/objects'
-import type { AiModel, AiSettings as Settings, AiTestResult, AiView } from '../../types/api'
+import type { AiModel, AiSettings as Settings, AiTestResult, AiView, KnownPlate } from '../../types/api'
 import { Button } from '../ui/Button'
 import { Badge } from '../ui/Card'
 import { ErrorState, LoadingState } from '../ui/States'
@@ -32,6 +32,10 @@ interface Form {
   watch: number
   timeout: string
   keepPictures: boolean
+  /** Read the plates of the vehicles recognized. */
+  plates: boolean
+  /** Plates known by their owner. */
+  knownPlates: KnownPlate[]
   /** A higher confidence at night. */
   night: boolean
   nightScore: number
@@ -55,6 +59,8 @@ function toForm(s: Settings): Form {
     watch: s.watch_seconds ?? 0,
     timeout: String(s.timeout_seconds),
     keepPictures: s.keep_pictures ?? false,
+    plates: s.plates ?? false,
+    knownPlates: s.known_plates ?? [],
     night: Boolean(s.night),
     nightScore: s.night?.min_score ?? Math.min(0.95, s.min_score + 0.2),
     nightVision: s.night?.when === 'night_vision',
@@ -72,6 +78,8 @@ function toSettings(f: Form): Settings {
     watch_seconds: f.watch,
     timeout_seconds: Number(f.timeout),
     keep_pictures: f.keepPictures,
+    plates: f.plates,
+    known_plates: f.knownPlates.map((k) => ({ plate: k.plate.trim(), name: k.name.trim() })),
     night: f.night ? { min_score: f.nightScore, when: f.nightVision ? ('night_vision' as const) : ('hours' as const), from: f.nightFrom, to: f.nightTo } : null,
   }
   if (f.kind === 'onnx') return { ...base, provider: { type: 'onnx', model: f.model.trim() } }
@@ -85,8 +93,14 @@ function downloadedModel(models: AiModel[]): string {
   return [...models].reverse().find((m) => m.downloaded)?.path ?? ''
 }
 
+const plateKey = (p: string) => p.toUpperCase().replace(/[^A-Z0-9]/g, '')
+
 function problems(f: Form): string | null {
   const int = (v: string, min: number, max: number) => Number.isInteger(Number(v)) && Number(v) >= min && Number(v) <= max
+  const keys = f.knownPlates.map((k) => plateKey(k.plate))
+  if (keys.some((k) => k.length < 2 || k.length > 16)) return t('Plaque connue : 2 à 16 lettres ou chiffres.', 'Known plate: 2 to 16 letters or digits.')
+  if (new Set(keys).size !== keys.length) return t('Plaque connue en double.', 'Known plate listed twice.')
+  if (f.knownPlates.some((k) => !k.name.trim() || k.name.trim().length > 64)) return t('Chaque plaque connue a besoin d’un nom (64 caractères au plus).', 'Each known plate needs a name (64 characters at most).')
   if (f.kind === 'onnx' && !f.model.trim()) return t('Indiquez le fichier du modèle.', 'Enter the model file.')
   if (f.kind === 'http' && !/^https?:\/\/.+/.test(f.url.trim())) return t('Adresse du serveur : http://… ou https://…', 'Server address: http://… or https://…')
   if (!int(f.maxPictures, 1, 20)) return t('Images par événement : entre 1 et 20.', 'Pictures per event: between 1 and 20.')
@@ -299,6 +313,87 @@ function ModelPicker({ models, current, disabled, onDownloaded, onUse }: { model
       {done && <p className="text-xs text-ok">{done}</p>}
       {error && <p className="text-xs text-err">{error}</p>}
       <p className="text-xs text-muted">{t('Téléchargé par le serveur depuis la publication officielle du modèle (Internet nécessaire), puis vérifié par son empreinte SHA-256 avant d’être utilisé. Temps mesurés sur un cœur de processeur de bureau ; l’analyse n’a lieu que sur les images des mouvements détectés.', 'Downloaded by the server from the official release of the model (Internet needed), then checked by its SHA-256 fingerprint before use. Times measured on one core of a desktop processor; analysis only runs on the pictures of detected motion.')}</p>
+    </div>
+  )
+}
+
+/** Plate reading: the switch and the two plate models to download. */
+function KnownPlates({ value, disabled, onChange }: { value: KnownPlate[]; disabled: boolean; onChange: (v: KnownPlate[]) => void }) {
+  const set = (i: number, k: Partial<KnownPlate>) => onChange(value.map((p, j) => (j === i ? { ...p, ...k } : p)))
+  return (
+    <div className="space-y-2">
+      <p className="font-medium">{t('Plaques connues', 'Known plates')}</p>
+      <p className="text-xs text-muted">{t('Une plaque lue qui en fait partie s’affiche avec son nom (« AB-123-CD (Paul) »), dans l’événement, MQTT et les notifications.', 'A plate read that is one of them shows with its name (« AB-123-CD (Paul) »), in the event, MQTT and the notifications.')}</p>
+      {value.map((k, i) => (
+        <div key={i} className="flex flex-wrap items-center gap-2">
+          <input aria-label={t('Plaque', 'Plate')} className="h-9 w-36 rounded-md border border-line bg-bg-2 px-2 font-mono text-sm uppercase" placeholder="AB-123-CD" maxLength={20} value={k.plate} disabled={disabled} onChange={(e) => set(i, { plate: e.target.value })} />
+          <input aria-label={t('Nom', 'Name')} className="h-9 min-w-0 flex-1 rounded-md border border-line bg-bg-2 px-2 text-sm" placeholder={t('Voiture de Paul', 'Paul’s car')} maxLength={64} value={k.name} disabled={disabled} onChange={(e) => set(i, { name: e.target.value })} />
+          <Button size="sm" variant="ghost" icon={<Trash2 className="size-4" />} disabledReason={disabled ? t('Lecture seule', 'Read only') : null} onClick={() => onChange(value.filter((_, j) => j !== i))}>
+            {t('Retirer', 'Remove')}
+          </Button>
+        </div>
+      ))}
+      <Button size="sm" icon={<Plus className="size-4" />} disabledReason={disabled ? t('Lecture seule', 'Read only') : value.length >= 500 ? t('500 plaques au plus.', '500 plates at most.') : null} onClick={() => onChange([...value, { plate: '', name: '' }])}>
+        {t('Ajouter une plaque', 'Add a plate')}
+      </Button>
+    </div>
+  )
+}
+
+function PlateReading({ on, models, disabled, onChange, onDownloaded, known, onKnown }: { on: boolean; models: AiModel[]; disabled: boolean; onChange: (on: boolean) => void; onDownloaded: (m: AiModel) => void; known: KnownPlate[]; onKnown: (v: KnownPlate[]) => void }) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const missing = models.filter((m) => !m.downloaded)
+  const download = async (m: AiModel) => {
+    setBusy(m.id)
+    setError(null)
+    try {
+      onDownloaded(await downloadAiModel(m.id))
+    } catch (e) {
+      setError(describeError(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+  return (
+    <div className="max-w-xl space-y-2 text-sm">
+      <label className="flex items-start gap-2">
+        <input type="checkbox" className="mt-0.5 size-4 accent-accent" checked={on} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+        <span>
+          {t('Lire les plaques d’immatriculation', 'Read license plates')}
+          <span className="block text-xs text-muted">
+            {t(
+              'Quand une voiture, un camion, un bus ou une moto est reconnu, RustNVR prend une image du flux principal et lit la plaque (deux petits modèles intégrés, quel que soit le fournisseur ci-dessus). La plaque s’affiche dans l’événement et se cherche dans Événements. Il faut une plaque d’au moins 60 pixels de large dans l’image : une caméra qui filme l’entrée de près. Une plaque n’est gardée que si chaque caractère est lu avec une grande confiance ; mieux vaut rien qu’une plaque fausse.',
+              'When a car, truck, bus or motorcycle is recognized, RustNVR takes a picture of the main stream and reads the plate (two small built-in models, whatever the provider above). The plate shows in the event and can be searched in Events. The plate must be at least 60 pixels wide in the picture: a camera filming the entrance up close. A plate is kept only when every character is read with high confidence; better nothing than a wrong plate.',
+            )}
+          </span>
+        </span>
+      </label>
+      {on && (
+        <div className="ml-6 space-y-2">
+          {models.map((m) => (
+            <div key={m.id} className="rounded-md border border-line p-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium">
+                  {m.name} <span className="text-xs font-normal text-muted">— {formatBytes(m.bytes)}</span>
+                </span>
+                {m.downloaded ? (
+                  <Badge tone="ok">{t('Téléchargé', 'Downloaded')}</Badge>
+                ) : (
+                  <Button size="sm" icon={<Download className="size-3.5" />} disabledReason={disabled ? t('Lecture seule', 'Read only') : busy ? t('Téléchargement en cours…', 'Downloading…') : null} onClick={() => void download(m)}>
+                    {busy === m.id ? t('Téléchargement…', 'Downloading…') : t('Télécharger', 'Download')}
+                  </Button>
+                )}
+              </div>
+              <p className="text-xs text-muted">{m.hint}</p>
+              <p className="text-xs text-muted">{t('Licence ', 'Licence ')}{m.license}</p>
+            </div>
+          ))}
+          {missing.length > 0 && <p className="text-xs text-warn">{t('Téléchargez les deux modèles : sans eux, aucune plaque n’est lue.', 'Download both models: without them, no plate is read.')}</p>}
+          {error && <p className="text-xs text-err">{error}</p>}
+          <KnownPlates value={known} disabled={disabled} onChange={onKnown} />
+        </div>
+      )}
     </div>
   )
 }
@@ -551,6 +646,18 @@ export function AiSettings() {
               <span className="block text-xs text-muted">{t('Chaque image envoyée à l’IA, avec ce qu’elle y a trouvé, dans la destination par défaut (dossier .captures) : pour rejouer l’IA dessus ci-dessous et voir si elle détecte bien. Supprimées avec les vidéos (même nombre de jours). Quelques Mo par jour et par caméra.', 'Every picture sent to the AI, with what it found, in the default destination (.captures folder): to replay the AI on them below and see whether it detects well. Deleted with the videos (same number of days). A few MB per day and camera.')}</span>
             </span>
           </label>
+
+          {v.onnx_available && v.plate_models && v.plate_models.length > 0 && (
+            <PlateReading
+              on={form.plates}
+              models={v.plate_models}
+              disabled={disabled}
+              onChange={(on) => set('plates', on)}
+              onDownloaded={(m) => setSaved({ ...v, plate_models: (v.plate_models ?? []).map((x) => (x.id === m.id ? m : x)) })}
+              known={form.knownPlates}
+              onKnown={(k) => set('knownPlates', k)}
+            />
+          )}
 
           <label className="block max-w-xl text-sm">
             {t('Pendant un mouvement long', 'During a long motion')}

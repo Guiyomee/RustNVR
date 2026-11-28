@@ -6,7 +6,8 @@
 #   docker compose up -d --build        (see https://github.com/Guiyomee/RustNVR/wiki/EN-Docker)
 
 # --- Web interface -----------------------------------------------------------
-FROM node:24-slim AS web
+# Built once, on the machine that builds (the files are the same everywhere).
+FROM --platform=$BUILDPLATFORM node:24-slim AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -14,19 +15,37 @@ COPY web/ ./
 RUN npm run build
 
 # --- Program -----------------------------------------------------------------
-# Same Debian release as the final image (same glibc).
-FROM rust:1-trixie AS build
-# aws-lc-sys (TLS) builds C code with CMake.
+# Same Debian release as the final image (same glibc). Compiled on the
+# machine that builds, for the target architecture (amd64 or arm64): no
+# emulated compiler, which would take hours for arm64.
+FROM --platform=$BUILDPLATFORM rust:1-trixie AS build
+ARG TARGETARCH
+# aws-lc-sys (TLS) and libopus build C code with CMake; for arm64, the cross
+# compilers of Debian.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake clang \
+    && if [ "$TARGETARCH" = arm64 ] && [ "$(dpkg --print-architecture)" != arm64 ]; then \
+         apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
+         && rustup target add aarch64-unknown-linux-gnu; \
+       fi \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked --bin rustnvr \
-    && cp target/release/rustnvr /usr/local/bin/rustnvr
+    --mount=type=cache,target=/src/target,id=rustnvr-target-$TARGETARCH \
+    set -eu; \
+    if [ "$TARGETARCH" = arm64 ] && [ "$(dpkg --print-architecture)" != arm64 ]; then \
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+               CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+               CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
+               AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar; \
+        cargo build --release --locked --bin rustnvr --target aarch64-unknown-linux-gnu; \
+        cp target/aarch64-unknown-linux-gnu/release/rustnvr /usr/local/bin/rustnvr; \
+    else \
+        cargo build --release --locked --bin rustnvr; \
+        cp target/release/rustnvr /usr/local/bin/rustnvr; \
+    fi
 
 # --- Final image -------------------------------------------------------------
 FROM debian:trixie-slim
@@ -35,9 +54,13 @@ FROM debian:trixie-slim
 # VAAPI drivers, for the H.264 conversions on the graphics card (live.hwaccel):
 # Intel iHD (Broadwell and newer; its free build cannot encode H.264 before
 # Ice Lake), Intel i965 (up to Coffee Lake, H.264 encoding included), AMD.
+# The Intel drivers exist for amd64 only.
+ARG TARGETARCH
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata pci.ids \
-       intel-media-va-driver i965-va-driver mesa-va-drivers \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata pci.ids mesa-va-drivers \
+    && if [ "$TARGETARCH" = amd64 ]; then \
+         apt-get install -y --no-install-recommends intel-media-va-driver i965-va-driver; \
+       fi \
     && rm -rf /var/lib/apt/lists/*
 # Unprivileged account (uid 1000, as the first user of most Linux hosts).
 RUN groupadd --gid 1000 rustnvr \

@@ -173,8 +173,8 @@ fn message(
 
 /// `{heure}` and `{date}` of `at_ms`, in the server's local time.
 fn when_vars(at_ms: i64) -> Vars {
-    let local =
-        jiff::Timestamp::from_millisecond(at_ms).map(|t| t.to_zoned(jiff::tz::TimeZone::system()));
+    let local = jiff::Timestamp::from_millisecond(at_ms)
+        .map(|t| t.to_zoned_datetime(jiff::tz::TimeZone::system()));
     let format = |f: &str| {
         local
             .as_ref()
@@ -182,6 +182,21 @@ fn when_vars(at_ms: i64) -> Vars {
             .unwrap_or_default()
     };
     vec![("heure", format("%H:%M:%S")), ("date", format("%d/%m/%Y"))]
+}
+
+/// An object for a message: `Voiture 92 %`, with its plate when read
+/// (`Voiture 92 % (AB123CD)`).
+fn object_text(o: &rustnvr_core::DetectedObject) -> String {
+    let plate = match (o.plate.as_deref(), o.plate_owner.as_deref()) {
+        (Some(p), Some(owner)) => format!(" ({p}, {owner})"),
+        (Some(p), None) => format!(" ({p})"),
+        _ => String::new(),
+    };
+    format!(
+        "{} {:.0} %{plate}",
+        object_name(&o.label),
+        f64::from(o.score) * 100.0
+    )
 }
 
 /// Variables of a call about an event.
@@ -194,19 +209,25 @@ fn event_vars(event: &DetectionEvent, camera_name: &str) -> Vars {
     let objets = event
         .objects
         .iter()
-        .map(|o| {
-            format!(
-                "{} {:.0} %",
-                object_name(&o.label),
-                f64::from(o.score) * 100.0
-            )
-        })
+        .map(object_text)
         .collect::<Vec<_>>()
         .join(" · ");
+    let plaque = event
+        .objects
+        .iter()
+        .filter_map(|o| {
+            o.plate.as_deref().map(|p| match o.plate_owner.as_deref() {
+                Some(owner) => format!("{p} ({owner})"),
+                None => p.to_owned(),
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut vars = vec![
         ("camera", camera_name.to_owned()),
         ("objet", objet),
         ("objets", objets),
+        ("plaque", plaque),
         ("zones", event.zones.join(", ")),
         (
             "duree",
@@ -536,7 +557,11 @@ async fn post(client: &reqwest::Client, hook: &WebhookConfig, body: &Body) -> Re
     if status.is_success() {
         return Ok(status.as_u16());
     }
-    let text = response.text().await.unwrap_or_default();
+    // An error page is only read for its reason: its first 4 KiB will do.
+    let text = read_capped(response, 4096)
+        .await
+        .map(|(body, _)| String::from_utf8_lossy(&body).into_owned())
+        .unwrap_or_default();
     Err(Failure {
         status: Some(status.as_u16()),
         message: match reason(&text) {
@@ -722,13 +747,7 @@ fn discord_payload(
     let objects = event
         .objects
         .iter()
-        .map(|o| {
-            format!(
-                "{} {:.0} %",
-                object_name(&o.label),
-                f64::from(o.score) * 100.0
-            )
-        })
+        .map(object_text)
         .collect::<Vec<_>>()
         .join(" · ");
     let (title, color, at_ms) = match kind {
@@ -2387,6 +2406,24 @@ fn save(path: &Path, hooks: &[WebhookConfig]) -> io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// Reads at most `max` bytes of `response`. The flag is true when the body
+/// was longer and has been cut: a server cannot make us hold an endless reply.
+pub(crate) async fn read_capped(
+    mut response: reqwest::Response,
+    max: usize,
+) -> Result<(Vec<u8>, bool), reqwest::Error> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let room = max - body.len();
+        if chunk.len() > room {
+            body.extend_from_slice(&chunk[..room]);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2434,6 +2471,8 @@ mod tests {
                     score: 0.9,
                     bbox: None,
                     zone: None,
+                    plate: None,
+                    plate_owner: None,
                 })
                 .collect(),
             journey: None,

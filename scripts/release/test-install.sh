@@ -3,7 +3,8 @@
 # /dist as a first installation, starts it as the service would, checks the
 # API and the interface, then updates it in place (configuration kept).
 set -euo pipefail
-ARCHIVE=$(ls /dist/*.tar.gz)
+# The archive of this machine (x86_64, or aarch64 emulated by QEMU).
+ARCHIVE=$(ls /dist/*-linux-"$(uname -m)".tar.gz)
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl ca-certificates ffmpeg >/dev/null
 tar -xzf "$ARCHIVE" -C /tmp

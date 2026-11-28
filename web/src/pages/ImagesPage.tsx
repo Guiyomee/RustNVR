@@ -1,11 +1,11 @@
-import { ChevronLeft, ChevronRight, Images, Sparkles } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { ChevronLeft, ChevronRight, Images, Sparkles, Trash2 } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { describeError } from '../api/client'
-import { captureUrl, getAi, getCaptureDays, getCapturePictures, replayCaptures } from '../api/endpoints'
+import { captureUrl, deleteCapture, getAi, getCaptureDays, getCapturePictures, replayCaptures } from '../api/endpoints'
 import { useAuth, useReadOnly } from '../auth/AuthGate'
 import { Button } from '../components/ui/Button'
 import { Card, PageHeader } from '../components/ui/Card'
-import { Modal } from '../components/ui/Modal'
+import { ConfirmDialog, Modal } from '../components/ui/Modal'
 import { EmptyState, ErrorState, LoadingState } from '../components/ui/States'
 import { useIsDemo, useLive } from '../data/DataContext'
 import { useAsync } from '../hooks/useAsync'
@@ -53,7 +53,7 @@ function Boxes({ objects, className, labels }: { objects: DetectedObject[]; clas
 }
 
 /** A kept picture, large, with the AI run on it again on demand. */
-function Viewer({ camera, day, pictures, index, onIndex, onClose, aiActive }: { camera: string; day: string; pictures: CapturePicture[]; index: number; onIndex: (i: number) => void; onClose: () => void; aiActive: boolean }) {
+function Viewer({ camera, day, pictures, index, onIndex, onClose, onDeleted, aiActive }: { camera: string; day: string; pictures: CapturePicture[]; index: number; onIndex: (i: number) => void; onClose: () => void; onDeleted: () => void; aiActive: boolean }) {
   const { user } = useAuth()
   const readOnly = useReadOnly()
   const admin = !readOnly && (!user || user.role === 'admin')
@@ -61,21 +61,32 @@ function Viewer({ camera, day, pictures, index, onIndex, onClose, aiActive }: { 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState<ReplayResult['pictures'][number] | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   // Another picture: its own analysis.
   useEffect(() => {
     setNow(null)
     setError(null)
   }, [index])
+  const analyseReason = !aiActive ? t('Reconnaissance d’objets arrêtée (Paramètres → Intelligence artificielle).', 'Object recognition off (Settings → Artificial intelligence).') : !admin ? t('Réservé aux administrateurs.', 'Administrators only.') : busy ? t('Analyse…', 'Analysing…') : null
+  const deleteReason = !admin ? t('Réservé aux administrateurs.', 'Administrators only.') : deleting ? t('Suppression…', 'Deleting…') : null
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
+      if (confirming || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
       if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1)
-      if (e.key === 'ArrowRight' && index < pictures.length - 1) onIndex(index + 1)
+      else if (e.key === 'ArrowRight' && index < pictures.length - 1) onIndex(index + 1)
+      else if ((e.key === 'Delete' || e.key === 'Backspace') && !deleteReason) {
+        e.preventDefault()
+        setConfirming(true)
+      } else if ((e.key === 'a' || e.key === 'A') && !analyseReason) void analyseRef.current()
     }
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
-  }, [index, pictures.length, onIndex])
+  }, [index, pictures.length, onIndex, confirming, deleteReason, analyseReason])
+  const analyseRef = useRef(async () => {})
   if (!p) return null
   const analyse = async () => {
+    if (busy) return
     setBusy(true)
     setError(null)
     try {
@@ -87,6 +98,20 @@ function Viewer({ camera, day, pictures, index, onIndex, onClose, aiActive }: { 
       setBusy(false)
     }
   }
+  analyseRef.current = analyse
+  const remove = async () => {
+    setConfirming(false)
+    setDeleting(true)
+    setError(null)
+    try {
+      await deleteCapture(camera, day, p.file)
+      onDeleted()
+    } catch (e) {
+      setError(describeError(e))
+    } finally {
+      setDeleting(false)
+    }
+  }
   return (
     <Modal
       open
@@ -94,28 +119,33 @@ function Viewer({ camera, day, pictures, index, onIndex, onClose, aiActive }: { 
       title={`${formatDateTime(p.at_ms)} · ${source(p)}`}
       onClose={onClose}
       footer={
-        <div className="flex w-full flex-wrap items-center justify-between gap-2">
-          <div className="flex gap-2">
-            <Button size="sm" icon={<ChevronLeft className="size-4" />} disabledReason={index === 0 ? t('Première image.', 'First picture.') : null} onClick={() => onIndex(index - 1)}>
-              {t('Précédente', 'Previous')}
-            </Button>
-            <Button size="sm" icon={<ChevronRight className="size-4" />} disabledReason={index >= pictures.length - 1 ? t('Dernière image.', 'Last picture.') : null} onClick={() => onIndex(index + 1)}>
-              {t('Suivante', 'Next')}
-            </Button>
-          </div>
-          <span className="text-xs text-muted">
-            {index + 1} / {pictures.length} · {t('flèches ← → du clavier', 'keyboard arrows ← →')}
+        <div className="flex w-full flex-wrap items-center gap-2">
+          <Button size="sm" icon={<ChevronLeft className="size-4" />} disabledReason={index === 0 ? t('Première image.', 'First picture.') : null} onClick={() => onIndex(index - 1)}>
+            {t('Précédente', 'Previous')}
+          </Button>
+          <span className="tabular px-1 text-xs text-muted">
+            {index + 1} / {pictures.length}
           </span>
+          <Button size="sm" icon={<ChevronRight className="size-4" />} disabledReason={index >= pictures.length - 1 ? t('Dernière image.', 'Last picture.') : null} onClick={() => onIndex(index + 1)}>
+            {t('Suivante', 'Next')}
+          </Button>
+          <span className="flex-1" />
+          <Button size="sm" variant="primary" icon={<Sparkles className="size-4" />} disabledReason={analyseReason} onClick={() => void analyse()}>
+            {now ? t('Analyser de nouveau', 'Analyse again') : t('Analyser avec l’IA', 'Analyse with the AI')}
+          </Button>
+          <Button size="sm" variant="danger" icon={<Trash2 className="size-4" />} disabledReason={deleteReason} onClick={() => setConfirming(true)}>
+            {t('Supprimer', 'Delete')}
+          </Button>
         </div>
       }
     >
-      <div className="space-y-3">
-        <div className="relative overflow-hidden rounded-md bg-bg-2">
-          <img src={captureUrl(camera, day, p.file)} alt="" className="block w-full" />
+      <div className="space-y-2">
+        <div className="relative mx-auto w-fit max-w-full overflow-hidden rounded-md bg-black">
+          <img src={captureUrl(camera, day, p.file)} alt="" className="block max-h-[58vh] w-auto max-w-full" />
           <Boxes objects={p.found} className="border-dashed border-warn" />
           {now && <Boxes objects={now.found} className="border-accent" labels />}
         </div>
-        <div className="space-y-1 text-sm">
+        <div className="space-y-0.5 text-sm">
           <p>
             <span className="text-muted">{t('Trouvé à l’époque : ', 'Found then: ')}</span>
             {describe(p.found, p.kept)}
@@ -134,20 +164,21 @@ function Viewer({ camera, day, pictures, index, onIndex, onClose, aiActive }: { 
               </span>
             </p>
           )}
-          <p className="text-xs text-muted">{t('Cadres pointillés : trouvés à l’époque ; cadres pleins : trouvés maintenant, avec les réglages actuels de l’IA.', 'Dashed boxes: found then; solid boxes: found now, with the current AI settings.')}</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="primary"
-            icon={<Sparkles className="size-4" />}
-            disabledReason={!aiActive ? t('Reconnaissance d’objets arrêtée (Paramètres → Intelligence artificielle).', 'Object recognition off (Settings → Artificial intelligence).') : !admin ? t('Réservé aux administrateurs.', 'Administrators only.') : busy ? t('Analyse…', 'Analysing…') : null}
-            onClick={() => void analyse()}
-          >
-            {now ? t('Analyser de nouveau', 'Analyse again') : t('Analyser avec l’IA', 'Analyse with the AI')}
-          </Button>
-          {error && <span className="text-sm text-err">{error}</span>}
+          {error && <p className="text-err">{error}</p>}
+          <p className="text-xs text-muted">
+            {t('Pointillés : trouvé à l’époque ; trait plein : trouvé maintenant. Clavier : ← → images, A analyser, Suppr supprimer.', 'Dashed: found then; solid: found now. Keyboard: ← → pictures, A analyse, Delete delete.')}
+          </p>
         </div>
       </div>
+      <ConfirmDialog
+        open={confirming}
+        danger
+        title={t('Supprimer cette image ?', 'Delete this picture?')}
+        message={t('L’image et ce que l’IA y a trouvé sont effacés pour de bon. L’événement et sa vidéo restent.', 'The picture and what the AI found in it are erased for good. The event and its video stay.')}
+        confirmLabel={t('Supprimer', 'Delete')}
+        onConfirm={() => void remove()}
+        onCancel={() => setConfirming(false)}
+      />
     </Modal>
   )
 }
@@ -169,6 +200,22 @@ export function ImagesPage() {
   const pictures = useAsync(() => (cam && chosenDay ? getCapturePictures(cam, chosenDay) : Promise.resolve([])), [cam, chosenDay])
   const [open, setOpen] = useState<number | null>(null)
   const [onlyFound, setOnlyFound] = useState(false)
+  const { user } = useAuth()
+  const readOnly = useReadOnly()
+  const admin = !readOnly && (!user || user.role === 'admin')
+  const [toDelete, setToDelete] = useState<CapturePicture | null>(null)
+  const [gridError, setGridError] = useState<string | null>(null)
+  const removeTile = async (pic: CapturePicture) => {
+    setToDelete(null)
+    setGridError(null)
+    try {
+      await deleteCapture(cam ?? '', chosenDay ?? '', pic.file)
+      pictures.reload()
+      days.reload()
+    } catch (e) {
+      setGridError(describeError(e))
+    }
+  }
   const all = pictures.data ?? []
   const shown = all.map((p, i) => ({ p, i })).filter(({ p }) => !onlyFound || p.kept.length > 0)
 
@@ -237,8 +284,19 @@ export function ImagesPage() {
           ) : (
             <ul className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
               {shown.map(({ p, i }) => (
-                <li key={p.file}>
-                  <button type="button" className="card group block w-full overflow-hidden text-left" onClick={() => setOpen(i)}>
+                <li key={p.file} className="group relative">
+                  {admin && (
+                    <button
+                      type="button"
+                      aria-label={t(`Supprimer l’image de ${formatTime(p.at_ms, true)}`, `Delete the picture of ${formatTime(p.at_ms, true)}`)}
+                      title={t('Supprimer cette image', 'Delete this picture')}
+                      onClick={() => setToDelete(p)}
+                      className="absolute top-2 right-2 z-10 flex size-8 items-center justify-center rounded-md bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-err focus-visible:opacity-100"
+                    >
+                      <Trash2 className="size-4" aria-hidden />
+                    </button>
+                  )}
+                  <button type="button" className="card block w-full overflow-hidden text-left" onClick={() => setOpen(i)}>
                     <div className="relative aspect-video bg-bg-2">
                       <img src={captureUrl(cam ?? '', chosenDay ?? '', p.file)} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover transition-opacity group-hover:opacity-90" />
                       <Boxes objects={p.found} className="border-accent" />
@@ -254,11 +312,35 @@ export function ImagesPage() {
               ))}
             </ul>
           )}
+          {gridError && <p className="text-sm text-err">{gridError}</p>}
           {shown.length === 0 && pictures.data && <p className="text-sm text-muted">{t('Aucune image avec un objet sur cette journée.', 'No picture with an object on this day.')}</p>}
         </div>
       )}
+      <ConfirmDialog
+        open={toDelete !== null}
+        danger
+        title={t('Supprimer cette image ?', 'Delete this picture?')}
+        message={t('L’image et ce que l’IA y a trouvé sont effacés pour de bon. L’événement et sa vidéo restent.', 'The picture and what the AI found in it are erased for good. The event and its video stay.')}
+        confirmLabel={t('Supprimer', 'Delete')}
+        onConfirm={() => toDelete && void removeTile(toDelete)}
+        onCancel={() => setToDelete(null)}
+      />
       {open !== null && cam && chosenDay && (
-        <Viewer camera={cam} day={chosenDay} pictures={all} index={open} onIndex={setOpen} onClose={() => setOpen(null)} aiActive={ai.data?.active != null} />
+        <Viewer
+          camera={cam}
+          day={chosenDay}
+          pictures={all}
+          index={open}
+          onIndex={setOpen}
+          onClose={() => setOpen(null)}
+          onDeleted={() => {
+            // The next picture takes its place; none left: the viewer closes.
+            setOpen(all.length <= 1 ? null : Math.min(open, all.length - 2))
+            pictures.reload()
+            days.reload()
+          }}
+          aiActive={ai.data?.active != null}
+        />
       )}
     </>
   )

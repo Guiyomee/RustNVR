@@ -108,9 +108,34 @@ pub const MODELS: &[ModelInfo] = &[
 /// is about 2 Mbit/s).
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// The two models of plate reading (`crate::plates`): the first finds the
+/// plate on a vehicle, the second reads it. Both are needed.
+pub const PLATE_MODELS: &[ModelInfo] = &[
+    ModelInfo {
+        id: "plate_detector",
+        name: "Plaques : détecteur YOLOv9-t 384",
+        file: "yolo-v9-t-384-license-plates-end2end.onnx",
+        url: "https://github.com/ankandrew/open-image-models/releases/download/assets/yolo-v9-t-384-license-plates-end2end.onnx",
+        sha256: "888397b96d761c89db40bc9c305838e8652660f5e282c2cadebbe8d2951a77a8",
+        bytes: 7_771_218,
+        license: "MIT (open-image-models)",
+        hint: "Trouve la plaque sur le véhicule reconnu. Entraîné par l'auteur sur ≈ 11 000 photos de plaques collectées sur le web.",
+    },
+    ModelInfo {
+        id: "plate_reader",
+        name: "Plaques : lecteur CCT-S v2",
+        file: "cct_s_v2_global.onnx",
+        url: "https://github.com/ankandrew/fast-plate-ocr/releases/download/arg-plates/cct_s_v2_global.onnx",
+        sha256: "384bbbd2cea3ef54761d3df70822ef3a349ee1a112aeafddbe0e3ba06bc6e47b",
+        bytes: 5_262_230,
+        license: "MIT (fast-plate-ocr)",
+        hint: "Lit les lettres et chiffres de la plaque (plaques de plus de 60 pays, dont la France). Sûr de lui sur 75 plaques françaises sur 100 en photo, sans erreur à ce niveau.",
+    },
+];
+
 /// The model `id`, if offered.
 pub fn find(id: &str) -> Option<&'static ModelInfo> {
-    MODELS.iter().find(|m| m.id == id)
+    MODELS.iter().chain(PLATE_MODELS).find(|m| m.id == id)
 }
 
 /// SHA-256 of `data`, lowercase hexadecimal.
@@ -155,17 +180,34 @@ pub async fn download(model: &ModelInfo, dir: &Path) -> Result<PathBuf, String> 
     Ok(path)
 }
 
+/// `e` followed by its causes: reqwest only says « error sending request »,
+/// the reason (DNS, TLS, connection refused…) is in the sources.
+fn with_causes(e: &dyn std::error::Error) -> String {
+    let mut text = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str(" : ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
+}
+
 /// Writes `model` to `part`, checking its size and SHA-256.
 async fn fetch(model: &ModelInfo, part: &Path) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
-    let mut response = client
-        .get(model.url)
-        .send()
-        .await
-        .map_err(|e| format!("téléchargement impossible (accès à Internet ?) : {e}"))?;
+    let mut response = client.get(model.url).send().await.map_err(|e| {
+        format!(
+            "téléchargement impossible (accès à Internet ?) : {}",
+            with_causes(&e)
+        )
+    })?;
     if !response.status().is_success() {
         return Err(format!(
             "téléchargement refusé par le serveur : {}",
@@ -180,7 +222,7 @@ async fn fetch(model: &ModelInfo, part: &Path) -> Result<(), String> {
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| format!("téléchargement interrompu : {e}"))?
+        .map_err(|e| format!("téléchargement interrompu : {}", with_causes(&e)))?
     {
         received += chunk.len() as u64;
         if received > model.bytes {

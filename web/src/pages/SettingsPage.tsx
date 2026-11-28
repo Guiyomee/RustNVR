@@ -18,6 +18,7 @@ import { formatBytes, formatDuration, formatNumber, formatPercent } from '../lib
 import type { SystemInfo } from '../types/api'
 import { useLocation } from '../lib/router'
 import { useTheme } from '../lib/theme'
+import { ACCENT_PRESETS, accentColors, useAccent } from '../lib/accent'
 import { HOME_PAGES, useHomePage } from '../lib/home'
 import { Segmented } from '../components/ui/Tabs'
 import { lang, setLang, t } from '../lib/i18n'
@@ -74,6 +75,53 @@ function ThemeSetting() {
   )
 }
 
+const PRESET_LABELS: Record<string, string> = {
+  copper: t('Cuivre', 'Copper'),
+  blue: t('Bleu', 'Blue'),
+  teal: t('Turquoise', 'Teal'),
+  green: t('Vert', 'Green'),
+  violet: t('Violet', 'Violet'),
+  rose: t('Rose', 'Pink'),
+}
+
+/** Accent color: a preset, or any color picked. */
+function AccentSetting() {
+  const [accent, setAccent] = useAccent()
+  const custom = accent.startsWith('#')
+  const light = document.documentElement.dataset.theme === 'light'
+  return (
+    <div className="flex flex-wrap items-center gap-2" role="radiogroup" aria-label={t('Couleur', 'Color')}>
+      {ACCENT_PRESETS.map((p) => {
+        const on = accent === p.id
+        return (
+          <button
+            key={p.id}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            title={PRESET_LABELS[p.id]}
+            aria-label={PRESET_LABELS[p.id]}
+            onClick={() => setAccent(p.id)}
+            className={`size-8 rounded-full border-2 ${on ? 'border-fg' : 'border-transparent'}`}
+            style={{ background: accentColors(p.id, light).accent }}
+          />
+        )
+      })}
+      <label className={`relative inline-flex h-8 items-center gap-2 rounded-full border-2 px-2 text-xs ${custom ? 'border-fg' : 'border-line'}`}>
+        <span className="size-5 rounded-full border border-line" style={{ background: custom ? accentColors(accent, light).accent : 'conic-gradient(#e08a4e, #5b9cf2, #4cc38a, #a78bfa, #f27aaf, #e08a4e)' }} aria-hidden />
+        {t('Autre…', 'Other…')}
+        <input
+          type="color"
+          aria-label={t('Choisir une couleur', 'Pick a color')}
+          className="absolute inset-0 cursor-pointer opacity-0"
+          value={custom ? accent : '#e08a4e'}
+          onChange={(e) => setAccent(e.target.value.toLowerCase())}
+        />
+      </label>
+    </div>
+  )
+}
+
 function HomePageSetting() {
   const [home, setHome] = useHomePage()
   return (
@@ -108,6 +156,9 @@ function Section({ category }: { category: Category }) {
         <SettingsSection title={t('Général', 'General')} description={t('Préférences de cette interface, enregistrées dans le navigateur.', 'Preferences of this interface, saved in the browser.')}>
           <SettingRow label={t('Thème', 'Theme')} help={t('Retenu par ce navigateur. « Système » suit le réglage clair ou sombre de l’appareil.', 'Kept by this browser. « System » follows the light or dark setting of the device.')}>
             <ThemeSetting />
+          </SettingRow>
+          <SettingRow label={t('Couleur', 'Color')} help={t('Boutons, sélection et liens. Retenue par ce navigateur ; ajustée au thème pour rester lisible.', 'Buttons, selection and links. Kept by this browser; adjusted to the theme to stay readable.')}>
+            <AccentSetting />
           </SettingRow>
           <SettingRow label={t('Langue', 'Language')} help={t('Retenue par ce navigateur ; la page se recharge. Les messages venant du serveur (erreurs, journal) restent en français.', 'Kept by this browser; the page reloads. Messages coming from the server (errors, log) stay in French.')}>
             <Segmented

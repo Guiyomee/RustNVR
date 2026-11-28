@@ -23,11 +23,11 @@ start() {
     kill "$pid"; wait "$pid" 2>/dev/null || true
 }
 
-OLD=$(ls /old/*.tar.gz)
+OLD=$(ls /old/*-linux-"$(uname -m)".tar.gz)
 tar -xzf "$OLD" -C /tmp
 RUSTNVR_WEB_PASSWORD=essai-local-1234 bash /tmp/rustnvr-*/install.sh --archive "$OLD" --no-start >/dev/null
 start
-NEW=$(ls /dist/*.tar.gz)
+NEW=$(ls /dist/*-linux-"$(uname -m)".tar.gz)
 bash /usr/local/bin/rustnvr-update --archive "$NEW" --no-start >/dev/null
 # The units of one-click updates: installed by an updater of 2026.11.10 or
 # later; after an older one, reinstalling once (as the interface says)

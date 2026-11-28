@@ -365,6 +365,13 @@ pub struct DetectedObject {
     /// Detection zone the object is in, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone: Option<String>,
+    /// License plate read on this vehicle (`AB123CD`, letters and digits
+    /// only), when plate reading is on and the reading is sure enough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plate: Option<String>,
+    /// Owner of that plate, when it is one of `ai.known_plates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plate_owner: Option<String>,
 }
 
 /// A detection event, ongoing (`end_ms` is `None`) or finished.
@@ -424,6 +431,8 @@ mod tests {
             score: 0.9,
             bbox: Some(bbox),
             zone: None,
+            plate: None,
+            plate_owner: None,
         };
         // Feet in the path: counts, in « Allée ».
         assert_eq!(

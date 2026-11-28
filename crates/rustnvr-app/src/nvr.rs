@@ -10,6 +10,7 @@ mod index;
 mod journeys;
 mod night;
 mod photo;
+mod plates;
 mod ptz;
 mod replay;
 mod restream;
@@ -607,6 +608,8 @@ struct Shared {
     upload_status: std::sync::Mutex<HashMap<String, watch::Receiver<UploadStatus>>>,
     /// ONVIF PTZ sessions of motorised cameras, opened on first use.
     ptz: ptz::Sessions,
+    /// Plate models (`ai.plates`), loaded on first use.
+    plates: plates::Plates,
 }
 
 impl Shared {
@@ -900,6 +903,7 @@ impl Nvr {
             uploaders: tokio::sync::Mutex::new(HashMap::new()),
             upload_status: std::sync::Mutex::new(HashMap::new()),
             ptz: ptz::Sessions::default(),
+            plates: plates::Plates::default(),
             mqtt: tokio::sync::Mutex::new(MqttRuntime {
                 managed: config
                     .managed_mqtt_file
@@ -1991,8 +1995,9 @@ impl NvrControl for Controller {
         &self,
         camera: String,
         day: String,
+        file: Option<String>,
     ) -> BoxFuture<'_, Result<usize, ControlError>> {
-        Box::pin(async move { replay::delete(&self.0, camera, day).await })
+        Box::pin(async move { replay::delete(&self.0, camera, day, file).await })
     }
 
     fn replay(

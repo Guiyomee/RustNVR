@@ -32,6 +32,9 @@ pub struct SessionOptions {
     /// Also receive the camera's audio stream: AAC as is, G.711 converted
     /// to Opus.
     pub audio: bool,
+    /// When the camera leaves the audio track out, first wait before
+    /// checking whether it offers it again; later checks are further apart.
+    pub audio_recheck: Duration,
 }
 
 impl SessionOptions {
@@ -54,6 +57,7 @@ impl Default for SessionOptions {
             stall_timeout: Duration::from_secs(10),
             user_agent: concat!("RustNVR/", env!("CARGO_PKG_VERSION")).to_owned(),
             audio: false,
+            audio_recheck: Duration::from_secs(60),
         }
     }
 }
@@ -92,6 +96,18 @@ pub(crate) async fn describe(
         Session::describe(target.url().clone(), session_opts),
     )
     .await
+}
+
+/// Whether the camera now offers a usable audio track: a DESCRIBE alone, on
+/// a connection of its own, so the recording goes on meanwhile.
+pub(crate) async fn offers_audio(target: &RtspTarget, opts: &SessionOptions) -> bool {
+    match describe(target, opts, Arc::new(SessionGroup::default())).await {
+        Ok(session) => select_audio_stream(&session).is_some(),
+        Err(e) => {
+            tracing::debug!(error = %e.one_line(), "audio check failed");
+            false
+        }
+    }
 }
 
 /// Index of the first H.264/H.265 video stream.
@@ -155,6 +171,8 @@ pub struct RtspSession {
     /// Malformed packets skipped since the last video frame, counted as lost
     /// on the next one.
     malformed_since_frame: u16,
+    /// See [`Self::audio_missing`].
+    audio_missing: bool,
 }
 
 impl RtspSession {
@@ -181,7 +199,15 @@ impl RtspSession {
         } else {
             None
         };
-        Self::start(session, index, audio, opts, session_id).await
+        let mut s = Self::start(session, index, audio, opts, session_id).await?;
+        s.audio_missing = opts.audio && audio.is_none();
+        Ok(s)
+    }
+
+    /// Sound was asked for but the camera offered no usable audio track
+    /// (some cameras leave it out while they wake up).
+    pub(crate) fn audio_missing(&self) -> bool {
+        self.audio_missing
     }
 
     /// Sends SETUP for `stream_index` (and `audio_index`, if any) then PLAY.
@@ -255,6 +281,7 @@ impl RtspSession {
             audio_offset: None,
             malformed: 0,
             malformed_since_frame: 0,
+            audio_missing: false,
         };
         if let Some(a) = audio_index {
             let stream = &s.demuxed.streams()[a];

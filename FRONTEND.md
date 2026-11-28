@@ -205,23 +205,42 @@ par le navigateur, appliqué avant le premier affichage par `lib/theme.ts`) :
 mêmes variables redéfinies sous `:root[data-theme="light"]`, textes à 4,5:1 au
 moins sur les cartes.
 
-Palette imposée (`src/index.css`) : fonds `#111827` / `#0B1220`, cartes
-`#1F2937`, bordures `#293548`, bleu `#3B82F6`, vert `#22C55E`, orange
-`#F59E0B`, rouge `#EF4444`, textes `#F9FAFB` / `#9CA3AF`. Les couleurs
-d'état sont toujours accompagnées d'une icône ou d'un libellé.
+Palette imposée (`src/index.css`), « salle de contrôle » depuis la
+2026.11.11 (maquette « RustNVR — proposition d'interface ») : fonds `#0D0F12`
+/ `#0A0C0E` (barre latérale), cartes `#14171B`, bordures `#252A31`, textes
+`#E8EAED` / `#8B93A1` (5,8:1 sur les cartes), vert `#3FB97A`, orange
+`#F59E0B`, rouge `#EF5350`, `info` bleu `#6FB7E8` (information, objets
+reconnus). Polices : Inter Tight et JetBrains Mono (chiffres, heures) si
+elles sont installées, sinon celles du système (rien n'est chargé depuis
+Internet). Les couleurs d'état sont toujours accompagnées d'une icône ou
+d'un libellé.
+
+`accent` (boutons, sélection, liens, menu actif en `accent/15`) : cuivre
+`#E08A4E` par défaut (`#A9521F` en thème clair), texte posé dessus
+`on-accent` (`#1A1007`, 7:1). Chaque navigateur peut en choisir une autre
+(Paramètres → Général → Couleur : six couleurs ou une couleur libre,
+`lib/accent.ts`, `localStorage` `rustnvr.accent`) : elle est ajustée à
+chaque thème pour garder 4,5:1 sur les cartes, et `on-accent` devient noir
+ou blanc selon ce qui se lit le mieux. Ces deux variables sont posées sur
+`<html>` par `applyAccent()`, à chaque changement de thème.
+
+Barre latérale : un rail d'icônes de 72 px (carrés de 48 px, Paramètres et
+À propos en bas), dépliable avec les libellés. Barre du haut : date et
+heure, état du NVR en pastille, CPU / RAM / GPU / vidéos en chiffres à
+chasse fixe.
 
 Logo (`components/layout/Logo.tsx`, même dessin que `public/favicon.svg`) :
 un objectif à anneau cuivre `#C8642B` sur une tuile ardoise `#1C2128`, reflet
 ivoire `#F4F1EC` ; couleurs fixes, identiques sur les deux thèmes. Dans le nom,
 « NVR » est en `brand` : `#E08A4E` en thème sombre (6,6:1 sur `#111827`),
 `#A9521F` en thème clair (5,4:1 sur blanc), le cuivre du logo étant trop peu
-contrasté pour du texte de cette taille. Le bleu reste la couleur des actions.
+contrasté pour du texte de cette taille.
 
-Timeline : la série « mouvement » utilise `#D97706` (pas plus sombre de
-l'orange) car `#F59E0B` sort de la plage de luminosité exigée pour une série
-et se confond avec le rouge pour les daltoniens ; les événements sont des
-losanges couleur texte. Couple bleu/`#D97706` validé sur les deux fonds
-(séparation CVD ΔE 30, vision normale ΔE 34). Le curseur de lecture est blanc
+Timeline : le temps enregistré est une piste vert sombre `recorded`
+(`#2C3D33`), le mouvement des marques jaunes `motion` (`#F2C14E`) posées
+dessus, les objets reconnus en `info` ; les événements sont des losanges
+couleur texte. Le jaune et le vert sombre diffèrent nettement en luminosité
+(lisibles aussi pour les daltoniens). Le curseur de lecture est blanc
 plein, « maintenant » en tirets gris.
 
 ## Langues
@@ -247,6 +266,11 @@ restent en français. Pour un nouveau texte : toujours écrire les deux versions
 ## Responsive
 
 Vérifié par captures (Edge headless) à 1600 px et 492 px (largeur minimale
-de la fenêtre headless) : barre latérale repliable en bureau, tiroir sur
-mobile, cartes empilées, timeline défilable horizontalement. Non vérifié sur
-un vrai smartphone ni une tablette.
+de la fenêtre headless), puis (Playwright, démo) à 1440 px et 390 px :
+barre latérale repliable en bureau ; sous `lg` (1024 px), barre en bas
+(`MobileNav` : Accueil, Événements, Lecture, « Plus » qui ouvre le tiroir
+avec toutes les pages) et logo à la place du bouton menu ; sous `md`
+(768 px), la vue d'ensemble passe à `PhoneCameras` (une caméra en grand en
+direct, les autres en images rafraîchies toutes les 15 s, sans timeline) ;
+cartes empilées, timeline défilable horizontalement. Essayé sur un vrai
+smartphone le 25/11 (barre, « Plus », vue d'ensemble, filtres) ; pas sur une tablette.

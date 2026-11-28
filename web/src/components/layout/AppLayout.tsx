@@ -6,6 +6,7 @@ import { useReadOnly } from '../../auth/AuthGate'
 import { useData, useLive } from '../../data/DataContext'
 import { useStoredFlag } from '../../hooks/useUi'
 import { Link } from '../../lib/router'
+import { MobileNav } from './MobileNav'
 import { Sidebar } from './Sidebar'
 import { Topbar } from './Topbar'
 import { t } from '../../lib/i18n'
@@ -179,7 +180,7 @@ function UpdateBanner() {
 
 export function AppLayout({ children }: { children: ReactNode }) {
   const { mode } = useData()
-  const [collapsed, setCollapsed] = useStoredFlag('rustnvr.sidebar.collapsed', false)
+  const [collapsed, setCollapsed] = useStoredFlag('rustnvr.sidebar.collapsed', true)
   const [mobileOpen, setMobileOpen] = useState(false)
   return (
     <div className="flex min-h-screen">
@@ -196,9 +197,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
             <NoAuthBanner />
           </>
         )}
-        <Topbar onOpenMenu={() => setMobileOpen(true)} />
-        <main className="mx-auto w-full max-w-[1920px] flex-1 p-4 lg:p-6">{children}</main>
+        <Topbar />
+        {/* Bottom room for the phone bar. */}
+        <main className="mx-auto w-full max-w-[1920px] flex-1 p-4 pb-24 lg:p-6">{children}</main>
       </div>
+      <MobileNav onMore={() => setMobileOpen(true)} />
     </div>
   )
 }

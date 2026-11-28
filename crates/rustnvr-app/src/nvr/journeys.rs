@@ -299,6 +299,8 @@ mod tests {
                 score: 0.9,
                 bbox: None,
                 zone: None,
+                plate: None,
+                plate_owner: None,
             }],
             journey: None,
         }

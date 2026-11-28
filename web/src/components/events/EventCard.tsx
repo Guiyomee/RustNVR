@@ -23,11 +23,20 @@ export const EVENT_KIND_LABEL: Record<EventKind, string> = {
 
 /** French names of common labels (COCO classes used by DeepStack / CodeProject.AI). */
 /** Distinct recognized labels, most confident first (e.g. « Personne 87 % »). */
+/** A plate as written on it: `AB123CD` → `AB-123-CD` (French plates since
+ * 2009); others as read. */
+export function formatPlate(plate: string): string {
+  const m = /^([A-Z]{2})(\d{3})([A-Z]{2})$/.exec(plate)
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : plate
+}
+
 function objectsText(objects: DetectedObject[]): string {
   const best = new Map<string, number>()
   for (const o of objects) best.set(o.label, Math.max(best.get(o.label) ?? 0, o.score))
   const zones = new Map(objects.filter((o) => o.zone).map((o) => [o.label, o.zone]))
-  return [...best].map(([l, s]) => `${objectLabel(l)} ${Math.round(s * 100)} %${zones.get(l) ? ` (${zones.get(l)})` : ''}`).join(', ')
+  const text = [...best].map(([l, s]) => `${objectLabel(l)} ${Math.round(s * 100)} %${zones.get(l) ? ` (${zones.get(l)})` : ''}`).join(', ')
+  const plates = objects.flatMap((o) => (o.plate ? [o.plate_owner ? `${formatPlate(o.plate)} (${o.plate_owner})` : formatPlate(o.plate)] : []))
+  return plates.length > 0 ? `${text} · ${plates.join(', ')}` : text
 }
 
 /** Thumbnail, loaded only once visible. Demo events get a drawn placeholder. */

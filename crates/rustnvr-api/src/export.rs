@@ -239,7 +239,7 @@ pub(crate) async fn prepare(
     prune(&dir).await;
     let stamp = jiff::Timestamp::from_millisecond(start)
         .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
+            t.to_zoned_datetime(jiff::tz::TimeZone::system())
                 .strftime("%Y%m%d-%H%M%S")
                 .to_string()
         })
@@ -489,7 +489,7 @@ pub(crate) async fn prepare_journey(
     prune(&dir).await;
     let stamp = jiff::Timestamp::from_millisecond(start)
         .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
+            t.to_zoned_datetime(jiff::tz::TimeZone::system())
                 .strftime("%Y%m%d-%H%M%S")
                 .to_string()
         })

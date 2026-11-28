@@ -14,7 +14,7 @@ getrandom = "0.4"
 # Two-step login: TOTP codes (HMAC-SHA1) and the QR code of the secret.
 hmac = "0.13"
 sha1 = "0.11"
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+qrcode = { version = "0.15", default-features = false, features = ["svg"] }
 hyper = "1"
 hyper-util = { version = "0.1.21", features = ["server", "server-auto", "service", "tokio", "http1", "http2"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["pem", "ring"] }

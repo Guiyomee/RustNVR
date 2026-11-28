@@ -2,6 +2,7 @@
 // or that of the system. Applied as `<html data-theme="…">` (see index.css).
 
 import { useEffect, useState } from 'react'
+import { applyAccent } from './accent'
 
 export type ThemeChoice = 'dark' | 'light' | 'system'
 
@@ -17,6 +18,8 @@ export function storedTheme(): ThemeChoice {
 export function applyTheme(choice: ThemeChoice = storedTheme()) {
   const light = choice === 'light' || (choice === 'system' && media().matches)
   document.documentElement.dataset.theme = light ? 'light' : 'dark'
+  // The accent is adjusted to each theme.
+  applyAccent()
 }
 
 /** Applies the stored theme now and follows the system when asked to. */

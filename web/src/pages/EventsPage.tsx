@@ -1,6 +1,6 @@
-import { BarChart3, LayoutGrid, List } from 'lucide-react'
-import { useMemo, useState } from 'react'
-import { UnavailableError } from '../api/client'
+import { BarChart3, LayoutGrid, List, Trash2 } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { describeError, UnavailableError } from '../api/client'
 import { ActivityStats } from '../components/events/ActivityStats'
 import { EVENT_KIND_LABEL, EventCard, EventRow, JourneyCard, JourneyRow, groupJourneys, journeyPlaybackUrl, type EventItem } from '../components/events/EventCard'
 import { Button } from '../components/ui/Button'
@@ -8,12 +8,15 @@ import { Card, PageHeader } from '../components/ui/Card'
 import { EmptyState, ErrorState, LoadingState, Unavailable } from '../components/ui/States'
 import { Segmented } from '../components/ui/Tabs'
 import { useCapability, useIsDemo, useLive } from '../data/DataContext'
-import { getMotion } from '../api/endpoints'
+import { deleteEvent, getMotion } from '../api/endpoints'
+import { useAuth, useReadOnly } from '../auth/AuthGate'
+import { ConfirmDialog } from '../components/ui/Modal'
+import { formatTime } from '../lib/format'
 import { useAsync } from '../hooks/useAsync'
 import { useEvents } from '../hooks/useEvents'
 import { useNow, useStoredFlag } from '../hooks/useUi'
 import { navigate } from '../lib/router'
-import type { EventKind } from '../types/api'
+import type { EventKind, NvrEvent } from '../types/api'
 import { t } from '../lib/i18n'
 
 const PERIODS = [
@@ -45,11 +48,47 @@ export function EventsPage() {
   const demo = useIsDemo()
   const [limit, setLimit] = useState(PAGE)
   const [zone, setZone] = useState('')
+  // Plate searched, sent once typing stops.
+  const [plateInput, setPlateInput] = useState('')
+  const [plate, setPlate] = useState('')
+  useEffect(() => {
+    const id = setTimeout(() => (setPlate(plateInput.toUpperCase().replace(/[^A-Z0-9]/g, '')), setLimit(PAGE)), 400)
+    return () => clearTimeout(id)
+  }, [plateInput])
   // Zones of the chosen camera, to search its events by zone.
   const motion = useAsync(() => (camera && !demo ? getMotion(camera).catch(() => null) : Promise.resolve(null)), [camera, demo])
   const zoneNames = motion.data?.zones.map((z) => z.name) ?? []
-  const query = useMemo(() => ({ camera: camera || null, fromMs: now - hours * 3_600_000, toMs: now, kinds, zones: zone ? [zone] : null }), [camera, hours, kinds, now, zone])
+  const query = useMemo(() => ({ camera: camera || null, fromMs: now - hours * 3_600_000, toMs: now, kinds, zones: zone ? [zone] : null, plate: plate || null }), [camera, hours, kinds, now, zone, plate])
   const events = useEvents(query)
+  const { user } = useAuth()
+  const readOnly = useReadOnly()
+  const admin = !readOnly && !demo && (!user || user.role === 'admin')
+  const [toDelete, setToDelete] = useState<NvrEvent | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const removeEvent = async (e: NvrEvent) => {
+    setToDelete(null)
+    setDeleteError(null)
+    try {
+      await deleteEvent(e.id, false)
+      events.reload()
+    } catch (err) {
+      setDeleteError(describeError(err))
+    }
+  }
+  /** The trash of an event (administrators; not while it is going on). */
+  const trash = (e: NvrEvent, className: string) =>
+    admin && (
+      <button
+        type="button"
+        disabled={e.end_ms === null}
+        aria-label={t(`Supprimer l’événement de ${formatTime(e.start_ms)}`, `Delete the event of ${formatTime(e.start_ms)}`)}
+        title={e.end_ms === null ? t('Événement en cours : attendez sa fin.', 'Event still going on: wait for its end.') : t('Supprimer cet événement (la vidéo reste, voir Vidéos)', 'Delete this event (the video stays, see Videos)')}
+        onClick={() => setToDelete(e)}
+        className={`z-10 flex size-8 items-center justify-center rounded-md bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-err focus-visible:opacity-100 disabled:cursor-not-allowed disabled:hover:bg-black/60 ${className}`}
+      >
+        <Trash2 className="size-4" aria-hidden />
+      </button>
+    )
   const names = useMemo(() => new Map(cameras.map((c) => [c.id, c.name])), [cameras])
   const open = (cam: string, t: number) => navigate(`/playback?camera=${encodeURIComponent(cam)}&t=${t}`)
 
@@ -119,6 +158,19 @@ export function EventsPage() {
             </select>
           </label>
         )}
+        {ai && (
+          <label className="flex items-center gap-2 text-sm">
+            <span className="text-muted">{t('Plaque', 'Plate')}</span>
+            <input
+              className="h-8 w-32 rounded-md border border-line bg-bg-2 px-2 text-sm uppercase"
+              value={plateInput}
+              placeholder="AB-123"
+              maxLength={16}
+              aria-label={t('Rechercher une plaque', 'Search a plate')}
+              onChange={(e) => setPlateInput(e.target.value)}
+            />
+          </label>
+        )}
         <div className="flex items-center gap-2 text-sm">
           <span className="text-muted">{t('Période', 'Period')}</span>
           <Segmented label={t('Période', 'Period')} options={[...PERIODS]} value={hours} onChange={(h) => (setHours(h), setLimit(PAGE))} />
@@ -162,7 +214,10 @@ export function EventsPage() {
               i.kind === 'journey' ? (
                 <JourneyRow key={`j${i.id}`} id={i.id} events={i.events} name={name} onClick={() => navigate(journeyPlaybackUrl(i.events))} />
               ) : (
-                <EventRow key={i.event.id} event={i.event} cameraName={name(i.event.camera)} onClick={() => open(i.event.camera, i.event.start_ms)} />
+                <li key={i.event.id} className="group relative list-none">
+                  <EventRow event={i.event} cameraName={name(i.event.camera)} onClick={() => open(i.event.camera, i.event.start_ms)} />
+                  {trash(i.event, 'absolute top-1/2 right-3 -translate-y-1/2')}
+                </li>
               ),
             )}
           </ul>
@@ -173,11 +228,24 @@ export function EventsPage() {
             i.kind === 'journey' ? (
               <JourneyCard key={`j${i.id}`} id={i.id} events={i.events} name={name} onClick={() => navigate(journeyPlaybackUrl(i.events))} />
             ) : (
-              <EventCard key={i.event.id} event={i.event} cameraName={name(i.event.camera)} onClick={() => open(i.event.camera, i.event.start_ms)} />
+              <div key={i.event.id} className="group relative">
+                <EventCard event={i.event} cameraName={name(i.event.camera)} onClick={() => open(i.event.camera, i.event.start_ms)} />
+                {trash(i.event, 'absolute top-2 right-2')}
+              </div>
             ),
           )}
         </div>
       )}
+      {deleteError && <p className="mt-3 rounded-md border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{deleteError}</p>}
+      <ConfirmDialog
+        open={toDelete !== null}
+        danger
+        title={t('Supprimer cet événement ?', 'Delete this event?')}
+        message={toDelete ? t(`L’événement de ${formatTime(toDelete.start_ms)} et son image sont effacés pour de bon. La vidéo reste (page Vidéos pour la supprimer).`, `The event of ${formatTime(toDelete.start_ms)} and its picture are erased for good. The video stays (Videos page to delete it).`) : ''}
+        confirmLabel={t('Supprimer', 'Delete')}
+        onConfirm={() => toDelete && void removeEvent(toDelete)}
+        onCancel={() => setToDelete(null)}
+      />
       {items.length > limit && (
         <div className="mt-4 flex justify-center">
           <Button onClick={() => setLimit((l) => l + PAGE)}>{t('Afficher plus (', 'Show more (')}{items.length - limit}{t(' restants)', ' left)')}</Button>

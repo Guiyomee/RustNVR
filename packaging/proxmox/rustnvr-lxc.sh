@@ -224,8 +224,14 @@ raw_url() {
 for cmd in pct pveam pvesh pvesm pveversion; do
     command -v "$cmd" >/dev/null || die "$cmd introuvable : ce script se lance sur l'hôte Proxmox VE"
 done
-# RustNVR is published for x86-64 only; the list also offers arm64 templates.
-[ "$(uname -m)" = x86_64 ] || die "seul x86-64 est publié (cet hôte : $(uname -m))"
+# RustNVR is published for x86-64 and ARM 64-bit (Proxmox on ARM, as PXVirt):
+# the Debian template of the host's architecture, and install.sh inside the
+# container takes the archive of the same one.
+case "$(uname -m)" in
+    x86_64) TEMPLATE_ARCH=amd64 ;;
+    aarch64) TEMPLATE_ARCH=arm64 ;;
+    *) die "architecture non publiée : $(uname -m) (x86-64 ou ARM 64 bits)" ;;
+esac
 
 SSH_KEYS=$(mktemp)
 SMB_TEST_DIR=""
@@ -686,7 +692,7 @@ st_admin_password() {
 st_rustnvr_version() {
     [ -z "$ARCHIVE" ] || { skip; return; }
     local v
-    v=$(wt --title "RUSTNVR" --inputbox "\nVersion à installer (v2026.11.10 ; vide : la dernière) :" 10 72 "$var_rustnvr_version") || return 1
+    v=$(wt --title "RUSTNVR" --inputbox "\nVersion à installer (v2026.11.11 ; vide : la dernière) :" 10 72 "$var_rustnvr_version") || return 1
     var_rustnvr_version=$v
 }
 st_recordings() {
@@ -931,7 +937,7 @@ say "Recherche du modèle Debian"
 quiet pveam update
 find_template() {
     pveam available --section system \
-        | awk -v v="debian-$1-standard_" '$2 ~ "^"v && $2 ~ /_amd64\.tar/ {print $2}' \
+        | awk -v v="debian-$1-standard_" -v a="_${TEMPLATE_ARCH}[.]tar" '$2 ~ "^"v && $2 ~ a {print $2}' \
         | sort -V | tail -n 1
 }
 if [ -n "$var_version" ]; then

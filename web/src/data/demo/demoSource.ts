@@ -103,7 +103,8 @@ function demoEvents(q: EventQuery): NvrEvent[] {
     }
   }
   const zones = q.zones
-  const inZone = zones?.length ? out.filter((e) => e.zones.some((z) => zones.includes(z))) : out
+  const plate = q.plate
+  const inZone = (zones?.length ? out.filter((e) => e.zones.some((z) => zones.includes(z))) : out).filter((e) => !plate || e.objects.some((o) => o.plate?.includes(plate)))
   if (q.kinds) return inZone.filter((e) => q.kinds?.includes(e.kind)).sort((a, b) => b.start_ms - a.start_ms)
   return inZone.sort((a, b) => b.start_ms - a.start_ms)
 }

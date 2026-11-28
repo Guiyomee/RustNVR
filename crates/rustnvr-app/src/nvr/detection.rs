@@ -526,7 +526,7 @@ async fn crossing(
         return;
     }
     // Today's count of the line, for MQTT.
-    let midnight = jiff::Zoned::now()
+    let midnight = jiff::ZonedDateTime::now()
         .start_of_day()
         .map_or(at_ms, |z| z.timestamp().as_millisecond());
     let today = db.crossings(midnight, at_ms + 1).await.map_or(0, |list| {
@@ -586,18 +586,18 @@ fn keep_picture(shared: &Shared, camera: &CameraId, jpeg: &Bytes, capture: Captu
 /// Weekday (1 = Monday) and minute of the day now, in the local time of the
 /// server.
 pub(super) fn local_week_minute() -> (u8, u16) {
-    week_minute(&jiff::Zoned::now())
+    week_minute(&jiff::ZonedDateTime::now())
 }
 
 /// Weekday (1 = Monday) and minute of the day of `at_ms` (milliseconds
 /// since the Unix epoch), in the local time of the server.
 pub(super) fn week_minute_at(at_ms: i64) -> (u8, u16) {
     jiff::Timestamp::from_millisecond(at_ms)
-        .map(|t| week_minute(&t.to_zoned(jiff::tz::TimeZone::system())))
+        .map(|t| week_minute(&t.to_zoned_datetime(jiff::tz::TimeZone::system())))
         .unwrap_or_else(|_| local_week_minute())
 }
 
-fn week_minute(at: &jiff::Zoned) -> (u8, u16) {
+fn week_minute(at: &jiff::ZonedDateTime) -> (u8, u16) {
     let day = u8::try_from(at.weekday().to_monday_one_offset()).unwrap_or(1);
     let minute = u16::try_from(i32::from(at.hour()) * 60 + i32::from(at.minute())).unwrap_or(0);
     (day, minute)
@@ -616,7 +616,7 @@ pub(super) async fn night_vision(shared: &Shared, camera: &CameraId) -> Option<b
 
 /// Local midnight of today, in milliseconds since the Unix epoch.
 fn local_midnight_ms() -> i64 {
-    let now = jiff::Zoned::now();
+    let now = jiff::ZonedDateTime::now();
     now.start_of_day()
         .map_or(now.timestamp().as_millisecond(), |z| {
             z.timestamp().as_millisecond()
@@ -708,7 +708,7 @@ pub(super) async fn reset_presence(
 /// from zero.
 pub(super) async fn run_presence_midnight(shared: Arc<Shared>, cancel: CancellationToken) {
     loop {
-        let wait = jiff::Zoned::now()
+        let wait = jiff::ZonedDateTime::now()
             .tomorrow()
             .and_then(|d| d.start_of_day())
             .ok()
@@ -808,7 +808,7 @@ async fn recognize(
                 return;
             }
         };
-        let objects = place(found.clone(), &wanted);
+        let mut objects = place(found.clone(), &wanted);
         let ms = started.elapsed().as_millis() as u64;
         keep_picture(
             shared,
@@ -837,6 +837,22 @@ async fn recognize(
                     camera: event.camera.clone(),
                     jpeg: jpeg.clone(),
                 });
+            }
+            let plates = shared
+                .ai_settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .0
+                .plates;
+            if plates && super::plates::has_vehicle(&objects) {
+                super::plates::read(
+                    shared,
+                    &event.camera,
+                    &mut objects,
+                    &jpeg,
+                    &wanted.mask_rects(),
+                )
+                .await;
             }
             if let Err(e) = db.set_objects(event.id, &objects).await {
                 warn!(camera = %event.camera, error = %e, "cannot store recognized objects");
@@ -1782,6 +1798,10 @@ pub(super) fn ai_view(shared: &Arc<Shared>) -> AiView {
             .iter()
             .map(|m| model_view(shared, m, None))
             .collect(),
+        plate_models: rustnvr_ai::models::PLATE_MODELS
+            .iter()
+            .map(|m| model_view(shared, m, None))
+            .collect(),
     }
 }
 
@@ -1823,6 +1843,12 @@ pub(super) async fn ai_download_model(
     match rustnvr_ai::models::download(model, &models_dir(shared)).await {
         Ok(path) => {
             info!(model = model.id, path = %path.display(), ms = started.elapsed().as_millis() as u64, "AI model ready");
+            if rustnvr_ai::models::PLATE_MODELS
+                .iter()
+                .any(|m| m.id == model.id)
+            {
+                shared.plates.forget().await;
+            }
             Ok(model_view(shared, model, Some(true)))
         }
         Err(e) => {
@@ -2009,6 +2035,8 @@ mod tests {
             score: 0.9,
             bbox: Some(bbox),
             zone: None,
+            plate: None,
+            plate_owner: None,
         };
         // Feet on the gate.
         assert!(at_line(&person([0.4, 0.3, 0.5, 0.72]), &gate));

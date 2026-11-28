@@ -1338,6 +1338,23 @@ impl WebhookConfig {
         out
     }
 
+    /// The webhook without its secrets, for a reader who may not change it
+    /// (read-only API token): the address keeps its scheme and host only,
+    /// the token is replaced by `•••`, and the kind is stated.
+    pub fn masked(&self) -> Self {
+        let url = match self.url.split_once("://") {
+            _ if self.url.is_empty() => String::new(),
+            Some((scheme, _)) => format!("{scheme}://{}/•••", self.host()),
+            None => "•••".to_owned(),
+        };
+        Self {
+            url,
+            kind: Some(self.kind()),
+            token: self.token.as_ref().map(|_| "•••".to_owned()),
+            ..self.clone()
+        }
+    }
+
     /// Host of the address, for logs (never the path nor the query).
     pub fn host(&self) -> &str {
         // Telegram is never guessed from the address (`kind()` reads it).
@@ -1630,10 +1647,41 @@ pub struct AiConfig {
     /// destination (`.captures`), to replay the recognition on them later.
     /// Deleted with the recordings (`retention_days`).
     pub keep_pictures: bool,
+    /// Read the license plate of the vehicles recognized (car, truck, bus,
+    /// motorcycle) on a picture of the main stream, with the two built-in
+    /// plate models (downloaded in Paramètres → Intelligence artificielle,
+    /// run in process whatever the recognition service).
+    pub plates: bool,
     /// A higher confidence at night (insects, headlights, rain in the
     /// infrared light fool the models more often).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub night: Option<AiNight>,
+    /// Plates known by their owner (« Voiture de Paul »): a plate read equal
+    /// to one of them carries its name (`DetectedObject::plate_owner`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub known_plates: Vec<KnownPlate>,
+}
+
+/// A license plate known by its owner (`[[ai.known_plates]]`).
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnownPlate {
+    /// The plate (`AB-123-CD`: separators and case do not matter).
+    pub plate: String,
+    /// Who it belongs to, as shown (« Paul », « Livreur »).
+    pub name: String,
+}
+
+/// Most known plates.
+pub const MAX_KNOWN_PLATES: usize = 500;
+
+/// `plate` as plates are read: capital letters and digits only.
+pub fn plate_key(plate: &str) -> String {
+    plate
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
 }
 
 /// The night of the recognition: objects need `min_score`. The night is
@@ -1714,7 +1762,9 @@ impl Default for AiConfig {
             interval_seconds: 3,
             watch_seconds: 30,
             keep_pictures: false,
+            plates: false,
             night: None,
+            known_plates: Vec::new(),
         }
     }
 }
@@ -1749,6 +1799,33 @@ impl AiConfig {
     /// Every problem of these settings.
     pub fn problems(&self, env: impl Fn(&str) -> Option<String>) -> Vec<String> {
         let mut p = Vec::new();
+        if self.known_plates.len() > MAX_KNOWN_PLATES {
+            p.push(format!(
+                "ai.known_plates: {MAX_KNOWN_PLATES} plates at most"
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for k in &self.known_plates {
+            let key = plate_key(&k.plate);
+            if !(2..=16).contains(&key.len()) {
+                p.push(format!(
+                    "ai.known_plates: plate {:?} must have 2 to 16 letters or digits",
+                    k.plate
+                ));
+            } else if !seen.insert(key) {
+                p.push(format!(
+                    "ai.known_plates: plate {:?} is listed twice",
+                    k.plate
+                ));
+            }
+            let name = k.name.trim();
+            if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+                p.push(format!(
+                    "ai.known_plates: the name of {:?} must have 1 to 64 characters",
+                    k.plate
+                ));
+            }
+        }
         if !(0.0..=1.0).contains(&self.min_score) {
             p.push("ai.min_score must be between 0 and 1".to_owned());
         }
@@ -2912,6 +2989,33 @@ main = { url = \"rtsp://x/b\" }
     }
 
     #[test]
+    fn known_plates_are_checked() {
+        assert_eq!(plate_key("ab-123 cd"), "AB123CD");
+        let plate = |plate: &str, name: &str| KnownPlate {
+            plate: plate.to_owned(),
+            name: name.to_owned(),
+        };
+        let ai = AiConfig {
+            known_plates: vec![
+                plate("AB-123-CD", "Paul"),
+                plate("ab123cd", "Lisa"),
+                plate("-", "x"),
+                plate("XY987ZT", " "),
+            ],
+            ..AiConfig::default()
+        };
+        let p = ai.problems(|_| None).join("\n");
+        assert!(p.contains("\"ab123cd\" is listed twice"), "{p}");
+        assert!(p.contains("\"-\" must have 2 to 16"), "{p}");
+        assert!(p.contains("name of \"XY987ZT\""), "{p}");
+        let ok = AiConfig {
+            known_plates: vec![plate("AB-123-CD", "Paul")],
+            ..AiConfig::default()
+        };
+        assert!(ok.problems(|_| None).is_empty());
+    }
+
+    #[test]
     fn ai_is_disabled_by_default_and_validated() {
         let none = Config::from_toml_with_env("", no_env).expect("empty");
         assert_eq!(none.ai.provider, None);
@@ -3364,6 +3468,16 @@ mod webhook_tests {
         assert!(h.problems().is_empty());
         assert_eq!(h.host(), "n8n.local:5678");
         assert_eq!(hook("http://10.0.0.2/x").host(), "10.0.0.2");
+        let masked = WebhookConfig {
+            token: Some("tk_secret".to_owned()),
+            ..h.clone()
+        }
+        .masked();
+        assert_eq!(masked.url, "https://n8n.local:5678/•••");
+        assert_eq!(masked.token.as_deref(), Some("•••"));
+        let discord = hook("https://discord.com/api/webhooks/123/abc").masked();
+        assert_eq!(discord.kind, Some(WebhookKind::Discord), "kind kept");
+        assert!(!discord.url.contains("abc"));
         assert!(!hook("ftp://host/x").problems().is_empty());
         let none = WebhookConfig {
             events: Vec::new(),

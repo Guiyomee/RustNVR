@@ -596,6 +596,15 @@ composant est validé (point de stockage connu, identifiant de caméra,
 `AAAA-MM-JJ`, nom de segment) :
 toute autre forme, y compris `..` encodé, renvoie 400.
 
+`DELETE` (administrateur) : supprime le segment et l'oublie dans l'index,
+204. 409 s'il touche une période protégée (`/protected`) ; 404 s'il n'existe
+pas. Un segment encore en écriture (`.mp4.part`) n'a pas de nom valide : 400.
+
+`?thumbnail=1` : sa première image en JPEG, 320 px de large (page Vidéos),
+faite une fois par FFmpeg (deux à la fois au plus) et gardée une semaine
+(300 Mo au plus, dans `<data_dir>/recording-pictures`) ; 500 si FFmpeg n'en
+tire rien.
+
 `?transcode=h264` : copie H.264 du segment (image convertie par FFmpeg, au plus
 1280 px de large ; son copié), pour un navigateur qui ne décode pas le H.265.
 La copie est faite une fois (une conversion à la fois, ≈ 4 s pour une minute
@@ -972,7 +981,9 @@ voir `docs/MQTT.md`), lus au démarrage et après chaque changement.
 Adresses appelées (HTTP POST) sur les événements : en JSON, ou en message
 Discord, notification ntfy ou message Telegram.
 Réservé aux administrateurs, lecture comprise (les adresses portent souvent un
-jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
+jeton). Avec un jeton d'API en lecture seule, `GET` masque les secrets :
+`url` garde seulement le schéma et l'hôte (`https://discord.com/•••`), `token`
+vaut `•••` et `kind` est toujours donné. Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
 `config.toml` ; appliqués sans redémarrage. 20 au plus.
 
 ```json
@@ -1015,7 +1026,8 @@ jeton). Écrits dans `webhooks.ui.toml` (0600), qui remplace `[[webhooks]]` de
   {camera}", "priority": 5 } }`. Un titre ou un texte absent ou vide garde
   le message habituel ; 500 caractères au plus. Variables : `{camera}`,
   `{heure}`, `{date}` (heure locale du serveur) partout ; événements
-  `{objet}`, `{objets}`, `{zones}`, `{duree}` (fin) ; passages `{ligne}`,
+  `{objet}`, `{objets}` (avec la plaque lue : « Voiture 92 % (AB123CD) »),
+  `{plaque}` (plaques lues), `{zones}`, `{duree}` (fin) ; passages `{ligne}`,
   `{sens}`, `{compte}`, `{objet}` ; stockage `{stockage}`, `{etat}`
   (« dégradé » / « rétabli »), `{erreur}` ; caméra `{etat}` (« hors ligne » /
   « rétablie »), `{erreur}`, `{duree}` ; enregistrement `{etat}` (« en
@@ -1298,7 +1310,9 @@ l'interface et appliqués sans redémarrage :
   "active": "onnx", "device": "CPU", "error": null, "failures": 0, "failure": null,
   "onnx_available": true, "detection_ready": true, "managed": true,
   "models": [{ "id": "yolox_nano", "name": "YOLOX-nano", "bytes": 3659407, "license": "Apache-2.0", "hint": "Le plus léger : …",
-              "path": "/var/lib/rustnvr/recordings/.rustnvr/models/yolox_nano.onnx", "downloaded": false }] }
+              "path": "/var/lib/rustnvr/recordings/.rustnvr/models/yolox_nano.onnx", "downloaded": false }],
+  "plate_models": [{ "id": "plate_detector", "name": "Plaques : détecteur YOLOv9-t 384", "bytes": 7771218, "…": "…" },
+                   { "id": "plate_reader", "name": "Plaques : lecteur CCT-S v2", "bytes": 5262230, "…": "…" }] }
 ```
 
 - `failures` : analyses d'événements (et de passages) en échec de suite
@@ -1339,6 +1353,18 @@ l'interface et appliqués sans redémarrage :
   bon fichier est déjà là. 404 pour un modèle inconnu, 500 avec la raison si le
   téléchargement échoue (pas d'accès à Internet, empreinte inattendue). Le
   modèle n'est utilisé qu'après un `PUT /ai` avec son `path`.
+- `plates` (défaut `false`) : lit la plaque des véhicules reconnus (`car`,
+  `truck`, `bus`, `motorcycle`) sur une image du flux principal, avec les
+  deux modèles de `plate_models` (détecteur puis lecteur, à télécharger tous
+  les deux par `POST /ai/models/{id}` : `plate_detector`, `plate_reader`) ;
+  la plaque va dans `objects[].plate` de l'événement.
+- `known_plates` (facultatif, 500 au plus) : `[{ "plate": "AB-123-CD",
+  "name": "Voiture de Paul" }]` ; une plaque lue égale (lettres et chiffres
+  seulement, en majuscules) porte `objects[].plate_owner` = ce nom. 400 si
+  une plaque n'a pas 2 à 16 lettres ou chiffres, figure deux fois, ou si un
+  nom est vide ou dépasse 64 caractères. Sans les deux modèles,
+  ou sans la fonction `onnx`, rien n'est lu (journal « plate reading
+  unavailable »). Voir docs/AI.md.
 - `keep_pictures` (défaut `false`) : chaque image analysée (images des
   événements et des passages de ligne vérifiés) est gardée avec ce qui y a
   été trouvé, rien compris, dans la destination par défaut :
@@ -1349,7 +1375,7 @@ l'interface et appliqués sans redémarrage :
   jours plus vieux que `retention_days` de cette destination sont effacés
   (vérifié chaque minute) ; pas de rétention : gardés.
 
-### `GET /api/v1/ai/captures` · `GET /api/v1/ai/captures/{camera}/{day}[/{file}]` · `DELETE /api/v1/ai/captures/{camera}/{day}` · `POST /api/v1/ai/replay`
+### `GET /api/v1/ai/captures` · `GET /api/v1/ai/captures/{camera}/{day}[/{file}]` · `DELETE /api/v1/ai/captures/{camera}/{day}[/{file}]` · `POST /api/v1/ai/replay`
 
 Images gardées par `keep_pictures` et rejeu de la reconnaissance dessus.
 
@@ -1360,7 +1386,9 @@ Images gardées par `keep_pictures` et rejeu de la reconnaissance dessus.
   `[{ "file", "at_ms", "event", "picture", "line", "provider", "ms", "found",
   "kept" }]` ; `…/{file}` : le JPEG. Les noms sont vérifiés (identifiant de
   caméra, `AAAA-MM-JJ`, nom de fichier sans `/`) : 400 sinon.
-- `DELETE /ai/captures/{camera}/{day}` (administrateur) : `{ "deleted": 12 }`.
+- `DELETE /ai/captures/{camera}/{day}` (administrateur) : `{ "deleted": 12 }` ;
+  `…/{file}` : la seule image, avec son `.json` (`{ "deleted": 1 }`, 404 si
+  elle n'existe pas).
 - `POST /ai/replay` `{ "camera", "day", "file"? }` (administrateur) : analyse
   de nouveau les images du jour (200 au plus), ou la seule image `file` (404
   si elle n'existe pas ; page « Images » de l'interface), avec le fournisseur et les
@@ -1480,7 +1508,7 @@ après 2 images consécutives avec mouvement, se termine après
 `motion.post_seconds` sans mouvement (sa fin est le dernier mouvement vu) et
 est découpé au-delà de `motion.max_event_seconds`.
 
-### `GET /api/v1/events?camera=&from=&to=&limit=&objects=&zones=`
+### `GET /api/v1/events?camera=&from=&to=&limit=&objects=&zones=&plate=`
 
 Événements chevauchant `[from, to)` (par défaut les dernières 24 h), du plus
 récent au plus ancien ; `kind` : `motion`, ou `manual` (bouton Home
@@ -1493,7 +1521,9 @@ Recherche faite par le serveur (sur un mois entier, avant `limit`) :
 `objects=person,dog` ne garde que les événements où l'un de ces objets a été
 reconnu ; `zones=Allée,Portail` ceux qui ont bougé dans l'une de ces zones,
 ou dont un objet reconnu y est. Valeurs séparées par des virgules, 64 au
-plus, 64 caractères chacune.
+plus, 64 caractères chacune. `plate=AB-123` garde ceux où une plaque lue
+contient ce texte (espaces, tirets et points enlevés, majuscules ou
+minuscules ; lettres et chiffres seulement, 16 au plus, 400 sinon).
 
 ```json
 [ { "id": "42", "camera": "jardin", "kind": "motion",
@@ -1556,6 +1586,16 @@ Seules les lignes ayant au moins un passage sur la période sont listées,
 plus les lignes qui comptent les présences (`present` : qui est à
 l'intérieur ; `null` pour les autres lignes). 400 pour une autre période,
 503 sans base de données.
+
+### `DELETE /api/v1/events/{id}[?video=true]`
+
+Administrateur. Supprime un événement terminé et sa vignette ; les autres
+événements de son trajet restent ensemble (le trajet prend le nom du premier
+qui reste, et n'en est plus un avec un seul événement). `video=true` supprime
+aussi les segments de sa caméra qui le recouvrent, en entier (avec ce qu'ils
+contiennent d'autre), sauf ceux d'une période protégée :
+`{ "recordings_deleted": 1, "recordings_protected": 0 }`. 409 pour un
+événement en cours, 404 s'il n'existe pas.
 
 ### `GET /api/v1/events/{id}/thumbnail`
 

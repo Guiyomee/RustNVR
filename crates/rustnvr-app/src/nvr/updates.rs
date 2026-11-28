@@ -90,9 +90,14 @@ async fn latest(config: &UpdatesConfig, repository: &str) -> Result<Option<Relea
         }
         code => return Err(format!("réponse inattendue du dépôt ({code})")),
     }
-    response
-        .json::<Release>()
+    // A release description is a few KiB; 1 MiB leaves plenty of room.
+    let (body, cut) = super::webhooks::read_capped(response, 1 << 20)
         .await
+        .map_err(|e| format!("réponse illisible du dépôt : {e}"))?;
+    if cut {
+        return Err("réponse du dépôt trop grande".to_owned());
+    }
+    serde_json::from_slice::<Release>(&body)
         .map(Some)
         .map_err(|e| format!("réponse illisible du dépôt : {e}"))
 }

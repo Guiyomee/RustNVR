@@ -70,7 +70,7 @@ pub fn self_signed(dir: &Path, names: Vec<String>) -> Result<(PathBuf, PathBuf),
     // library's 1975 to 4096.
     let (from, to) = validity(
         jiff::Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .date(),
     );
     params.not_before = rcgen::date_time_ymd(from.0, from.1, from.2);

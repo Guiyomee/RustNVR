@@ -86,10 +86,9 @@ pub(crate) fn threads() -> usize {
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
-/// A YOLOX model opened with ONNX Runtime, the side of its square input
-/// (416 when the model does not fix it, as with tract) and the threads it
-/// uses. `Ok(None)`: no library installed, tract is used.
-pub(crate) fn load(model: &Path) -> Result<Option<(Session, usize, PathBuf, usize)>, String> {
+/// A model opened with ONNX Runtime, the library and the threads it uses.
+/// `Ok(None)`: no library installed, tract is used.
+pub(crate) fn open(model: &Path) -> Result<Option<(Session, PathBuf, usize)>, String> {
     let Some((env, library)) = environment()? else {
         return Ok(None);
     };
@@ -103,7 +102,12 @@ pub(crate) fn load(model: &Path) -> Result<Option<(Session, usize, PathBuf, usiz
         .with_intra_op_spinning(false)
         .map_err(|e| fail(&e))?;
     let session = builder.commit_from_file(model).map_err(|e| fail(&e))?;
-    let size = session
+    Ok(Some((session, library.clone(), threads)))
+}
+
+/// Side of the square `1×3×side×side` input of `session`, if it fixes one.
+pub(crate) fn square_input(session: &Session) -> Option<usize> {
+    session
         .inputs()
         .first()
         .and_then(|input| match input.dtype() {
@@ -113,19 +117,50 @@ pub(crate) fn load(model: &Path) -> Result<Option<(Session, usize, PathBuf, usiz
             },
             _ => None,
         })
-        .unwrap_or(416);
-    Ok(Some((session, size, library.clone(), threads)))
+}
+
+/// A YOLOX model opened with ONNX Runtime, the side of its square input
+/// (416 when the model does not fix it, as with tract) and the threads it
+/// uses. `Ok(None)`: no library installed, tract is used.
+pub(crate) fn load(model: &Path) -> Result<Option<(Session, usize, PathBuf, usize)>, String> {
+    let Some((session, library, threads)) = open(model)? else {
+        return Ok(None);
+    };
+    let size = square_input(&session).unwrap_or(416);
+    Ok(Some((session, size, library, threads)))
 }
 
 /// Runs the model on `input` (1×3×size×size): the rows of its first output.
 pub(crate) fn run(session: &mut Session, input: Vec<f32>, size: usize) -> Result<Vec<f32>, String> {
-    let tensor = Tensor::from_array(([1usize, 3, size, size], input.into_boxed_slice()))
-        .map_err(|e| e.to_string())?;
+    run_input(session, [1, 3, size, size], input, None)
+}
+
+/// Runs `session` on one input of `shape`: the values of the output named
+/// `output` (the first one when `None`).
+pub(crate) fn run_input<T>(
+    session: &mut Session,
+    shape: [usize; 4],
+    input: Vec<T>,
+    output: Option<&str>,
+) -> Result<Vec<f32>, String>
+where
+    T: ort::value::PrimitiveTensorElementType + std::fmt::Debug + Clone + 'static,
+{
+    let index = match output {
+        Some(name) => session
+            .outputs()
+            .iter()
+            .position(|o| o.name() == name)
+            .ok_or_else(|| format!("the model has no output {name:?}"))?,
+        None => 0,
+    };
+    let tensor =
+        Tensor::from_array((shape, input.into_boxed_slice())).map_err(|e| e.to_string())?;
     let outputs = session
         .run(ort::inputs![tensor])
         .map_err(|e| format!("inference: {e}"))?;
-    let (_, rows) = outputs[0]
+    let (_, values) = outputs[index]
         .try_extract_tensor::<f32>()
         .map_err(|e| e.to_string())?;
-    Ok(rows.to_vec())
+    Ok(values.to_vec())
 }

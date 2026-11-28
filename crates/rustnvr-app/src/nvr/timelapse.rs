@@ -40,11 +40,15 @@ static ONE_AT_A_TIME: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new
 /// Start and end (ms since the Unix epoch) of a local day.
 fn day_bounds(day: jiff::civil::Date) -> Option<(i64, i64)> {
     let tz = jiff::tz::TimeZone::system();
-    let start = day.to_zoned(tz.clone()).ok()?.timestamp().as_millisecond();
+    let start = day
+        .to_zoned_datetime(tz.clone())
+        .ok()?
+        .timestamp()
+        .as_millisecond();
     let end = day
         .tomorrow()
         .ok()?
-        .to_zoned(tz)
+        .to_zoned_datetime(tz)
         .ok()?
         .timestamp()
         .as_millisecond();
@@ -53,7 +57,7 @@ fn day_bounds(day: jiff::civil::Date) -> Option<(i64, i64)> {
 
 /// The local day before today.
 fn yesterday() -> Option<jiff::civil::Date> {
-    jiff::Zoned::now().date().yesterday().ok()
+    jiff::ZonedDateTime::now().date().yesterday().ok()
 }
 
 /// Storage destinations with a folder of their own: `(id, root)`.
@@ -369,7 +373,7 @@ async fn convert(
 
 /// Removes the time-lapses older than `KEEP_DAYS`. Blocking.
 fn purge(roots: &[(String, PathBuf)]) {
-    let Some(limit) = jiff::Zoned::now()
+    let Some(limit) = jiff::ZonedDateTime::now()
         .date()
         .checked_sub(jiff::Span::new().days(KEEP_DAYS))
         .ok()
@@ -559,7 +563,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tmp");
         let dir = root.path().join(DIR).join("garage");
         std::fs::create_dir_all(&dir).expect("dir");
-        let today = jiff::Zoned::now().date();
+        let today = jiff::ZonedDateTime::now().date();
         let old = today
             .checked_sub(jiff::Span::new().days(KEEP_DAYS + 1))
             .expect("old");

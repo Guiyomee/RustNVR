@@ -125,7 +125,10 @@ Exemple de message `event` :
 sans zones).
 
 `objects` : objets reconnus par l'IA optionnelle (voir [AI.md](AI.md)), par
-exemple `[{"label":"person","score":0.87,"bbox":[0.25,0.25,0.5,0.75],"zone":"Allée"}]` (`zone` : zone de détection où se trouve l'objet, s'il y en a une) ; un
+exemple `[{"label":"person","score":0.87,"bbox":[0.25,0.25,0.5,0.75],"zone":"Allée"}]` (`zone` : zone de détection où se trouve l'objet, s'il y en a une ;
+`plate` : plaque lue sur un véhicule, `"AB123CD"`, avec la lecture des
+plaques de [AI.md](AI.md) ; `plate_owner` : son nom quand c'est une plaque
+connue) ; un
 message `event` supplémentaire est publié quand l'analyse se termine.
 
 Les messages de découverte sont publiés (retenus) sous

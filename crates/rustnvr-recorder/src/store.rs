@@ -106,7 +106,7 @@ pub fn parse_segment_start_ms(name: &str) -> Option<i64> {
     .ok()?;
     let ts = date
         .to_datetime(time)
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .ok()?;
     Some(ts.timestamp().as_millisecond())
 }

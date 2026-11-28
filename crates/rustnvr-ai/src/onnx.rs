@@ -254,6 +254,8 @@ impl OnnxDetector {
                     (c.y1 / height as f32).clamp(0.0, 1.0),
                 ]),
                 zone: None,
+                plate: None,
+                plate_owner: None,
             })
             .collect())
     }
@@ -330,7 +332,7 @@ impl ObjectDetector for SharedOnnx {
     }
 }
 
-fn decode_rgb(jpeg: &[u8]) -> Result<(Vec<u8>, usize, usize), AiError> {
+pub(crate) fn decode_rgb(jpeg: &[u8]) -> Result<(Vec<u8>, usize, usize), AiError> {
     let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
     let mut decoder = JpegDecoder::new_with_options(ZCursor::new(jpeg), options);
     let pixels = decoder

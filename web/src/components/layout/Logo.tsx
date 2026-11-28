@@ -6,7 +6,7 @@
 export function Logo({ compact = false }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-2.5">
-      <svg viewBox="0 0 32 32" className="size-8 shrink-0" aria-hidden>
+      <svg viewBox="0 0 32 32" className="size-9 shrink-0" aria-hidden>
         <rect width="32" height="32" rx="8" fill="#1C2128" />
         <circle cx="16" cy="16" r="10" fill="none" stroke="#C8642B" strokeWidth="3" />
         <circle cx="16" cy="16" r="5.5" fill="#C8642B" />

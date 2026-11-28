@@ -1,6 +1,7 @@
 //! Checks of the picture itself while the stream flows: a picture that no
 //! longer changes at all (the camera's encoder is stuck) or that became
-//! uniform at once (lens covered, camera masked, light switched off).
+//! uniform or blurred at once (lens covered, camera masked by a hand, light
+//! switched off).
 //!
 //! The « camera offline » alarm only sees a stream that stops; these see a
 //! stream that goes on with a useless picture. Both look at the small grey
@@ -28,8 +29,23 @@ const SAME_RATIO: usize = 5_000;
 const UNIFORM_BELOW: f32 = 5.0;
 /// … and from which it shows something (again).
 const DETAIL_FROM: f32 = 12.0;
-/// A uniform picture counts as covered only when it showed something this
-/// shortly before: night falling darkens a picture slowly, not at once.
+/// The picture lost its detail when the difference between neighbouring
+/// pixels falls this many times below its usual value: a hand in front of
+/// the lens lets light through (a grey-pink gradient, the camera's text
+/// still drawn on it), so the picture is not uniform, but its detail falls
+/// by ten (garage camera, 22/11: about 30 → 2 to 4).
+const DETAIL_COLLAPSE: f32 = 5.0;
+/// … and it shows something again from this fraction of its usual value.
+const DETAIL_RECOVER: f32 = 2.0;
+/// A picture whose usual detail is below this (fog, a plain wall) is too
+/// smooth to tell a hand from its own noise: only « uniform » counts there.
+const DETAIL_MIN_USUAL: f32 = 2.0;
+/// Weight of each new picture in the usual detail (about 20 s of memory:
+/// dusk and fog are slower than that, a hand is not).
+const DETAIL_WEIGHT: f32 = 0.05;
+/// A uniform or blurred picture counts as covered only when it showed
+/// something this shortly before: night falling darkens a picture slowly,
+/// not at once.
 const SUDDEN_MS: i64 = 10_000;
 /// One pixel in…
 const STEP: usize = 4;
@@ -39,6 +55,11 @@ const STEP: usize = 4;
 pub struct PictureCheck {
     /// Sampled pixels (visible ones only).
     pixels: Vec<u32>,
+    /// Width of a picture, to find the right neighbour of a pixel.
+    width: usize,
+    /// Usual detail of the picture (mean difference between neighbouring
+    /// pixels), followed slowly while the picture is not blurred.
+    usual_detail: Option<f32>,
     /// Bytes of a picture.
     len: usize,
     last_ms: Option<i64>,
@@ -51,6 +72,18 @@ pub struct PictureCheck {
     /// Since when the picture is uniform, after becoming so at once.
     uniform_since_ms: Option<i64>,
     reported: Option<PictureProblem>,
+}
+
+/// Mean difference between each sampled pixel and its right neighbour.
+fn detail(picture: &[u8], pixels: &[u32], width: usize) -> f32 {
+    let (sum, n) = pixels
+        .iter()
+        .map(|&p| p as usize)
+        .filter(|p| (p + 1) % width != 0 && p + 1 < picture.len())
+        .fold((0u64, 0u64), |(sum, n), p| {
+            (sum + u64::from(picture[p].abs_diff(picture[p + 1])), n + 1)
+        });
+    if n == 0 { 0.0 } else { sum as f32 / n as f32 }
 }
 
 /// Standard deviation of `values`.
@@ -77,6 +110,8 @@ impl PictureCheck {
                 .into_iter()
                 .step_by(STEP)
                 .collect(),
+            width,
+            usual_detail: None,
             len: width * height,
             last_ms: None,
             reference: Vec::new(),
@@ -125,11 +160,23 @@ impl PictureCheck {
         }
 
         let spread = spread(&values);
+        let detail = detail(picture, &self.pixels, self.width);
+        let usual = self.usual_detail;
+        let blurred = usual.is_some_and(|u| u >= DETAIL_MIN_USUAL && detail * DETAIL_COLLAPSE < u);
+        let sharp = usual.is_none_or(|u| detail * DETAIL_RECOVER >= u);
+        // The usual detail follows slow changes (dusk, fog, infrared), not a
+        // blurred or covered picture.
+        if !blurred && spread >= UNIFORM_BELOW && self.reported != Some(PictureProblem::Covered) {
+            self.usual_detail = Some(match usual {
+                Some(u) => u + (detail - u) * DETAIL_WEIGHT,
+                None => detail,
+            });
+        }
         let had_detail = self.detail_ms.is_some_and(|t| now_ms - t <= SUDDEN_MS);
-        if spread >= DETAIL_FROM {
+        if spread >= DETAIL_FROM && sharp {
             self.detail_ms = Some(now_ms);
             self.uniform_since_ms = None;
-        } else if spread < UNIFORM_BELOW {
+        } else if spread < UNIFORM_BELOW || blurred {
             if self.uniform_since_ms.is_none() && had_detail {
                 self.uniform_since_ms = Some(now_ms);
             }
@@ -240,6 +287,26 @@ mod tests {
         });
         assert_eq!(changes, [(80, Some(PictureProblem::Covered))]);
         let mut seed = 4;
+        assert_eq!(c.update(200_000, &scene(&mut seed, 3)), Some(None));
+    }
+
+    /// A hand in front of the lens: light passes between the fingers (a
+    /// gradient, far from uniform), but the detail is gone.
+    #[test]
+    fn a_picture_blurred_at_once_is_covered_after_a_minute() {
+        let mut c = check();
+        let mut seed = 9;
+        let hand: Vec<u8> = (0..W * H).map(|i| (60 + (i % W) / 2) as u8).collect();
+        assert!(spread(&hand) > 20.0, "not uniform");
+        let changes = run(&mut c, 0, 200, |s| {
+            if s < 20 {
+                scene(&mut seed, 3)
+            } else {
+                hand.clone()
+            }
+        });
+        assert_eq!(changes, [(80, Some(PictureProblem::Covered))]);
+        let mut seed = 10;
         assert_eq!(c.update(200_000, &scene(&mut seed, 3)), Some(None));
     }
 

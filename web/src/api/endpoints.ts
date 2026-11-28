@@ -37,7 +37,6 @@ import type {
   ExportResult,
   GeneralSettings,
   GeneralSettingsInput,
-  Journey,
   JourneySettings,
   MotionSettings,
   MqttInput,
@@ -109,12 +108,13 @@ export function liveUrl(id: string, opts: { stream?: LiveStream; transcode?: boo
 }
 
 // Detection events (capabilities.events).
-export const getEvents = (q: { camera: string | null; fromMs: number; toMs: number; limit?: number; objects?: string[] | null; zones?: string[] | null }, signal?: AbortSignal) => {
+export const getEvents = (q: { camera: string | null; fromMs: number; toMs: number; limit?: number; objects?: string[] | null; zones?: string[] | null; plate?: string | null }, signal?: AbortSignal) => {
   const p = new URLSearchParams({ from: String(Math.floor(q.fromMs)), to: String(Math.ceil(q.toMs)), limit: String(q.limit ?? 500) })
   if (q.camera) p.set('camera', q.camera)
   // Searched by the server (a month of events), not here.
   if (q.objects?.length) p.set('objects', q.objects.join(','))
   if (q.zones?.length) p.set('zones', q.zones.join(','))
+  if (q.plate) p.set('plate', q.plate)
   return apiGet<NvrEvent[]>(`/events?${p.toString()}`, 20_000, signal)
 }
 
@@ -126,7 +126,6 @@ export const setMotion = (id: string, settings: MotionSettings) =>
 // Journeys between cameras (capabilities.journeys).
 export const getJourneySettings = () => apiGet<JourneySettings>('/journeys/settings')
 export const setJourneySettings = (settings: JourneySettings) => apiSend<JourneySettings>('PUT', '/journeys/settings', settings, 20_000)
-export const getJourney = (id: string) => apiGet<Journey>(`/journeys/${encodeURIComponent(id)}`)
 /** One MP4 of a journey, its cameras one after the other (capabilities.export). */
 export const exportJourney = (id: string) => apiSend<ExportResult>('POST', `/journeys/${encodeURIComponent(id)}/export`, undefined, 30 * 60_000)
 
@@ -336,6 +335,8 @@ export const captureUrl = (camera: string, day: string, file: string) =>
   `${API_BASE}/ai/captures/${encodeURIComponent(camera)}/${encodeURIComponent(day)}/${encodeURIComponent(file)}`
 export const deleteCaptureDay = (camera: string, day: string) =>
   apiSend<{ deleted: number }>('DELETE', `/ai/captures/${encodeURIComponent(camera)}/${encodeURIComponent(day)}`)
+export const deleteCapture = (camera: string, day: string, file: string) =>
+  apiSend<{ deleted: number }>('DELETE', `/ai/captures/${encodeURIComponent(camera)}/${encodeURIComponent(day)}/${encodeURIComponent(file)}`)
 // Up to 200 pictures, about 0.5 s each with CodeProject.AI on a processor;
 // one picture (`file`) with YOLOX-x takes a few seconds.
 export const replayCaptures = (camera: string, day: string, file?: string) =>
@@ -361,3 +362,10 @@ export const getVideoDevices = () => apiGet<{ devices: VideoDevice[] }>('/device
 // Live preview of a webcam in the camera form (a minute, motion JPEG).
 export const usbPreview = (usb: NonNullable<CameraInput['usb']>) =>
   apiSend<{ preview: string }>('POST', '/cameras/usb/preview', usb, 30_000)
+
+// Deleting by hand (administrators): a recording (its `url` from
+// `GET /cameras/{id}/recordings`), an event with or without the recordings
+// it is in. 409 for a protected recording or an event still going on.
+export const deleteRecording = (url: string) => apiSend<void>('DELETE', url.slice(url.indexOf('/api/v1') + '/api/v1'.length))
+export const deleteEvent = (id: string, video: boolean) =>
+  apiSend<{ recordings_deleted: number; recordings_protected: number }>('DELETE', `/events/${encodeURIComponent(id)}${video ? '?video=true' : ''}`)

@@ -241,7 +241,7 @@ async fn make(shared: &Shared, settings: &AutoBackupConfig, at_ms: i64) -> Resul
         .map_err(|e| e.to_string())?;
     let stamp = jiff::Timestamp::from_millisecond(at_ms)
         .unwrap_or_else(|_| jiff::Timestamp::now())
-        .to_zoned(jiff::tz::TimeZone::system())
+        .to_zoned_datetime(jiff::tz::TimeZone::system())
         .strftime("%Y%m%d-%H%M%S")
         .to_string();
     let name = format!("{PREFIX}{stamp}{SUFFIX}");

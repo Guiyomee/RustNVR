@@ -1,5 +1,5 @@
 import { GripVertical, Maximize, Moon } from 'lucide-react'
-import { memo, useRef, useState, type ReactNode } from 'react'
+import { memo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useCapability, useIsDemo } from '../../data/DataContext'
 import { useInView } from '../../hooks/useUi'
 import { formatBitrate, formatNumber, formatResolution } from '../../lib/format'
@@ -19,6 +19,19 @@ function fullscreenReason(demo: boolean, live: boolean | null, camera: Camera): 
   return null
 }
 
+/** A tile is video: dark in both themes (its texts are white on the picture). */
+const DARK_TILE = {
+  '--color-bg': '#0d0f12',
+  '--color-bg-2': '#0a0c0e',
+  '--color-card': '#14171b',
+  '--color-line': '#252a31',
+  '--color-fg': '#e8eaed',
+  '--color-muted': '#8b93a1',
+  '--color-warn': '#f59e0b',
+  '--color-err': '#ef5350',
+  '--color-ok': '#3fb97a',
+} as CSSProperties
+
 export const CameraCard = memo(function CameraCard({ camera, handle }: { camera: Camera; handle?: ReactNode }) {
   const demo = useIsDemo()
   const live = useCapability('live_video')
@@ -26,45 +39,64 @@ export const CameraCard = memo(function CameraCard({ camera, handle }: { camera:
   const href = `/cameras/${encodeURIComponent(camera.id)}`
   const reason = fullscreenReason(demo, live, camera)
 
+  const motion = camera.motion.active
   return (
-    <article className="card group flex min-w-0 flex-col overflow-hidden">
-      <header className="flex items-center justify-between gap-2 px-3 py-2.5">
-        <div className="flex min-w-0 items-center gap-1.5">
-          {handle}
-          <Link to={href} className="min-w-0 truncate text-sm font-semibold hover:text-accent">
-            {camera.name}
-          </Link>
-        </div>
-        <span className="flex items-center gap-2">
-          {camera.night && <Moon className="size-3.5 text-muted" aria-label={t('Vision nocturne', 'Night vision')} />}
-          <CameraStatusBadge status={camera.status} demo={demo} />
-        </span>
-      </header>
+    <article
+      ref={ref}
+      className="group @container relative aspect-video min-w-0 overflow-hidden rounded-[var(--radius-card)] bg-black text-fg"
+      style={DARK_TILE}
+    >
       <div
-        ref={ref}
         role="link"
         tabIndex={0}
         aria-label={t(`Ouvrir ${camera.name}`, `Open ${camera.name}`)}
         onClick={() => navigate(href)}
         onKeyDown={(e) => e.key === 'Enter' && navigate(href)}
-        className="relative aspect-video cursor-pointer bg-bg-2"
+        className="absolute inset-0 cursor-pointer"
       >
         <CameraPlayer camera={camera} active={visible} />
-        <div className="pointer-events-none absolute top-2 left-2 flex gap-1">
+      </div>
+      {/* Name and badges over the picture, on a shade that keeps them readable. */}
+      <div className="pointer-events-none absolute inset-0 flex flex-col justify-between bg-[linear-gradient(rgba(0,0,0,0.55),rgba(0,0,0,0)_35%,rgba(0,0,0,0)_65%,rgba(0,0,0,0.6))] p-2.5">
+        <div className="flex items-center gap-2">
+          {handle && <span className="pointer-events-auto text-white/80">{handle}</span>}
+          <Link to={href} className="pointer-events-auto min-w-0 truncate text-sm font-semibold text-white hover:underline">
+            {camera.name}
+          </Link>
+          {camera.night && <Moon className="size-3.5 shrink-0 text-white/80" aria-label={t('Vision nocturne', 'Night vision')} />}
+          <span className="flex-1" />
           {demo && <Badge tone="demo">{t('Démo', 'Demo')}</Badge>}
-          {!demo && <RecordingBadge camera={camera} overlay />}
-          {camera.motion.active && <Badge tone="warn">{t('Mouvement', 'Motion')}</Badge>}
+          {motion && <span className="rounded-md bg-motion px-2 py-0.5 text-[11px] font-bold tracking-wide text-[#1a1407] uppercase">{t('Mouvement', 'Motion')}</span>}
+          {/* Badges on one line each; on a narrow card, a camera that is not
+              online shows only its state (« Hors ligne » says enough). */}
+          {!demo && (
+            <span className={`shrink-0 whitespace-nowrap ${camera.status !== 'online' ? 'hidden @[24rem]:inline' : ''}`}>
+              <RecordingBadge camera={camera} overlay />
+            </span>
+          )}
+          {camera.status !== 'online' && (
+            <span className="shrink-0 whitespace-nowrap rounded bg-black/60 px-1.5 py-0.5">
+              <CameraStatusBadge status={camera.status} demo={demo} />
+            </span>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 font-mono text-[11px] text-white/90">
+          {/* Left free: the live view writes its time there. */}
+          {camera.status === 'online' && (
+            <>
+              <span className="hidden rounded bg-black/55 px-1.5 py-0.5 whitespace-nowrap @[26rem]:inline" title={t('Images par seconde mesurées · débit reçu', 'Measured frames per second · received bitrate')}>
+                {camera.fps === null ? t('— i/s', '— fps') : t(`${formatNumber(camera.fps, 1)} i/s`, `${formatNumber(camera.fps, 1)} fps`)} · {formatBitrate(camera.bitrate_kbps)}
+              </span>
+              <span className="rounded bg-black/55 px-1.5 py-0.5 whitespace-nowrap" title={t('Codec', 'Codec')}>{camera.codec?.toUpperCase() ?? '—'}</span>
+              <span className="rounded bg-black/55 px-1.5 py-0.5 whitespace-nowrap" title={t('Résolution', 'Resolution')}>{formatResolution(camera.width, camera.height)}</span>
+            </>
+          )}
+          <span className="pointer-events-auto rounded-md bg-black/55 text-white">
+            <IconButton label={t('Plein écran', 'Full screen')} icon={<Maximize className="size-4" />} disabledReason={reason} onClick={() => void ref.current?.requestFullscreen().catch(() => undefined)} />
+          </span>
         </div>
       </div>
-      <footer className="flex items-center justify-between gap-2 px-3 py-2 text-xs text-muted">
-        <div className="flex min-w-0 flex-wrap gap-x-3 gap-y-0.5 tabular">
-          <span title={t('Résolution', 'Resolution')}>{formatResolution(camera.width, camera.height)}</span>
-          <span title={t('Images par seconde mesurées', 'Measured frames per second')}>{camera.fps === null ? t('— i/s', '— fps') : t(`${formatNumber(camera.fps, 1)} i/s`, `${formatNumber(camera.fps, 1)} fps`)}</span>
-          <span title={t('Codec', 'Codec')}>{camera.codec?.toUpperCase() ?? '—'}</span>
-          <span title={t('Débit reçu', 'Received bitrate')} className="hidden sm:inline">{formatBitrate(camera.bitrate_kbps)}</span>
-        </div>
-        <IconButton label={t('Plein écran', 'Full screen')} icon={<Maximize className="size-4" />} disabledReason={reason} onClick={() => void ref.current?.requestFullscreen().catch(() => undefined)} />
-      </footer>
+      {motion && <div className="pointer-events-none absolute inset-0 rounded-[var(--radius-card)] border-2 border-motion" aria-hidden />}
     </article>
   )
 })
@@ -73,7 +105,7 @@ export const CameraCard = memo(function CameraCard({ camera, handle }: { camera:
 export type GridColumns = 'auto' | 1 | 2 | 3 | 4
 
 const GRID_CLASS: Record<GridColumns, string> = {
-  auto: 'md:grid-cols-2 min-[1800px]:grid-cols-3 min-[2400px]:grid-cols-4',
+  auto: 'md:grid-cols-2 min-[1500px]:grid-cols-3 min-[2400px]:grid-cols-4',
   1: '',
   2: 'md:grid-cols-2',
   3: 'md:grid-cols-2 xl:grid-cols-3',
@@ -133,7 +165,7 @@ export function CameraGrid({ cameras, columns = 'auto', onReorder }: { cameras: 
     if (target && onReorder) onReorder(moveId(ids, id, target))
   }
   return (
-    <div className={`grid grid-cols-1 gap-4 ${GRID_CLASS[columns]}`}>
+    <div className={`grid grid-cols-1 gap-3 ${GRID_CLASS[columns]}`}>
       {cameras.map((c) =>
         onReorder ? (
           <div

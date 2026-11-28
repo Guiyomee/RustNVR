@@ -252,7 +252,8 @@ impl Display for WallTime {
 impl From<WallTime> for SystemTime {
     #[inline]
     fn from(wall_time: WallTime) -> Self {
-        wall_time.0.into()
+        // A time read from this clock always fits in a `SystemTime`.
+        SystemTime::try_from(wall_time.0).unwrap_or(SystemTime::UNIX_EPOCH)
     }
 }
 

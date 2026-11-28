@@ -8,7 +8,7 @@ export const toneText: Record<Tone, string> = {
   ok: 'text-ok',
   warn: 'text-warn',
   err: 'text-err',
-  info: 'text-accent',
+  info: 'text-info',
   neutral: 'text-muted',
 }
 
@@ -16,7 +16,7 @@ const toneDot: Record<Tone, string> = {
   ok: 'bg-ok',
   warn: 'bg-warn',
   err: 'bg-err',
-  info: 'bg-accent',
+  info: 'bg-info',
   neutral: 'bg-muted',
 }
 

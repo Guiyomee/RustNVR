@@ -4,6 +4,9 @@
 //! A segment is converted once by FFmpeg (picture only; the sound is copied),
 //! kept in a bounded cache and then served like any file (Range requests for
 //! seeking). One conversion runs at a time to bound the CPU used.
+//!
+//! Also the picture of a recording (`?thumbnail=1`, page Vidéos): its first
+//! picture, 320 pixels wide, made once by FFmpeg and kept a week.
 
 use crate::routes::ApiError;
 use crate::state::ApiState;
@@ -18,6 +21,13 @@ const CACHE_BYTES: u64 = 2_000_000_000;
 const CACHE_AGE: Duration = Duration::from_secs(24 * 3600);
 /// A conversion taking longer is abandoned.
 const CONVERSION_TIMEOUT: Duration = Duration::from_secs(300);
+/// Pictures of recordings kept, at most, and for how long.
+const THUMBNAIL_BYTES: u64 = 300_000_000;
+const THUMBNAIL_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+/// A picture taking longer is abandoned.
+const THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Pictures made at the same time (a page shows many at once).
+const THUMBNAIL_SLOTS: usize = 2;
 
 /// Cache of converted recordings.
 pub(crate) struct PlaybackConverter {
@@ -26,6 +36,8 @@ pub(crate) struct PlaybackConverter {
     dir: std::sync::OnceLock<PathBuf>,
     /// One conversion at a time.
     lock: tokio::sync::Mutex<()>,
+    /// Pictures of recordings being made.
+    thumbnails: tokio::sync::Semaphore,
 }
 
 impl Default for PlaybackConverter {
@@ -33,6 +45,7 @@ impl Default for PlaybackConverter {
         Self {
             dir: std::sync::OnceLock::new(),
             lock: tokio::sync::Mutex::new(()),
+            thumbnails: tokio::sync::Semaphore::new(THUMBNAIL_SLOTS),
         }
     }
 }
@@ -138,7 +151,69 @@ impl PlaybackConverter {
             ms = started.elapsed().as_millis() as u64,
             "recording converted to H.264 for playback"
         );
-        let _ = tokio::task::spawn_blocking(move || prune(&dir)).await;
+        let _ = tokio::task::spawn_blocking(move || prune(&dir, CACHE_AGE, CACHE_BYTES)).await;
+        Ok(target)
+    }
+
+    /// Path of the picture of `source` (identified by `key`): its first
+    /// picture as a JPEG 320 pixels wide, made first if needed.
+    pub(crate) async fn thumbnail(
+        &self,
+        state: &ApiState,
+        source: &Path,
+        key: &str,
+    ) -> Result<PathBuf, ApiError> {
+        let dir = self.dir().with_file_name("recording-pictures");
+        let target = dir.join(format!("{key}.jpg"));
+        if fresh(&target, source) {
+            return Ok(target);
+        }
+        let _slot = self
+            .thumbnails
+            .acquire()
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        if fresh(&target, source) {
+            return Ok(target);
+        }
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| ApiError::internal(format!("cannot create {}: {e}", dir.display())))?;
+        let partial = dir.join(format!("{key}.part.jpg"));
+        let mut cmd = Command::new(&state.live_settings().ffmpeg);
+        cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i"])
+            .arg(source)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=320:-2",
+                "-q:v",
+                "6",
+                "-f",
+                "image2",
+            ])
+            .arg(&partial)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(THUMBNAIL_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| ApiError::unavailable("picture too long to make"))?
+            .map_err(|e| ApiError::unavailable(format!("cannot start FFmpeg: {e}")))?;
+        if !output.status.success() {
+            let _ = tokio::fs::remove_file(&partial).await;
+            let detail = String::from_utf8_lossy(&output.stderr);
+            let last = crate::hwaccel::failure_reason(&detail).unwrap_or_default();
+            tracing::debug!(recording = key, error = %last, "no picture for the recording");
+            return Err(ApiError::internal(format!("no picture: {last}")));
+        }
+        tokio::fs::rename(&partial, &target)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        let _ =
+            tokio::task::spawn_blocking(move || prune(&dir, THUMBNAIL_AGE, THUMBNAIL_BYTES)).await;
         Ok(target)
     }
 }
@@ -149,8 +224,9 @@ fn fresh(target: &Path, source: &Path) -> bool {
     matches!((modified(target), modified(source)), (Some(t), Some(s)) if t >= s)
 }
 
-/// Removes copies older than a day, then the oldest beyond the size limit.
-fn prune(dir: &Path) {
+/// Removes the files of `dir` older than `max_age`, then the oldest beyond
+/// `max_bytes`.
+fn prune(dir: &Path, max_age: Duration, max_bytes: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -162,7 +238,7 @@ fn prune(dir: &Path) {
             Some((m.modified().ok()?, m.len(), e.path()))
         })
         .filter(|(modified, _, path)| {
-            let old = now.duration_since(*modified).unwrap_or_default() > CACHE_AGE;
+            let old = now.duration_since(*modified).unwrap_or_default() > max_age;
             if old {
                 let _ = std::fs::remove_file(path);
             }
@@ -173,7 +249,7 @@ fn prune(dir: &Path) {
     let mut total = 0;
     for (_, len, path) in files {
         total += len;
-        if total > CACHE_BYTES {
+        if total > max_bytes {
             let _ = std::fs::remove_file(path);
         }
     }

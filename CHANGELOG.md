@@ -5,6 +5,81 @@ précautions) sont sur la page de chaque
 [release](https://github.com/Guiyomee/RustNVR/releases). Versions
 « calendrier » : année.mois.numéro dans le mois.
 
+## 2026.11.11 (2026-11-28)
+
+### Nouveautés
+- **ARM 64 bits** (Raspberry Pi 4 et 5, autres cartes ARM) : une archive
+  `linux-aarch64` pour Debian et Raspberry Pi OS (même `install.sh`), une
+  image Docker pour arm64 en plus d'amd64, et le script Proxmox sur un hôte
+  ARM.
+- **Page Vidéos** : les enregistrements d'une caméra jour par jour, en
+  vignettes (durée, taille, nombre d'événements, cadenas si protégés), à
+  regarder en grand ou à ouvrir dans Lecture.
+- **Supprimer à la main** (administrateurs, avec confirmation) : une
+  corbeille sur chaque vignette au survol, dans Vidéos, Images et
+  Événements, et « Supprimer » (touche Suppr) dans la vidéo ou l'image
+  ouverte. Supprimer un événement garde sa vidéo. Les périodes protégées ne
+  se suppriment pas.
+- **Lecture des plaques d'immatriculation** (facultative, Paramètres →
+  Intelligence artificielle) : quand une voiture, un camion, un bus ou une
+  moto est reconnu, RustNVR lit sa plaque sur une image du flux principal,
+  avec deux petits modèles à télécharger (licence MIT). La plaque s'affiche
+  dans l'événement, part dans MQTT et les webhooks (`{plaque}`), et se
+  cherche dans Événements → « Plaque ». Une plaque n'est gardée que si elle
+  est lue avec une grande confiance. **Plaques connues** : une plaque peut
+  porter un nom (« Voiture de Paul »), affiché avec elle dans l'événement,
+  MQTT (`plate_owner`) et les notifications.
+- **App Home Assistant « RustNVR »** : RustNVR tourne directement dans Home
+  Assistant OS (x86-64), interface dans la barre latérale, enregistrements
+  dans `/media/rustnvr`, MQTT branché tout seul sur Mosquitto (ou sur un
+  autre broker, dans l'onglet Configuration de l'app).
+- **Les apps Home Assistant ont leur propre dépôt**,
+  [RustNVR-HomeAssistant](https://github.com/Guiyomee/RustNVR-HomeAssistant) :
+  « RustNVR » et « RustNVR Proxy ». Pour le Proxy déjà installé : ajoutez ce
+  dépôt, installez « RustNVR Proxy » depuis lui avec les mêmes options, puis
+  désinstallez l'ancienne (sa version 1.2.0 le rappelle).
+
+### Améliorations
+- **Nouvelle apparence** « salle de contrôle » : fonds presque noirs,
+  barre latérale en rail d'icônes, barre du haut avec l'heure, l'état en
+  pastille et les mesures ; boutons, sélection et liens dans le cuivre du
+  logo. Vue d'ensemble réorganisée : caméras en grandes vignettes (nom et
+  badges sur l'image, cadre jaune pendant un mouvement) et activité 24 h à
+  gauche, événements avec filtres (personne, véhicule, animal, mouvement)
+  et stockage à droite.
+- **Couleur au choix** (Paramètres → Général → Couleur) : six couleurs ou
+  une couleur libre, retenue par chaque navigateur et ajustée au thème pour
+  rester lisible.
+- **Sur téléphone** : barre de navigation en bas (Accueil, Événements,
+  Lecture, Plus pour le reste) ; la vue d'ensemble montre une caméra en
+  grand en direct et les autres en petites images (touchez-en une pour
+  l'afficher en grand), puis les événements du jour.
+- **Page Lecture réorganisée** : jour, caméras et boutons (Signet,
+  Protéger, Exporter MP4) sur une ligne ; à côté des vidéos, la liste des
+  événements de la période affichée (un clic fait partir toutes les
+  caméras 5 s avant) ; « Événement suivant » au lieu des segments ; zoom
+  jusqu'à 10 min ; sur téléphone, vidéos sur deux colonnes.
+- Bibliothèques à jour (jiff 1.0, russh-sftp 4, qrcode 0.15, sqlx 0.9.1…).
+
+### Corrections
+- **Image masquée par une main reconnue** : la lumière qui passe entre les
+  doigts rendait l'image floue mais pas uniforme, et l'alerte « image
+  masquée » ne venait jamais. RustNVR regarde maintenant aussi le détail de
+  l'image (la différence entre pixels voisins), qui s'effondre d'un coup.
+- **Le son revient tout seul** quand une caméra s'est connectée sans piste
+  son (caméras EZVIZ qui sortent de veille après RustNVR) : RustNVR vérifie
+  de temps en temps, sans couper l'enregistrement, si la caméra propose de
+  nouveau le son, et se reconnecte dès qu'elle le fait.
+
+### Sécurité
+- Un jeton d'API en lecture seule voit les webhooks sans leurs secrets :
+  l'adresse garde seulement son hôte (`https://discord.com/•••`) et le jeton
+  ntfy ou Telegram est masqué.
+- Le compteur d'échecs de connexion a une taille maximale : une avalanche
+  de noms d'utilisateur inventés ne peut plus remplir la mémoire.
+- Les réponses des serveurs extérieurs (webhooks, IA HTTP, vérification de
+  mise à jour, caméras ONVIF) sont lues avec une taille maximale.
+
 ## 2026.11.10 (2026-11-20)
 
 ### Licence

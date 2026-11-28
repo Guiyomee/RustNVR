@@ -13,6 +13,8 @@ export interface TimelineData {
   /** null when the backend has no events. */
   motion: Record<string, Period[]> | null
   markers: Record<string, TimelineMarker[]> | null
+  /** Events by camera; null when the backend has no events. */
+  events: Record<string, NvrEvent[]> | null
 }
 
 function groupBy<T>(items: T[], key: (t: T) => string): Record<string, T[]> {
@@ -57,6 +59,7 @@ export function useTimelineData(cameraIds: string[], start: number, end: number)
               Object.entries(byCamera).map(([k, v]) => [k, v.map((e) => marker(e))]),
             )
           : null,
+        events: byCamera,
       }
     },
     [source, key, start, end],

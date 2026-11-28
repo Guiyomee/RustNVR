@@ -131,7 +131,7 @@ pub fn video_graph(
 pub fn clock(ms: i64) -> String {
     jiff::Timestamp::from_millisecond(ms)
         .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
+            t.to_zoned_datetime(jiff::tz::TimeZone::system())
                 .strftime("%H:%M:%S")
                 .to_string()
         })
@@ -277,6 +277,8 @@ mod tests {
                     score: 0.9,
                     bbox: None,
                     zone: None,
+                    plate: None,
+                    plate_owner: None,
                 })
                 .collect(),
             journey: Some(1),

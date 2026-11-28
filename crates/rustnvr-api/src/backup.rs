@@ -47,7 +47,9 @@ pub(crate) async fn create(
 ) -> Result<Response, ApiError> {
     admin_only(&principal)?;
     let data = control(&state)?.backup(input.passphrase).await?;
-    let day = jiff::Zoned::now().strftime("%Y%m%d-%H%M").to_string();
+    let day = jiff::ZonedDateTime::now()
+        .strftime("%Y%m%d-%H%M")
+        .to_string();
     Ok((
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
